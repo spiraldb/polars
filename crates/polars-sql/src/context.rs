@@ -2016,9 +2016,10 @@ impl SQLContext {
         // Note: remove the `group_by` keys as Polars adds those implicitly.
         let mut aliased_aggregations: PlHashMap<PlSmallStr, PlSmallStr> = PlHashMap::new();
         let mut aggregation_projection = Vec::with_capacity(projections.len());
-        let mut projection_overrides = PlHashMap::with_capacity(projections.len());
-        let mut projection_aliases = PlHashSet::new();
-        let mut group_key_aliases = PlHashSet::new();
+        let mut projection_overrides: PlHashMap<&str, Expr> =
+            PlHashMap::with_capacity(projections.len());
+        let mut projection_aliases: PlHashSet<&str> = PlHashSet::new();
+        let mut group_key_aliases: PlHashSet<&str> = PlHashSet::new();
 
         // Pre-compute group key data (stripped expression + output name) to avoid repeated work.
         // We check both expression AND output name match to avoid cross-aliasing issues.

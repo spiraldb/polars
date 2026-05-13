@@ -295,6 +295,12 @@ pub(super) fn expand_datasets(
                                 metadata: None,
                             },
 
+                            #[cfg(feature = "vortex")]
+                            FileScanDsl::Vortex { options } => FileScanIR::Vortex {
+                                options,
+                                metadata: None,
+                            },
+
                             #[cfg(feature = "json")]
                             FileScanDsl::NDJson { options } => FileScanIR::NDJson { options },
 

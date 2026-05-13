@@ -72,6 +72,7 @@ serde = [
   "polars-ops/serde",
   "polars-utils/serde",
   "polars-compute/serde",
+  "polars-vortex?/serde",
   "either/serde",
   "slotmap/serde",
 ]

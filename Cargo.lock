@@ -4341,6 +4341,7 @@ dependencies = [
  "polars-testing",
  "polars-time",
  "polars-utils",
+ "polars-vortex",
  "pyo3",
  "rayon",
  "recursive",

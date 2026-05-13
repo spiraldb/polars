@@ -234,6 +234,7 @@ from polars.io import (
     read_parquet,
     read_parquet_metadata,
     read_parquet_schema,
+    read_vortex,
     scan_csv,
     scan_delta,
     scan_iceberg,
@@ -242,6 +243,7 @@ from polars.io import (
     scan_ndjson,
     scan_parquet,
     scan_pyarrow_dataset,
+    scan_vortex,
 )
 from polars.io.cloud import (
     CredentialProvider,
@@ -352,6 +354,7 @@ __all__ = [
     "read_parquet",
     "read_parquet_metadata",
     "read_parquet_schema",
+    "read_vortex",
     "scan_csv",
     "scan_delta",
     "scan_iceberg",
@@ -360,6 +363,7 @@ __all__ = [
     "scan_ndjson",
     "scan_parquet",
     "scan_pyarrow_dataset",
+    "scan_vortex",
     "Catalog",
     # polars.io.cloud
     "CredentialProvider",

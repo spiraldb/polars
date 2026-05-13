@@ -92,7 +92,7 @@ impl VortexFileReader {
                     cloud_opts,
                     io_metrics,
                 )
-                .await?
+                .await
             }
             #[cfg(not(feature = "cloud"))]
             ScanSourceRef::Path(_) => {

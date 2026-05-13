@@ -328,6 +328,50 @@ impl PyLazyFrame {
         Ok(lf.into())
     }
 
+    #[cfg(feature = "vortex")]
+    #[staticmethod]
+    #[pyo3(signature = (
+        sources, schema, scan_options, use_statistics, push_predicate, push_projection,
+        aggressive_pushdown, initial_read_size, scan_concurrency
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new_from_vortex(
+        sources: Wrap<ScanSources>,
+        schema: Option<Wrap<Schema>>,
+        scan_options: PyScanOptions,
+        use_statistics: bool,
+        push_predicate: bool,
+        push_projection: bool,
+        aggressive_pushdown: bool,
+        initial_read_size: Option<usize>,
+        scan_concurrency: Option<usize>,
+    ) -> PyResult<Self> {
+        use crate::utils::to_py_err;
+        use polars_vortex::{VortexCacheMode, VortexScanOptions};
+
+        let options = VortexScanOptions {
+            schema: schema.map(|x| Arc::new(x.0)),
+            use_statistics,
+            push_predicate,
+            push_projection,
+            aggressive_pushdown,
+            initial_read_size,
+            scan_concurrency: scan_concurrency.and_then(NonZeroUsize::new),
+            cache: VortexCacheMode::Global,
+        };
+
+        let sources = sources.0;
+        let first_path = sources.first_path();
+        let unified_scan_args =
+            scan_options.extract_unified_scan_args(first_path.and_then(|x| x.scheme()))?;
+
+        let lf: LazyFrame = DslBuilder::scan_vortex(sources, options, unified_scan_args)
+            .map_err(to_py_err)?
+            .build()
+            .into();
+        Ok(lf.into())
+    }
+
     #[cfg(feature = "ipc")]
     #[staticmethod]
     #[pyo3(signature = (sources, record_batch_statistics, scan_options))]

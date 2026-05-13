@@ -24,6 +24,7 @@ polars-ooc = { workspace = true, default-features = false }
 polars-ops = { workspace = true, features = ["bitwise"] }
 polars-parquet = { workspace = true, optional = true }
 polars-plan = { workspace = true }
+polars-vortex = { workspace = true, optional = true }
 polars-row = { workspace = true }
 polars-testing = { workspace = true }
 polars-time = { workspace = true }
@@ -137,6 +138,12 @@ avro = ["polars/avro"]
 async = ["polars-lazy/async", "polars-io/async"]
 catalog = ["polars-lazy/catalog"]
 parquet = ["polars/parquet", "polars-parquet", "polars-mem-engine/parquet"]
+vortex = [
+  "polars/vortex",
+  "polars-mem-engine/vortex",
+  "polars-lazy/vortex",
+  "dep:polars-vortex",
+]
 ipc = ["polars/ipc", "polars-mem-engine/ipc"]
 ipc_streaming = ["polars/ipc_streaming"]
 is_in = ["polars/is_in"]
