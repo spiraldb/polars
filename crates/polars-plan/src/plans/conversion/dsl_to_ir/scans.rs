@@ -292,18 +292,63 @@ pub(super) async fn parquet_file_info(
 #[cfg(feature = "vortex")]
 pub(super) async fn vortex_file_info(
     first_scan_source: ScanSourceRef<'_>,
-    _row_index: Option<&RowIndex>,
+    row_index: Option<&RowIndex>,
     _cloud_options: Option<&polars_io::cloud::CloudOptions>,
-    _n_sources: usize,
+    n_sources: usize,
 ) -> PolarsResult<(FileInfo, Option<polars_vortex::read::metadata::VortexFooterRef>)> {
-    // TODO(vortex): open the file, read the Vortex footer, translate the DType into a Polars
-    // schema, return both file_info and a cached Footer. For now we error and direct users to
-    // pre-supply a schema via `ScanArgsVortex.schema`. Schema discovery requires a
-    // `vortex::dtype::DType` -> polars-arrow `ArrowSchema` translator that walks the DType
-    // recursively (Vortex emits upstream-arrow types; polars-arrow is the internal fork).
-    let _ = first_scan_source;
-    polars_bail!(ComputeError:
-        "Vortex schema inference is not yet implemented; pass `schema=...` to `scan_vortex`.");
+    use polars_core::runtime::ASYNC;
+    use polars_vortex::read::read_at::{in_memory_read_at, local_file_read_at};
+    use polars_vortex::read::schema::vortex_dtype_to_schema;
+    use polars_vortex::session::{segment_cache, session};
+    use polars_vortex::vortex::file::OpenOptionsSessionExt;
+
+    let session = session();
+    let read_at = match first_scan_source {
+        ScanSourceRef::Path(path) if !path.has_scheme() => {
+            local_file_read_at(path.as_std_path(), None)?
+        }
+        ScanSourceRef::Path(_) => {
+            polars_bail!(ComputeError:
+                "Vortex cloud schema discovery is not yet wired up; pass a local path \
+                 or `schema=...` (cloud support is PR-5).")
+        }
+        ScanSourceRef::Buffer(buf) => {
+            in_memory_read_at(buf.as_slice().to_vec(), None, None)
+        }
+        ScanSourceRef::File(_) => {
+            polars_bail!(ComputeError:
+                "Vortex schema discovery from open File handles is not yet supported; \
+                 pass a path or `schema=...`.")
+        }
+    };
+
+    let vxf = ASYNC
+        .spawn(async move {
+            session
+                .open_options()
+                .with_segment_cache(segment_cache())
+                .open(read_at)
+                .await
+                .map_err(|e| polars_err!(ComputeError: "vortex open: {e}"))
+        })
+        .await
+        .map_err(|e| polars_err!(ComputeError: "tokio join: {e}"))??;
+
+    let (mut pl_schema, arrow_schema) = vortex_dtype_to_schema(vxf.dtype())?;
+    let row_count = vxf.row_count() as usize;
+    if let Some(ri) = row_index {
+        insert_row_index_to_schema(Arc::make_mut(&mut pl_schema), ri.name.clone())?;
+    }
+
+    let known_size = if n_sources == 1 { Some(row_count) } else { None };
+    let file_info = FileInfo::new(
+        pl_schema,
+        Some(either::Either::Left(arrow_schema)),
+        (known_size, row_count.saturating_mul(n_sources)),
+    );
+
+    let footer = Arc::new(vxf.footer().clone());
+    Ok((file_info, Some(footer)))
 }
 
 pub fn max_metadata_scan_cached() -> usize {

@@ -62,6 +62,7 @@ impl FileReaderBuilder for VortexReaderBuilder {
                 .then(|| self.first_metadata.clone())
                 .flatten(),
             io_metrics: OptIOMetrics(self.io_metrics.get().cloned()),
+            init_data: None,
         }) as _
     }
 }
