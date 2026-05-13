@@ -111,6 +111,11 @@ xxhash-rust = { version = "0.8.6", features = ["xxh3"] }
 zmij = "1.0.0"
 zstd = "0.13"
 
+# Local path dependency on Vortex. The repo is expected to live next to the Polars repo
+# (e.g., both checked out under the same parent directory). For a public release, this would
+# point at a published crates.io version.
+vortex = { path = "../../../../vortex/vortex", default-features = false, features = ["files", "tokio"] }
+
 polars = { version = "0.53.0", path = "crates/polars", default-features = false }
 polars-buffer = { version = "0.53.0", path = "crates/polars-buffer", default-features = false }
 polars-compute = { version = "0.53.0", path = "crates/polars-compute", default-features = false }
@@ -137,6 +142,7 @@ polars-stream = { version = "0.53.0", path = "crates/polars-stream", default-fea
 polars-testing = { version = "0.53.0", path = "crates/polars-testing", default-features = false }
 polars-time = { version = "0.53.0", path = "crates/polars-time", default-features = false }
 polars-utils = { version = "0.53.0", path = "crates/polars-utils", default-features = false }
+polars-vortex = { version = "0.53.0", path = "crates/polars-vortex", default-features = false }
 pyo3-polars = { version = "0.26.0", path = "pyo3-polars/pyo3-polars" }
 pyo3-polars-derive = { version = "0.20.0", path = "pyo3-polars/pyo3-polars-derive" }
 

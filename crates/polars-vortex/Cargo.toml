@@ -1,0 +1,37 @@
+[package]
+name = "polars-vortex"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Vortex file format I/O for Polars"
+
+[dependencies]
+polars-core = { workspace = true, features = ["algorithm_group_by"] }
+polars-error = { workspace = true }
+polars-io = { workspace = true }
+polars-schema = { workspace = true }
+polars-utils = { workspace = true }
+
+arrow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+
+vortex = { workspace = true, default-features = false, features = ["files", "tokio"] }
+
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+cloud = ["vortex/object_store", "polars-io/cloud"]
+serde = ["dep:serde", "polars-io/serde", "polars-utils/serde"]
+dsl-schema = ["dep:schemars", "polars-utils/dsl-schema"]
+
+[lints]
+workspace = true
