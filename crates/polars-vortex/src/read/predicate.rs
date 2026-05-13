@@ -24,7 +24,7 @@ use polars_utils::pl_str::PlSmallStr;
 use vortex::array::scalar::Scalar as VortexScalar;
 use vortex::dtype::Nullability;
 use vortex::expr::{
-    Expression, and_collect, eq, get_item, gt_eq, lit, lt_eq, or_collect, root,
+    Expression, and_collect, eq, get_item, gt_eq, like, lit, lt_eq, or_collect, root,
 };
 
 /// Convert what we can of `scan_predicate` into a single Vortex filter expression. The
@@ -76,13 +76,38 @@ fn convert_specialized(
             }
             or_collect(terms)?
         }
-        // StartsWith / EndsWith / RegexMatch — defer until we wire up the Vortex `like`
-        // builder (LikeOptions construction differs from `eq`/`gt_eq`). Tracked under
-        // PR-3 follow-ups; the multi-scan residual catches them correctly.
-        SpecializedColumnPredicate::StartsWith(_)
-        | SpecializedColumnPredicate::EndsWith(_)
-        | SpecializedColumnPredicate::RegexMatch(_) => return None,
+        SpecializedColumnPredicate::StartsWith(bytes) => {
+            let prefix = bytes_to_like_literal(bytes)?;
+            // `prefix%`
+            let pattern = format!("{prefix}%");
+            like(col, lit(VortexScalar::utf8(pattern, Nullability::NonNullable)))
+        }
+        SpecializedColumnPredicate::EndsWith(bytes) => {
+            let suffix = bytes_to_like_literal(bytes)?;
+            // `%suffix`
+            let pattern = format!("%{suffix}");
+            like(col, lit(VortexScalar::utf8(pattern, Nullability::NonNullable)))
+        }
+        // No native regex in Vortex's `like`; let the multi-scan residual handle it.
+        SpecializedColumnPredicate::RegexMatch(_) => return None,
     })
+}
+
+/// Validate that `bytes` is valid UTF-8 and free of SQL-LIKE special characters
+/// (`%`, `_`, `\`). Returns the borrowed `&str` so the caller can build a pattern.
+/// Returning `None` falls back to the residual filter, which is always correct.
+///
+/// We refuse pushdown when the bytes contain `%` or `_` because LIKE would interpret
+/// those as wildcards, *widening* the predicate. Widening is still correct (the
+/// multi-scan residual filter trims the extra rows), but it defeats the perf win
+/// of pushdown — so we'd rather not push than push wastefully. Backslash is the
+/// LIKE escape character; same reasoning.
+fn bytes_to_like_literal(bytes: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    if s.contains('%') || s.contains('_') || s.contains('\\') {
+        return None;
+    }
+    Some(s)
 }
 
 /// Convert a Polars `Scalar` into a Vortex `Scalar` for the common primitive types.
