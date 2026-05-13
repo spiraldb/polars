@@ -4561,6 +4561,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "object_store",
  "parking_lot",
  "polars-arrow",
  "polars-core",

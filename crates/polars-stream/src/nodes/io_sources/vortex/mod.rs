@@ -84,10 +84,21 @@ impl VortexFileReader {
                     .await
                     .map_err(|e| polars_err!(ComputeError: "spawn_blocking failed: {e}"))?
             }
+            #[cfg(feature = "cloud")]
+            ScanSourceRef::Path(path) => {
+                let cloud_opts = self.cloud_options.as_deref();
+                polars_vortex::read::read_at::cloud_read_at(
+                    path.clone(),
+                    cloud_opts,
+                    io_metrics,
+                )
+                .await?
+            }
+            #[cfg(not(feature = "cloud"))]
             ScanSourceRef::Path(_) => {
                 polars_bail!(ComputeError:
-                    "Vortex cloud reads are not yet wired up; pass a local path \
-                     (cloud support is PR-5).")
+                    "Vortex was built without the `cloud` feature; rebuild Polars with \
+                     `--features vortex,cloud` to enable S3/GCS/Azure reads.")
             }
             ScanSourceRef::Buffer(buf) => {
                 let bytes = buf.as_slice().to_vec();

@@ -23,6 +23,7 @@ parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 
 vortex = { workspace = true, default-features = false, features = ["files", "tokio"] }
+object_store = { workspace = true, optional = true }
 
 # Upstream Arrow crates used solely for the C Data Interface bridge in `read::array_bridge`.
 # Vortex's `ArrowArrayExecutor::execute_record_batch` returns a `arrow_array::RecordBatch`
@@ -37,7 +38,7 @@ serde = { workspace = true, optional = true }
 
 [features]
 default = []
-cloud = ["vortex/object_store", "polars-io/cloud"]
+cloud = ["vortex/object_store", "polars-io/cloud", "dep:object_store"]
 serde = ["dep:serde", "polars-io/serde", "polars-utils/serde"]
 dsl-schema = ["dep:schemars", "polars-utils/dsl-schema"]
 

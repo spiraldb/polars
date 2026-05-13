@@ -133,3 +133,35 @@ pub fn in_memory_read_at(
     let inner = Arc::new(ByteBuffer::from(bytes));
     Arc::new(PolarsInstrumentedVortexReadAt::new(inner, uri, io_metrics))
 }
+
+/// Build a cloud-backed [`VortexReadAt`] for the given path, going through Polars'
+/// `polars_io::cloud::build_object_store` (so `CloudOptions` — auth, retry, region
+/// overrides, etc. — are honored) and wrapping the resulting `ObjectStore` with
+/// `vortex::io::object_store::ObjectStoreReadAt`.
+#[cfg(feature = "cloud")]
+pub async fn cloud_read_at(
+    path: polars_utils::pl_path::PlRefPath,
+    cloud_options: Option<&polars_io::cloud::CloudOptions>,
+    io_metrics: Option<Arc<IOMetrics>>,
+) -> polars_error::PolarsResult<Arc<dyn VortexReadAt>> {
+    use polars_error::polars_err;
+    use vortex::io::object_store::ObjectStoreReadAt;
+
+    let handle = crate::session::handle();
+    let uri_str: Arc<str> = path.as_str().to_string().into();
+    let (location, polars_store) =
+        polars_io::cloud::build_object_store(path, cloud_options, false).await?;
+    let store = polars_store.to_dyn_object_store().await.into_owned();
+
+    // Vortex uses `object_store::path::Path` internally; construct from the location's
+    // `prefix` (the full key, since `glob=false`).
+    let object_path = ::object_store::path::Path::from(location.prefix.as_str());
+    let inner = Arc::new(ObjectStoreReadAt::new(store, object_path, handle));
+
+    let _ = uri_str; // silence "unused if metrics is None" for clarity
+    Ok(Arc::new(PolarsInstrumentedVortexReadAt::new(
+        inner,
+        Some(uri_str),
+        io_metrics,
+    )))
+}

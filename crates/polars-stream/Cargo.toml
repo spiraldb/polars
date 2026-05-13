@@ -95,7 +95,7 @@ scan_lines = [
   "polars-plan/scan_lines",
   "polars-io/scan_lines",
 ]
-cloud = ["polars-mem-engine/cloud", "polars-plan/cloud", "polars-io/cloud"]
+cloud = ["polars-mem-engine/cloud", "polars-plan/cloud", "polars-io/cloud", "polars-vortex?/cloud"]
 diff = ["polars-ops/diff", "polars-plan/diff", "polars-plan/abs"]
 interpolate = ["polars-ops/interpolate", "polars-plan/interpolate"]
 dtype-array = ["polars-core/dtype-array"]

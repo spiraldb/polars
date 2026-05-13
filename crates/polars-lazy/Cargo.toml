@@ -68,6 +68,7 @@ cloud = [
   "futures",
   "polars-mem-engine/cloud",
   "polars-stream?/cloud",
+  "polars-vortex?/cloud",
 ]
 ipc = ["polars-io/ipc", "polars-plan/ipc", "polars-mem-engine/ipc", "polars-stream?/ipc"]
 json = [
