@@ -21,6 +21,7 @@ use polars_vortex::VortexScanOptions;
 use polars_vortex::read::array_bridge::{
     arrow_dtypes_from_schema, record_batch_to_dataframe,
 };
+use polars_vortex::read::predicate::polars_to_vortex_predicate;
 use polars_vortex::read::read_at::local_file_read_at;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::{handle as vortex_handle, session};
@@ -212,6 +213,16 @@ impl FileReader for VortexFileReader {
             Slice::Negative { .. } => None,
         });
 
+        // Translate the pushable bits of args.predicate into a Vortex `Expression`. We
+        // advertise `PARTIAL_FILTER` capability, so the multi-scan layer keeps the
+        // original predicate around to apply post-decode — pushing only what we can
+        // convert is safe (over-conservative pushdown would drop rows incorrectly).
+        let filter_expr = if self.options.push_predicate {
+            args.predicate.as_ref().and_then(polars_to_vortex_predicate)
+        } else {
+            None
+        };
+
         let (mut tx, rx) = FileReaderOutputSend::new_serial();
 
         // Spawn the decode loop on the streaming async executor (Low priority — I/O work,
@@ -227,6 +238,9 @@ impl FileReader for VortexFileReader {
                 .map_err(|e| polars_err!(ComputeError: "vortex scan: {e}"))?;
             if let Some(range) = row_range {
                 scan = scan.with_row_range(range);
+            }
+            if let Some(filter) = filter_expr {
+                scan = scan.with_filter(filter);
             }
 
             let stream = scan
