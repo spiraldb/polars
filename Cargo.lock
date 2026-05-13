@@ -4555,6 +4555,9 @@ dependencies = [
 name = "polars-vortex"
 version = "0.53.0"
 dependencies = [
+ "arrow-array",
+ "arrow-data",
+ "arrow-schema",
  "async-trait",
  "bytes",
  "futures",

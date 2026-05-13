@@ -24,6 +24,14 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 
 vortex = { workspace = true, default-features = false, features = ["files", "tokio"] }
 
+# Upstream Arrow crates used solely for the C Data Interface bridge in `read::array_bridge`.
+# Vortex's `ArrowArrayExecutor::execute_record_batch` returns a `arrow_array::RecordBatch`
+# (upstream Arrow); we transfer it into polars-arrow zero-copy via the C ABI. Pinned to
+# the same major version Vortex uses transitively so there's no duplicate-crate risk.
+arrow-array = "58"
+arrow-data = "58"
+arrow-schema = "58"
+
 schemars = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
