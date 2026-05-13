@@ -24,6 +24,7 @@ polars-plan = { workspace = true }
 polars-stream = { workspace = true, optional = true }
 polars-time = { workspace = true, optional = true }
 polars-utils = { workspace = true }
+polars-vortex = { workspace = true, optional = true }
 
 bitflags = { workspace = true }
 either = { workspace = true }
@@ -49,6 +50,12 @@ parquet = [
   "polars-expr/parquet",
   "polars-mem-engine/parquet",
   "polars-stream?/parquet",
+]
+vortex = [
+  "dep:polars-vortex",
+  "polars-plan/vortex",
+  "polars-mem-engine/vortex",
+  "polars-stream?/vortex",
 ]
 async = [
   "polars-io/cloud",

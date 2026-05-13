@@ -53,6 +53,7 @@ polars-parquet = { workspace = true }
 polars-plan = { workspace = true, features = ["cse", "rle", "peaks", "arg_where", "unique_counts", "dtype-struct"] }
 polars-time = { workspace = true }
 polars-utils = { workspace = true, features = ["async-utils"] }
+polars-vortex = { workspace = true, optional = true }
 
 [build-dependencies]
 version_check = { workspace = true }
@@ -81,6 +82,7 @@ ipc = [
 ]
 index_of = ["polars-plan/index_of"]
 parquet = ["polars-mem-engine/parquet", "polars-plan/parquet", "cloud"]
+vortex = ["polars-mem-engine/vortex", "polars-plan/vortex", "dep:polars-vortex"]
 csv = ["polars-mem-engine/csv", "polars-plan/csv", "polars-io/csv"]
 json = [
   "polars-mem-engine/json",

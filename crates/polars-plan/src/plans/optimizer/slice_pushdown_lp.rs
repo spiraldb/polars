@@ -358,6 +358,9 @@ impl SlicePushDown {
                     #[cfg(feature = "ipc")]
                     FileScanIR::Ipc { .. } => true,
 
+                    #[cfg(feature = "vortex")]
+                    FileScanIR::Vortex { .. } => true,
+
                     #[cfg(feature = "csv")]
                     FileScanIR::Csv { .. } => true,
 

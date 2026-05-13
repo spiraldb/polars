@@ -25,6 +25,7 @@ polars-ops = { workspace = true, features = [] }
 polars-parquet = { workspace = true, optional = true }
 polars-time = { workspace = true, optional = true }
 polars-utils = { workspace = true }
+polars-vortex = { workspace = true, optional = true }
 
 arrow = { workspace = true }
 bitflags = { workspace = true }
@@ -75,6 +76,7 @@ serde = [
   "slotmap/serde",
 ]
 parquet = ["polars-io/parquet", "polars-parquet"]
+vortex = ["polars-vortex"]
 cloud = ["polars-io/cloud"]
 ipc = ["polars-io/ipc"]
 json = ["polars-io/json", "polars-json"]

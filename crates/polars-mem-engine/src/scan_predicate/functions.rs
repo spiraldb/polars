@@ -504,6 +504,12 @@ where
                 metadata,
             } => *metadata = None,
 
+            #[cfg(feature = "vortex")]
+            FileScanIR::Vortex {
+                options: _,
+                metadata,
+            } => *metadata = None,
+
             #[cfg(feature = "csv")]
             FileScanIR::Csv { options: _ } => {},
 

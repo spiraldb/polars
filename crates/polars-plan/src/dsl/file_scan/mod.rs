@@ -13,6 +13,10 @@ use polars_io::ipc::IpcScanOptions;
 use polars_io::parquet::metadata::FileMetadataRef;
 #[cfg(feature = "parquet")]
 use polars_io::parquet::read::ParquetOptions;
+#[cfg(feature = "vortex")]
+use polars_vortex::VortexScanOptions;
+#[cfg(feature = "vortex")]
+use polars_vortex::read::metadata::VortexFooterRef;
 use polars_io::{HiveOptions, RowIndex};
 use polars_utils::slice_enum::Slice;
 #[cfg(feature = "serde")]
@@ -66,6 +70,11 @@ pub enum FileScanDsl {
     #[cfg(feature = "ipc")]
     Ipc {
         options: IpcScanOptions,
+    },
+
+    #[cfg(feature = "vortex")]
+    Vortex {
+        options: VortexScanOptions,
     },
 
     #[cfg(feature = "python")]
@@ -124,6 +133,13 @@ pub enum FileScanIR {
         metadata: Option<Arc<arrow::io::ipc::read::FileMetadata>>,
     },
 
+    #[cfg(feature = "vortex")]
+    Vortex {
+        options: VortexScanOptions,
+        #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
+        metadata: Option<VortexFooterRef>,
+    },
+
     #[cfg(feature = "python")]
     PythonDataset {
         dataset_object: Arc<python_dataset::PythonDatasetProvider>,
@@ -155,6 +171,8 @@ impl FileScanIR {
             Self::Ipc { .. } => ScanFlags::empty(),
             #[cfg(feature = "parquet")]
             Self::Parquet { .. } => ScanFlags::SPECIALIZED_PREDICATE_FILTER,
+            #[cfg(feature = "vortex")]
+            Self::Vortex { .. } => ScanFlags::SPECIALIZED_PREDICATE_FILTER,
             #[cfg(feature = "json")]
             Self::NDJson { .. } => ScanFlags::empty(),
             #[allow(unreachable_patterns)]
@@ -170,6 +188,8 @@ impl FileScanIR {
             Self::Ipc { .. } => false,
             #[cfg(feature = "parquet")]
             Self::Parquet { .. } => true,
+            #[cfg(feature = "vortex")]
+            Self::Vortex { .. } => true,
             #[cfg(feature = "json")]
             Self::NDJson { .. } => false,
             #[allow(unreachable_patterns)]
@@ -424,6 +444,12 @@ mod _file_scan_eq_hash {
             metadata: Option<usize>,
         },
 
+        #[cfg(feature = "vortex")]
+        Vortex {
+            options: &'a polars_vortex::VortexScanOptions,
+            metadata: Option<usize>,
+        },
+
         #[cfg(feature = "python")]
         PythonDataset {
             dataset_object: usize,
@@ -466,6 +492,12 @@ mod _file_scan_eq_hash {
 
                 #[cfg(feature = "ipc")]
                 FileScanIR::Ipc { options, metadata } => FileScanEqHashWrap::Ipc {
+                    options,
+                    metadata: metadata.as_ref().map(arc_as_ptr),
+                },
+
+                #[cfg(feature = "vortex")]
+                FileScanIR::Vortex { options, metadata } => FileScanEqHashWrap::Vortex {
                     options,
                     metadata: metadata.as_ref().map(arc_as_ptr),
                 },

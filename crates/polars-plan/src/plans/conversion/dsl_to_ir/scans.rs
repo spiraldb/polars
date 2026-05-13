@@ -62,6 +62,12 @@ pub(super) async fn dsl_to_ir(
                     .expand_paths_with_hive_update(unified_scan_args)
                     .await?
             },
+            #[cfg(feature = "vortex")]
+            FileScanDsl::Vortex { .. } => {
+                sources
+                    .expand_paths_with_hive_update(unified_scan_args)
+                    .await?
+            },
             #[cfg(feature = "csv")]
             FileScanDsl::Csv { .. } => sources.expand_paths(unified_scan_args).await?,
             #[cfg(feature = "json")]
@@ -281,6 +287,23 @@ pub(super) async fn parquet_file_info(
     );
 
     Ok((file_info, Some(metadata)))
+}
+
+#[cfg(feature = "vortex")]
+pub(super) async fn vortex_file_info(
+    first_scan_source: ScanSourceRef<'_>,
+    _row_index: Option<&RowIndex>,
+    _cloud_options: Option<&polars_io::cloud::CloudOptions>,
+    _n_sources: usize,
+) -> PolarsResult<(FileInfo, Option<polars_vortex::read::metadata::VortexFooterRef>)> {
+    // TODO(vortex): open the file, read the Vortex footer, translate the DType into a Polars
+    // schema, return both file_info and a cached Footer. For now we error and direct users to
+    // pre-supply a schema via `ScanArgsVortex.schema`. Schema discovery requires a
+    // `vortex::dtype::DType` -> polars-arrow `ArrowSchema` translator that walks the DType
+    // recursively (Vortex emits upstream-arrow types; polars-arrow is the internal fork).
+    let _ = first_scan_source;
+    polars_bail!(ComputeError:
+        "Vortex schema inference is not yet implemented; pass `schema=...` to `scan_vortex`.");
 }
 
 pub fn max_metadata_scan_cached() -> usize {
@@ -911,6 +934,57 @@ this scan to succeed with an empty DataFrame.",
                 ))
             }
             .map_err(|e| e.context(failed_here!(ipc scan)))?,
+
+            #[cfg(feature = "vortex")]
+            FileScanDsl::Vortex { options } => {
+                if let Some(schema) = &options.schema {
+                    // User supplied a schema; we skip the footer read entirely. The reader will
+                    // still verify the schema matches the file at scan time.
+                    (
+                        FileInfo {
+                            schema: schema.clone(),
+                            reader_schema: Some(either::Either::Right(schema.clone())),
+                            row_estimation: (None, usize::MAX),
+                        },
+                        FileScanIR::Vortex {
+                            options,
+                            metadata: None,
+                        },
+                    )
+                } else {
+                    let first_scan_source = require_first_source(
+                        "failed to retrieve first file schema (vortex)",
+                        "passing a schema can allow this scan to succeed with an empty DataFrame.",
+                    )?;
+
+                    if verbose() {
+                        eprintln!(
+                            "sourcing vortex scan file schema from: '{}'",
+                            first_scan_source.to_include_path_name()
+                        )
+                    }
+
+                    let (mut file_info, mut metadata) = scans::vortex_file_info(
+                        first_scan_source,
+                        unified_scan_args.row_index.as_ref(),
+                        cloud_options,
+                        n_sources,
+                    )
+                    .await
+                    .map_err(|e| e.context(failed_here!(vortex scan)))?;
+
+                    if let Some((total, deleted)) = unified_scan_args.row_count {
+                        let size = (total - deleted) as usize;
+                        file_info.row_estimation = (Some(size), size);
+                    }
+
+                    if self.inner.read().unwrap().len() > max_metadata_scan_cached() {
+                        _ = metadata.take();
+                    }
+
+                    (file_info, FileScanIR::Vortex { options, metadata })
+                }
+            },
             #[cfg(feature = "csv")]
             FileScanDsl::Csv { mut options } => {
                 let file_info = if let Some(schema) = options.schema.clone() {
