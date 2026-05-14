@@ -74,10 +74,16 @@ pub fn polars_array_to_upstream(
 
 /// Convert a slice of polars-arrow column arrays + a polars-arrow schema into an
 /// upstream `arrow_array::RecordBatch`. The number of columns must match the schema.
+///
+/// Per-column field metadata on `polars_schema` is preserved into the upstream
+/// `Field::metadata` so that downstream Vortex sees the same key/value annotations
+/// the user attached.
 pub fn polars_chunk_to_upstream_record_batch(
     columns: Vec<Box<dyn PolarsArray>>,
     polars_schema: &arrow::datatypes::ArrowSchema,
 ) -> PolarsResult<arrow_array::RecordBatch> {
+    use std::collections::HashMap;
+
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
 
@@ -99,7 +105,18 @@ pub fn polars_chunk_to_upstream_record_batch(
         let arrow_array = polars_array_to_upstream(polars_array, polars_field)?;
         let dt: DataType = arrow_array.data_type().clone();
         let is_nullable = polars_field.is_nullable;
-        upstream_fields.push(Field::new(polars_name.as_str(), dt, is_nullable));
+        let mut field = Field::new(polars_name.as_str(), dt, is_nullable);
+        // Preserve any per-field metadata the polars-arrow Field carried.
+        if let Some(md) = polars_field.metadata.as_ref()
+            && !md.is_empty()
+        {
+            let upstream_md: HashMap<String, String> = md
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+                .collect();
+            field = field.with_metadata(upstream_md);
+        }
+        upstream_fields.push(field);
         upstream_arrays.push(arrow_array);
     }
     let schema = Arc::new(Schema::new(upstream_fields));

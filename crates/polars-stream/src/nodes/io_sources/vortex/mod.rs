@@ -127,8 +127,6 @@ impl FileReader for VortexFileReader {
             return Ok(());
         }
 
-        // Touch the global session to ensure the runtime handle is installed before any
-        // Vortex async work is spawned.
         let session = session();
 
         let read_at = self.build_read_at().await?;
@@ -141,10 +139,10 @@ impl FileReader for VortexFileReader {
         if let Some(n) = self.options.initial_read_size {
             open_opts = open_opts.with_initial_read_size(n);
         }
-        // Attach the process-global segment cache so successive scans of the same file
-        // can reuse decompressed segments.
-        let segment_cache = polars_vortex::session::segment_cache();
-        open_opts = open_opts.with_segment_cache(segment_cache);
+        // Attach the requested segment cache. `Global` (default) returns the
+        // process-wide cache so successive scans of the same file reuse
+        // decompressed segments; `Off` / `Dedicated(N)` give finer control.
+        open_opts = open_opts.with_segment_cache(self.options.segment_cache.resolve());
 
         let vxf = ASYNC
             .spawn(async move {
@@ -218,11 +216,13 @@ impl FileReader for VortexFileReader {
 
         // Apply pre_slice as a row range. Negative slices get a cheap `row_count()`
         // probe (the file's row count is in the cached footer — free) and translate
-        // to positive via `restrict_to_bounds`.
+        // to positive via `restrict_to_bounds`. On 32-bit platforms a `u64 as usize`
+        // would silently truncate files larger than 2^32 rows; clamp via `try_from`.
+        let row_count_usize = usize::try_from(st.row_count).unwrap_or(usize::MAX);
         let row_range = args.pre_slice.as_ref().map(|slice| {
             let positive = match slice {
                 Slice::Positive { .. } => slice.clone(),
-                Slice::Negative { .. } => slice.clone().restrict_to_bounds(st.row_count as usize),
+                Slice::Negative { .. } => slice.clone().restrict_to_bounds(row_count_usize),
             };
             match positive {
                 Slice::Positive { offset, len } => {

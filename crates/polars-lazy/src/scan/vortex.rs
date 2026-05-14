@@ -76,7 +76,7 @@ impl LazyFileListReader for LazyVortexReader {
             push_predicate: self.args.push_predicate,
             initial_read_size: self.args.initial_read_size,
             scan_concurrency: self.args.scan_concurrency,
-            cache: self.args.segment_cache,
+            segment_cache: self.args.segment_cache,
         };
 
         let unified_scan_args = UnifiedScanArgs {

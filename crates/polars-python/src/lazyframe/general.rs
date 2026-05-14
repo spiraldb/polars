@@ -349,7 +349,7 @@ impl PyLazyFrame {
             push_predicate,
             initial_read_size,
             scan_concurrency: scan_concurrency.and_then(NonZeroUsize::new),
-            cache: VortexCacheMode::Global,
+            segment_cache: VortexCacheMode::Global,
         };
 
         let sources = sources.0;

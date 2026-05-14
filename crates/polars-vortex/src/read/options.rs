@@ -1,8 +1,10 @@
 //! Options for `pl.scan_vortex` / `pl.read_vortex`.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use polars_core::schema::SchemaRef;
+use vortex::layout::segments::SegmentCache;
 
 /// Read-side options for a Vortex scan. Lives in [`polars_plan::dsl::FileScanIR::Vortex`].
 ///
@@ -21,8 +23,9 @@ pub struct VortexScanOptions {
     /// Per-file scan concurrency, passed to `ScanBuilder::with_concurrency`. `None` lets
     /// Vortex pick a default based on the layout's natural splits.
     pub scan_concurrency: Option<NonZeroUsize>,
-    /// Segment cache mode for this scan.
-    pub cache: VortexCacheMode,
+    /// Segment cache mode for this scan. Named `segment_cache` (not `cache`) to
+    /// avoid collision with the LazyFrame query cache (`ScanArgsVortex::cache: bool`).
+    pub segment_cache: VortexCacheMode,
 }
 
 impl Default for VortexScanOptions {
@@ -32,7 +35,7 @@ impl Default for VortexScanOptions {
             push_predicate: true,
             initial_read_size: None,
             scan_concurrency: None,
-            cache: VortexCacheMode::default(),
+            segment_cache: VortexCacheMode::default(),
         }
     }
 }
@@ -53,4 +56,20 @@ pub enum VortexCacheMode {
     Off,
     /// Build a fresh per-scan cache of the given byte budget.
     Dedicated(u64),
+}
+
+impl VortexCacheMode {
+    /// Resolve this mode into the concrete [`SegmentCache`] the scan should use.
+    ///
+    /// `Global` returns the shared process-wide cache (a cheap `Arc` clone);
+    /// `Off` returns a fresh `NoOpSegmentCache`; `Dedicated(N)` allocates a fresh
+    /// `MokaSegmentCache::new(N)` scoped to this scan.
+    pub fn resolve(self) -> Arc<dyn SegmentCache> {
+        use vortex::layout::segments::{MokaSegmentCache, NoOpSegmentCache};
+        match self {
+            VortexCacheMode::Global => crate::session::segment_cache(),
+            VortexCacheMode::Off => Arc::new(NoOpSegmentCache),
+            VortexCacheMode::Dedicated(bytes) => Arc::new(MokaSegmentCache::new(bytes)),
+        }
+    }
 }

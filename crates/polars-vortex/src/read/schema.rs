@@ -68,8 +68,19 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
             PType::F64 => ArrowDataType::Float64,
         },
         DType::Decimal(dec, _) => {
+            // Vortex's `dec.scale()` returns `i8` (Arrow spec permits negative
+            // scales), but polars-arrow's `Decimal(usize, usize)` and
+            // `Decimal256(usize, usize)` only represent non-negative scales. A
+            // negative scale would `as usize`-wrap to a huge value and silently
+            // produce a wildly wrong dtype, so reject it explicitly instead.
             let precision = dec.precision() as usize;
-            let scale = dec.scale() as usize;
+            let raw_scale = dec.scale();
+            if raw_scale < 0 {
+                polars_bail!(ComputeError:
+                    "Vortex decimal with negative scale {} is not representable in \
+                     polars-arrow", raw_scale);
+            }
+            let scale = raw_scale as usize;
             // Mirrors vortex-array's DataType selection: <=38 → 128-bit, >=39 → 256-bit.
             // polars-arrow's `Decimal` variant is 128-bit; `Decimal256` is the 256-bit.
             if precision <= 38 {

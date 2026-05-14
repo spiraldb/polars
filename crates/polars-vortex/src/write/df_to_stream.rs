@@ -34,12 +34,14 @@ use crate::write::array_bridge::polars_chunk_to_upstream_record_batch;
 pub fn dataframe_to_vortex_chunks(
     df: &DataFrame,
 ) -> PolarsResult<(DType, Vec<VortexArrayRef>)> {
-    // Build the polars-arrow schema and derive the top-level Vortex DType
+    // Build the polars-arrow schema once and derive the top-level Vortex DType
     // upfront. Doing this before any chunk conversion gives us a real dtype for
-    // the n_chunks == 0 case and avoids re-computing it per chunk.
+    // the n_chunks == 0 case and avoids re-computing it per chunk. Going through
+    // `polars_schema_to_vortex_dtype_from_arrow` reuses the arrow schema we
+    // already built rather than recomputing it inside.
     let pl_schema = df.schema();
     let pl_arrow_schema: PolarsArrowSchema = pl_schema.to_arrow(CompatLevel::newest());
-    let top_dtype = polars_schema_to_vortex_dtype(&pl_schema)?;
+    let top_dtype = polars_arrow_schema_to_vortex_dtype(&pl_arrow_schema)?;
 
     let columns = df.columns();
     if columns.is_empty() {
@@ -97,12 +99,21 @@ pub fn dataframe_to_vortex_chunks(
 /// (field-by-field via the C-ABI struct transmute) → Vortex `DType` via
 /// `FromArrowType<&Schema>`.
 pub fn polars_schema_to_vortex_dtype(pl_schema: &PolarsSchema) -> PolarsResult<DType> {
+    let pl_arrow_schema = pl_schema.to_arrow(CompatLevel::newest());
+    polars_arrow_schema_to_vortex_dtype(&pl_arrow_schema)
+}
+
+/// Same as [`polars_schema_to_vortex_dtype`] but starting from a polars-arrow
+/// schema directly — useful when the caller already computed the arrow schema
+/// and wants to avoid recomputing it.
+pub fn polars_arrow_schema_to_vortex_dtype(
+    pl_arrow_schema: &PolarsArrowSchema,
+) -> PolarsResult<DType> {
     // Compile-time: matching size + alignment for the schema FFI structs.
     // See crate::read::array_bridge for the full layout-compatibility argument.
     const _: () = assert!(mem::size_of::<PolarsFfiSchema>() == mem::size_of::<FFI_ArrowSchema>());
     const _: () = assert!(mem::align_of::<PolarsFfiSchema>() == mem::align_of::<FFI_ArrowSchema>());
 
-    let pl_arrow_schema = pl_schema.to_arrow(CompatLevel::newest());
     let mut up_fields: Vec<UpstreamField> = Vec::with_capacity(pl_arrow_schema.len());
     for (_, pl_field) in pl_arrow_schema.iter() {
         let pl_ffi: PolarsFfiSchema = export_field_to_c(pl_field);

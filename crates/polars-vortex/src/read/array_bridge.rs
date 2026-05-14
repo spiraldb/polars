@@ -14,10 +14,11 @@
 //! `ArrowArray` → `import_array_from_c`. Zero buffer copy — only the 9-field C-ABI struct
 //! is moved (~80 bytes).
 //!
-//! Polars-arrow's own `import_array_from_c` doesn't take a `Field`/`Schema`; it takes a
-//! `Box<dyn Array>` + a known polars-arrow `ArrowDataType`. We already have the dtype
-//! from [`super::schema::vortex_dtype_to_arrow_dtype`], so we plumb that through column
-//! by column.
+//! Polars-arrow's own `import_array_from_c` doesn't take a `Field`/`Schema`; it takes
+//! the FFI [`ArrowArray`](arrow::ffi::ArrowArray) struct plus a known polars-arrow
+//! [`ArrowDataType`]. We already have the dtype from
+//! [`super::schema::vortex_dtype_to_arrow_dtype`], so we plumb that through column by
+//! column.
 
 use std::mem;
 

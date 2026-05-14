@@ -15,8 +15,9 @@
 //! filter.
 //!
 //! Multi-column predicates, arithmetic, struct field access, and `RegexMatch` stay as
-//! residual for now (PR-3 follow-ups). They're correct because the multi-scan layer
-//! always applies the original `predicate.predicate` post-decode.
+//! residual for now (tracked under PR-13 — aggressive AExpr-based pushdown). They're
+//! correct because the multi-scan layer always applies the original
+//! `predicate.predicate` post-decode.
 
 use polars_core::prelude::AnyValue;
 use polars_io::predicates::{ScanIOPredicate, SpecializedColumnPredicate};
@@ -33,16 +34,27 @@ use vortex::expr::{
 /// emitted morsels).
 ///
 /// Returns `None` when nothing pushable was found.
+///
+/// Conjuncts are emitted in column-name sorted order so the resulting Vortex
+/// `Expression` is deterministic — `ColumnPredicates::predicates` is a hash map
+/// whose iteration order varies, and Vortex's pruning evaluator may short-circuit
+/// left-to-right, so the order matters for both reproducibility and (potentially)
+/// pruning effectiveness.
 pub fn polars_to_vortex_predicate(scan_predicate: &ScanIOPredicate) -> Option<Expression> {
-    let mut per_column = Vec::new();
-    for (column_name, (_phys_expr, specialized_opt)) in scan_predicate.column_predicates.predicates.iter() {
-        let Some(specialized) = specialized_opt else {
-            continue;
-        };
-        if let Some(expr) = convert_specialized(column_name, specialized) {
-            per_column.push(expr);
-        }
-    }
+    let mut per_column_pairs: Vec<(&PlSmallStr, &SpecializedColumnPredicate)> = scan_predicate
+        .column_predicates
+        .predicates
+        .iter()
+        .filter_map(|(name, (_, specialized_opt))| {
+            specialized_opt.as_ref().map(|s| (name, s))
+        })
+        .collect();
+    per_column_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let per_column: Vec<Expression> = per_column_pairs
+        .into_iter()
+        .filter_map(|(name, specialized)| convert_specialized(name, specialized))
+        .collect();
     and_collect(per_column)
 }
 
@@ -229,7 +241,15 @@ mod temporal {
     ) -> Option<VortexScalar> {
         use vortex::dtype::DecimalDType;
         use vortex::scalar::DecimalValue;
-        let dtype = DecimalDType::new(precision as u8, scale as i8);
+        // Vortex's `DecimalDType::new(u8, i8)` has narrower precision/scale ranges
+        // than Polars' `Decimal(usize, usize)`. A bare `as`-cast would silently
+        // wrap for out-of-range values, producing a Vortex scalar with completely
+        // wrong precision/scale that would mis-prune the scan. `try_into` on
+        // failure → return None, so the convertor falls back to the residual
+        // filter (which is always correct).
+        let p: u8 = precision.try_into().ok()?;
+        let s: i8 = scale.try_into().ok()?;
+        let dtype = DecimalDType::new(p, s);
         Some(VortexScalar::decimal(
             DecimalValue::I128(value),
             dtype,
