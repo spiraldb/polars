@@ -144,7 +144,6 @@ pub async fn cloud_read_at(
     cloud_options: Option<&polars_io::cloud::CloudOptions>,
     io_metrics: Option<Arc<IOMetrics>>,
 ) -> polars_error::PolarsResult<Arc<dyn VortexReadAt>> {
-    use polars_error::polars_err;
     use vortex::io::object_store::ObjectStoreReadAt;
 
     let handle = crate::session::handle();

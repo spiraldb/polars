@@ -32,7 +32,6 @@ use polars_core::frame::column::IntoColumn;
 use polars_core::prelude::Schema as PolarsSchema;
 use polars_core::series::Series;
 use polars_error::{PolarsResult, polars_err};
-use polars_utils::pl_str::PlSmallStr;
 
 /// Convert an upstream `RecordBatch` produced by Vortex into a Polars `DataFrame`,
 /// reusing the columnar buffers via the C Data Interface.

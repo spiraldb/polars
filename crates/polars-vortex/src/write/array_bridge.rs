@@ -14,7 +14,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use arrow::array::{Array as PolarsArray, ArrayRef as PolarsArrayRef};
+use arrow::array::Array as PolarsArray;
 use arrow::datatypes::Field as PolarsField;
 use arrow::ffi::{
     ArrowArray as PolarsFfiArray, ArrowSchema as PolarsFfiSchema, export_array_to_c,

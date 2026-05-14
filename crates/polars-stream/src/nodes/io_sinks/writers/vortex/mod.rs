@@ -29,6 +29,7 @@ use polars_vortex::vortex::array::ArrayRef as VortexArrayRef;
 use polars_vortex::vortex::array::stream::ArrayStreamAdapter;
 use polars_vortex::vortex::error::VortexResult;
 use polars_vortex::vortex::file::WriteOptionsSessionExt;
+use polars_vortex::write::VortexSink;
 
 use crate::async_executor::{self, TaskPriority};
 use crate::async_primitives::connector;
@@ -82,16 +83,20 @@ impl FileWriterStarter for VortexWriterStarter {
             polars_vortex::write::df_to_stream::polars_schema_to_vortex_dtype(schema.as_ref())?;
 
         let handle = async_executor::spawn(TaskPriority::Low, async move {
-            // Await the file. For now we only support local file sinks; the cloud
-            // path (Writeable::Cloud) would need `vortex-io`'s
-            // `tokio::io::AsyncWrite` adapter — wired in a follow-up alongside the
-            // existing read-side cloud support.
+            // Await the file. Locals go straight to tokio::fs::File (which has its
+            // own VortexWrite impl); cloud writers bridge through
+            // tokio_util::compat → vortex::io::AsyncWriteAdapter. Both collapse to a
+            // single VortexSink enum so the writer below is generic-free.
             let (writeable, _sync) = file.await?;
-            let tokio_file: tokio::fs::File = match writeable {
-                Writeable::Local(std_file) => tokio::fs::File::from_std(std_file),
-                _ => polars_bail!(ComputeError:
-                    "Vortex sink only supports local file paths at the moment. \
-                     Cloud sinks are pending; for now, write locally and upload."),
+            let sink: VortexSink = match writeable {
+                Writeable::Local(std_file) => {
+                    VortexSink::Local(tokio::fs::File::from_std(std_file))
+                },
+                #[cfg(feature = "cloud")]
+                Writeable::Cloud(cw) => VortexSink::cloud(cw),
+                Writeable::Dyn(_) => polars_bail!(ComputeError:
+                    "Vortex sink does not support arbitrary file descriptors. \
+                     Use a local path or a cloud URL (s3://, gs://, etc.)."),
             };
 
             // Build a channel for ArrayRef chunks. Bounded by num_pipelines for
@@ -130,7 +135,7 @@ impl FileWriterStarter for VortexWriterStarter {
 
             let write_handle = ASYNC.spawn(async move {
                 write_opts
-                    .write(tokio_file, stream)
+                    .write(sink, stream)
                     .await
                     .map_err(|e| polars_err!(ComputeError: "vortex sink write: {e}"))
             });
