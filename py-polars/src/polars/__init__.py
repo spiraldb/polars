@@ -244,6 +244,7 @@ from polars.io import (
     scan_parquet,
     scan_pyarrow_dataset,
     scan_vortex,
+    set_vortex_cache_bytes,
 )
 from polars.io.cloud import (
     CredentialProvider,
@@ -364,6 +365,7 @@ __all__ = [
     "scan_parquet",
     "scan_pyarrow_dataset",
     "scan_vortex",
+    "set_vortex_cache_bytes",
     "Catalog",
     # polars.io.cloud
     "CredentialProvider",

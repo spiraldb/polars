@@ -13,6 +13,7 @@ from polars.io.cloud.credential_provider._builder import (
 from polars.io.scan_options._options import ScanOptions
 
 with contextlib.suppress(ImportError):
+    from polars import _plr as plr  # noqa: F401
     from polars._plr import PyLazyFrame
 
 if TYPE_CHECKING:
@@ -174,6 +175,31 @@ def scan_vortex(
         scan_concurrency=scan_concurrency,
     )
     return wrap_ldf(pylf)
+
+
+def set_vortex_cache_bytes(byte_budget: int) -> None:
+    """
+    Set the process-global Vortex segment cache size, in bytes. Pass ``0`` to disable.
+
+    Vortex's segment cache stores decompressed columnar segments across queries on the
+    same file — one of its biggest perf wins over Parquet. Default is 512 MiB
+    (also tunable via the ``POLARS_VORTEX_CACHE_BYTES`` environment variable).
+
+    Parameters
+    ----------
+    byte_budget
+        Maximum number of bytes the cache may use. ``0`` disables caching.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> pl.set_vortex_cache_bytes(2 * 1024**3)  # 2 GiB  # doctest: +SKIP
+
+    See Also
+    --------
+    scan_vortex
+    """
+    plr.set_vortex_cache_bytes(int(byte_budget))
 
 
 def read_vortex(
