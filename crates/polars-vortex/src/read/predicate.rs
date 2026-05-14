@@ -135,3 +135,61 @@ fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<Vorte
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn like_literal_safe_strings() {
+        assert_eq!(bytes_to_like_literal(b"hello"), Some("hello"));
+        assert_eq!(bytes_to_like_literal(b""), Some(""));
+        assert_eq!(bytes_to_like_literal(b"a.b-c@d"), Some("a.b-c@d"));
+    }
+
+    #[test]
+    fn like_literal_refuses_wildcards() {
+        // SQL-LIKE special chars must NOT be pushed — they'd widen the predicate.
+        assert_eq!(bytes_to_like_literal(b"hello%world"), None);
+        assert_eq!(bytes_to_like_literal(b"foo_bar"), None);
+        assert_eq!(bytes_to_like_literal(b"a\\b"), None);
+        assert_eq!(bytes_to_like_literal(b"%"), None);
+        assert_eq!(bytes_to_like_literal(b"_"), None);
+        assert_eq!(bytes_to_like_literal(b"\\"), None);
+    }
+
+    #[test]
+    fn like_literal_refuses_invalid_utf8() {
+        assert_eq!(bytes_to_like_literal(&[0xff, 0xfe]), None);
+    }
+
+    #[test]
+    fn scalar_primitive_types_convert() {
+        use polars_core::scalar::Scalar;
+        use polars_core::prelude::DataType;
+
+        let s = Scalar::new(DataType::Int32, AnyValue::Int32(42));
+        assert!(polars_scalar_to_vortex(&s).is_some());
+
+        let s = Scalar::new(DataType::Float64, AnyValue::Float64(3.14));
+        assert!(polars_scalar_to_vortex(&s).is_some());
+
+        let s = Scalar::new(DataType::Boolean, AnyValue::Boolean(true));
+        assert!(polars_scalar_to_vortex(&s).is_some());
+
+        let s = Scalar::new(DataType::String, AnyValue::StringOwned("hello".into()));
+        assert!(polars_scalar_to_vortex(&s).is_some());
+    }
+
+    #[test]
+    fn scalar_null_does_not_convert() {
+        use polars_core::scalar::Scalar;
+        use polars_core::prelude::DataType;
+
+        let s = Scalar::new(DataType::Int32, AnyValue::Null);
+        // We don't yet translate AnyValue::Null because Vortex's `null` literal
+        // needs a known target DType. The convertor returns None, which the
+        // caller treats as "not pushable".
+        assert!(polars_scalar_to_vortex(&s).is_none());
+    }
+}

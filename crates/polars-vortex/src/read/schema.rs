@@ -166,3 +166,68 @@ fn vortex_time_unit_to_arrow(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primitives_map_correctly() {
+        let cases = [
+            (PType::U8, ArrowDataType::UInt8),
+            (PType::U16, ArrowDataType::UInt16),
+            (PType::U32, ArrowDataType::UInt32),
+            (PType::U64, ArrowDataType::UInt64),
+            (PType::I8, ArrowDataType::Int8),
+            (PType::I16, ArrowDataType::Int16),
+            (PType::I32, ArrowDataType::Int32),
+            (PType::I64, ArrowDataType::Int64),
+            (PType::F16, ArrowDataType::Float16),
+            (PType::F32, ArrowDataType::Float32),
+            (PType::F64, ArrowDataType::Float64),
+        ];
+        for (vortex_ptype, expected_arrow) in cases {
+            let dt = DType::Primitive(vortex_ptype, Nullability::Nullable);
+            assert_eq!(
+                vortex_dtype_to_arrow_dtype(&dt).unwrap(),
+                expected_arrow,
+                "{vortex_ptype:?} should map to {expected_arrow:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn utf8_and_binary_become_view_variants() {
+        let utf8 = DType::Utf8(Nullability::Nullable);
+        assert_eq!(vortex_dtype_to_arrow_dtype(&utf8).unwrap(), ArrowDataType::Utf8View);
+
+        let bin = DType::Binary(Nullability::Nullable);
+        assert_eq!(vortex_dtype_to_arrow_dtype(&bin).unwrap(), ArrowDataType::BinaryView);
+    }
+
+    #[test]
+    fn top_level_must_be_struct() {
+        let not_struct = DType::Bool(Nullability::Nullable);
+        let err = vortex_dtype_to_schema(&not_struct).unwrap_err();
+        assert!(
+            err.to_string().contains("DType::Struct"),
+            "error should mention DType::Struct, got: {err}"
+        );
+    }
+
+    #[test]
+    fn top_level_struct_must_be_non_nullable() {
+        use vortex::dtype::{FieldName, StructFields};
+
+        let inner = vec![DType::Bool(Nullability::Nullable)];
+        let names: Vec<FieldName> = vec!["x".into()];
+        let fields = StructFields::new(names.into(), inner);
+        let nullable_struct = DType::Struct(fields, Nullability::Nullable);
+
+        let err = vortex_dtype_to_schema(&nullable_struct).unwrap_err();
+        assert!(
+            err.to_string().contains("must be NonNullable"),
+            "error should explain nullability constraint, got: {err}"
+        );
+    }
+}
