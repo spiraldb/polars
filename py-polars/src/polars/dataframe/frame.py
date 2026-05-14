@@ -4041,6 +4041,50 @@ class DataFrame:
             )
         return target if return_bytes else None  # type: ignore[return-value]
 
+    def write_vortex(
+        self,
+        file: str | Path,
+        *,
+        storage_options: StorageOptionsDict | None = None,
+        credential_provider: (
+            CredentialProviderFunction | Literal["auto"] | None
+        ) = "auto",
+    ) -> None:
+        """
+        Write to a Vortex file.
+
+        Vortex is a high-performance columnar file format with rich pushdown and
+        zone-level pruning. Equivalent to ``self.lazy().sink_vortex(file)`` with the
+        ``streaming`` engine.
+
+        Parameters
+        ----------
+        file
+            Path or writable file-like object to which the Vortex data will be
+            written.
+        storage_options
+            Cloud storage authentication and configuration (cloud sink support is
+            pending — see ``LazyFrame.sink_vortex``).
+        credential_provider
+            Cloud credential provider.
+
+        See Also
+        --------
+        pl.scan_vortex : Lazily read a Vortex file.
+        pl.read_vortex : Eagerly read a Vortex file.
+        LazyFrame.sink_vortex : Write to a Vortex file in streaming mode.
+        """
+        from polars.lazyframe.opt_flags import QueryOptFlags
+
+        with contextlib.suppress(UnstableWarning):
+            self.lazy().sink_vortex(
+                file,
+                storage_options=storage_options,
+                credential_provider=credential_provider,
+                optimizations=QueryOptFlags._eager(),
+                engine="streaming",
+            )
+
     @overload
     def write_ipc_stream(
         self,
