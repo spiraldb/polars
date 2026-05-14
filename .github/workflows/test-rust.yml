@@ -60,6 +60,7 @@ jobs:
           -p polars-sql
           -p polars-time
           -p polars-utils
+          -p polars-vortex
 
       - name: Run tests
         if: github.ref_name != 'main'
@@ -77,6 +78,7 @@ jobs:
           -p polars-sql
           -p polars-time
           -p polars-utils
+          -p polars-vortex
 
   integration-test:
     runs-on: ${{ matrix.os }}
