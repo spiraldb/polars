@@ -7,30 +7,34 @@ use polars_core::schema::SchemaRef;
 /// Read-side options for a Vortex scan. Lives in [`polars_plan::dsl::FileScanIR::Vortex`].
 ///
 /// Kept compact (the IR enum has a `size_of <= 80` assertion).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "dsl-schema", derive(schemars::JsonSchema))]
 pub struct VortexScanOptions {
     /// User-provided schema. If supplied, schema inference at DSL→IR conversion is skipped.
     pub schema: Option<SchemaRef>,
-    /// Whether to populate `UnifiedScanArgs::table_statistics` from the file's footer stats,
-    /// enabling whole-file pruning at the optimizer level.
-    pub use_statistics: bool,
     /// If true (default), translate Polars predicates to Vortex `Expression` and push them as
     /// the scan filter.
     pub push_predicate: bool,
-    /// If true (default), push column projection as a Vortex `pack(...)` projection expression.
-    pub push_projection: bool,
     /// Initial postscript read size, passed to `VortexOpenOptions::with_initial_read_size`.
     pub initial_read_size: Option<usize>,
-    /// Per-file scan concurrency, passed to `ScanBuilder::with_concurrency`. Defaults to a value
-    /// derived from `num_pipelines`.
+    /// Per-file scan concurrency, passed to `ScanBuilder::with_concurrency`. `None` lets
+    /// Vortex pick a default based on the layout's natural splits.
     pub scan_concurrency: Option<NonZeroUsize>,
     /// Segment cache mode for this scan.
     pub cache: VortexCacheMode,
-    /// Turn on additional convertor coverage (e.g. temporal extracts, list ops). Off by default
-    /// to keep the convertor surface predictable.
-    pub aggressive_pushdown: bool,
+}
+
+impl Default for VortexScanOptions {
+    fn default() -> Self {
+        Self {
+            schema: None,
+            push_predicate: true,
+            initial_read_size: None,
+            scan_concurrency: None,
+            cache: VortexCacheMode::default(),
+        }
+    }
 }
 
 /// Controls how the Vortex segment cache is wired up per-scan.

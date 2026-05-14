@@ -78,7 +78,7 @@ serde = [
 ]
 parquet = ["polars-io/parquet", "polars-parquet"]
 vortex = ["polars-vortex"]
-cloud = ["polars-io/cloud"]
+cloud = ["polars-io/cloud", "polars-vortex?/cloud"]
 ipc = ["polars-io/ipc"]
 json = ["polars-io/json", "polars-json"]
 scan_lines = []

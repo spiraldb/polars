@@ -293,7 +293,7 @@ pub(super) async fn parquet_file_info(
 pub(super) async fn vortex_file_info(
     first_scan_source: ScanSourceRef<'_>,
     row_index: Option<&RowIndex>,
-    _cloud_options: Option<&polars_io::cloud::CloudOptions>,
+    cloud_options: Option<&polars_io::cloud::CloudOptions>,
     n_sources: usize,
 ) -> PolarsResult<(FileInfo, Option<polars_vortex::read::metadata::VortexFooterRef>)> {
     use polars_core::runtime::ASYNC;
@@ -307,10 +307,17 @@ pub(super) async fn vortex_file_info(
         ScanSourceRef::Path(path) if !path.has_scheme() => {
             local_file_read_at(path.as_std_path(), None)?
         }
+        #[cfg(feature = "cloud")]
+        ScanSourceRef::Path(path) => {
+            polars_vortex::read::read_at::cloud_read_at(path.clone(), cloud_options, None)
+                .await?
+        }
+        #[cfg(not(feature = "cloud"))]
         ScanSourceRef::Path(_) => {
+            let _ = cloud_options;
             polars_bail!(ComputeError:
-                "Vortex cloud schema discovery is not yet wired up; pass a local path \
-                 or `schema=...` (cloud support is PR-5).")
+                "Vortex was built without the `cloud` feature; rebuild Polars with \
+                 `--features vortex,cloud` to discover schemas from S3/GCS/Azure paths.")
         }
         ScanSourceRef::Buffer(buf) => {
             in_memory_read_at(buf.as_slice().to_vec(), None, None)

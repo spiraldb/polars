@@ -132,6 +132,7 @@ dtype-date = [
   "temporal",
   "polars-expr/dtype-date",
   "polars-mem-engine/dtype-date",
+  "polars-vortex?/dtype-date",
 ]
 dtype-datetime = [
   "polars-plan/dtype-datetime",
@@ -140,12 +141,14 @@ dtype-datetime = [
   "temporal",
   "polars-expr/dtype-datetime",
   "polars-mem-engine/dtype-datetime",
+  "polars-vortex?/dtype-datetime",
 ]
 dtype-decimal = [
   "polars-plan/dtype-decimal",
   "polars-expr/dtype-decimal",
   "polars-stream?/dtype-decimal",
   "polars-mem-engine/dtype-decimal",
+  "polars-vortex?/dtype-decimal",
 ]
 dtype-duration = [
   "polars-plan/dtype-duration",
@@ -186,6 +189,7 @@ dtype-time = [
   "temporal",
   "polars-expr/dtype-time",
   "polars-mem-engine/dtype-time",
+  "polars-vortex?/dtype-time",
 ]
 dtype-u128 = [
   "polars-plan/dtype-u128",

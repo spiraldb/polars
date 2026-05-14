@@ -7,7 +7,6 @@
 //! [`crate::write::array_bridge`] moves the per-column buffers zero-copy.
 
 use std::mem;
-use std::sync::Arc;
 
 use arrow::array::Array as PolarsArray;
 use arrow::datatypes::ArrowSchema as PolarsArrowSchema;
@@ -21,7 +20,7 @@ use polars_core::schema::{Schema as PolarsSchema, SchemaExt};
 use polars_error::{PolarsResult, polars_err};
 use vortex::array::ArrayRef as VortexArrayRef;
 use vortex::array::arrow::FromArrowArray;
-use vortex::dtype::{DType, Nullability};
+use vortex::dtype::DType;
 use vortex::dtype::arrow::FromArrowType;
 
 use crate::write::array_bridge::polars_chunk_to_upstream_record_batch;
@@ -35,23 +34,16 @@ use crate::write::array_bridge::polars_chunk_to_upstream_record_batch;
 pub fn dataframe_to_vortex_chunks(
     df: &DataFrame,
 ) -> PolarsResult<(DType, Vec<VortexArrayRef>)> {
-    // Build the polars-arrow schema once.
+    // Build the polars-arrow schema and derive the top-level Vortex DType
+    // upfront. Doing this before any chunk conversion gives us a real dtype for
+    // the n_chunks == 0 case and avoids re-computing it per chunk.
     let pl_schema = df.schema();
     let pl_arrow_schema: PolarsArrowSchema = pl_schema.to_arrow(CompatLevel::newest());
+    let top_dtype = polars_schema_to_vortex_dtype(&pl_schema)?;
 
     let columns = df.columns();
     if columns.is_empty() {
-        // Empty schema → empty struct; the writer will emit a header-only file.
-        return Ok((
-            DType::Struct(
-                vortex::dtype::StructFields::new(
-                    vortex::dtype::FieldNames::default(),
-                    vec![],
-                ),
-                Nullability::NonNullable,
-            ),
-            Vec::new(),
-        ));
+        return Ok((top_dtype, Vec::new()));
     }
 
     let n_chunks = columns[0].as_materialized_series().chunks().len();
@@ -64,7 +56,6 @@ pub fn dataframe_to_vortex_chunks(
     }
 
     let mut chunks = Vec::with_capacity(n_chunks);
-    let mut top_dtype: Option<DType> = None;
     for chunk_idx in 0..n_chunks {
         // polars-arrow stores chunks as `Box<dyn Array>`; clone each via the trait's
         // `to_boxed` (cheap — buffers stay shared).
@@ -74,10 +65,11 @@ pub fn dataframe_to_vortex_chunks(
                 c.as_materialized_series()
                     .chunks()
                     .get(chunk_idx)
-                    .expect("chunk index in range")
-                    .to_boxed()
+                    .map(|a| a.to_boxed())
+                    .ok_or_else(|| polars_err!(ComputeError:
+                        "vortex write: column missing chunk {chunk_idx} (have {n_chunks})"))
             })
-            .collect();
+            .collect::<PolarsResult<_>>()?;
 
         // Bridge polars columns → upstream `RecordBatch` via the C ABI.
         let rb = polars_chunk_to_upstream_record_batch(column_boxes, &pl_arrow_schema)?;
@@ -85,13 +77,6 @@ pub fn dataframe_to_vortex_chunks(
         // Vortex doesn't have a direct `RecordBatch -> ArrayRef`, but does have
         // `FromArrowArray<&StructArray>`. RecordBatch -> StructArray is a no-op
         // wrap (same schema, same columns).
-        let schema: &Arc<UpstreamSchema> = rb.schema_ref();
-        if top_dtype.is_none() {
-            // Top-level struct DType, derived from the upstream schema.
-            top_dtype = Some(<DType as FromArrowType<&UpstreamSchema>>::from_arrow(
-                schema.as_ref(),
-            ));
-        }
         let struct_array: StructArray = rb.into();
         let arr = <VortexArrayRef as FromArrowArray<&StructArray>>::from_arrow(
             &struct_array,
@@ -101,7 +86,6 @@ pub fn dataframe_to_vortex_chunks(
         chunks.push(arr);
     }
 
-    let top_dtype = top_dtype.expect("at least one chunk");
     Ok((top_dtype, chunks))
 }
 
@@ -113,12 +97,17 @@ pub fn dataframe_to_vortex_chunks(
 /// (field-by-field via the C-ABI struct transmute) → Vortex `DType` via
 /// `FromArrowType<&Schema>`.
 pub fn polars_schema_to_vortex_dtype(pl_schema: &PolarsSchema) -> PolarsResult<DType> {
+    // Compile-time: matching size + alignment for the schema FFI structs.
+    // See crate::read::array_bridge for the full layout-compatibility argument.
+    const _: () = assert!(mem::size_of::<PolarsFfiSchema>() == mem::size_of::<FFI_ArrowSchema>());
+    const _: () = assert!(mem::align_of::<PolarsFfiSchema>() == mem::align_of::<FFI_ArrowSchema>());
+
     let pl_arrow_schema = pl_schema.to_arrow(CompatLevel::newest());
     let mut up_fields: Vec<UpstreamField> = Vec::with_capacity(pl_arrow_schema.len());
     for (_, pl_field) in pl_arrow_schema.iter() {
         let pl_ffi: PolarsFfiSchema = export_field_to_c(pl_field);
-        const _: () = assert!(mem::size_of::<PolarsFfiSchema>() == mem::size_of::<FFI_ArrowSchema>());
-        // SAFETY: both structs are `#[repr(C)]` with the Arrow C Data Interface layout.
+        // SAFETY: both structs are `#[repr(C)]` with the Arrow C Data Interface layout
+        // (verified above).
         let up_ffi: FFI_ArrowSchema = unsafe { mem::transmute(pl_ffi) };
         let up_field = UpstreamField::try_from(&up_ffi).map_err(|e| {
             polars_err!(ComputeError: "vortex write: schema FFI Field conversion: {e}")

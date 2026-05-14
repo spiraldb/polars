@@ -35,10 +35,7 @@ def scan_vortex(
     n_rows: int | None = None,
     row_index_name: str | None = None,
     row_index_offset: int = 0,
-    use_statistics: bool = True,
     push_predicate: bool = True,
-    push_projection: bool = True,
-    aggressive_pushdown: bool = False,
     initial_read_size: int | None = None,
     scan_concurrency: int | None = None,
     hive_partitioning: bool | None = None,
@@ -73,25 +70,18 @@ def scan_vortex(
         If set, insert a row index column with this name.
     row_index_offset
         Offset to start the row index column (only used if ``row_index_name`` is set).
-    use_statistics
-        If True (default), populate ``table_statistics`` from the Vortex footer so the
-        optimizer can perform whole-file pruning.
     push_predicate
         If True (default), translate the pushable parts of any filter into Vortex
         expressions and hand them to ``ScanBuilder::with_filter``. Disable if a buggy
         convertor causes incorrect rows to be skipped (the multi-scan layer always
         re-applies the full predicate post-decode, so this is a perf flag, not a
         correctness flag).
-    push_projection
-        If True (default), push column projection as a Vortex ``pack(...)`` expression.
-    aggressive_pushdown
-        Enable additional pushdown shapes (temporal extracts, struct field access).
-        Off by default to keep the convertor surface conservative.
     initial_read_size
         Override Vortex's initial postscript read size (in bytes). Tune for high-latency
         object stores when the default round-trip is suboptimal.
     scan_concurrency
         Vortex per-file scan concurrency (passed to ``ScanBuilder::with_concurrency``).
+        ``None`` lets Vortex pick based on the layout's natural splits.
     hive_partitioning
         Use hive-style partition extraction from path components.
     glob
@@ -167,10 +157,7 @@ def scan_vortex(
             table_statistics=None,
             row_count=None,
         ),
-        use_statistics=use_statistics,
         push_predicate=push_predicate,
-        push_projection=push_projection,
-        aggressive_pushdown=aggressive_pushdown,
         initial_read_size=initial_read_size,
         scan_concurrency=scan_concurrency,
     )
@@ -208,7 +195,6 @@ def read_vortex(
     n_rows: int | None = None,
     row_index_name: str | None = None,
     row_index_offset: int = 0,
-    use_statistics: bool = True,
     schema: SchemaDict | None = None,
     rechunk: bool = False,
     storage_options: StorageOptionsDict | None = None,
@@ -229,7 +215,6 @@ def read_vortex(
         n_rows=n_rows,
         row_index_name=row_index_name,
         row_index_offset=row_index_offset,
-        use_statistics=use_statistics,
         schema=schema,
         rechunk=rechunk,
         storage_options=storage_options,

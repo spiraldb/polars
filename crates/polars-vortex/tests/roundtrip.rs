@@ -1,15 +1,26 @@
-//! Roundtrip integration tests for the polars-vortex writer.
+//! Roundtrip integration tests for the polars-vortex writer + read bridge.
 //!
-//! Exercise the full eager-write path (`write_vortex`) end-to-end, then verify
-//! the resulting file is non-empty and re-openable through the global Vortex
-//! session. They live here so they only need polars-core + the global Vortex
-//! session — no streaming-engine surface required, which would create a cycle.
+//! These exercise the full eager-write path (`write_vortex`), then read the
+//! resulting file back through the lower-level Vortex scan API + our
+//! `record_batch_to_dataframe` C-ABI bridge — exactly the path the streaming
+//! reader uses internally. We assert `DataFrame` equality, so a regression in
+//! the buffer-bridging would surface as a failed test rather than as silently
+//! mismatched bytes.
+//!
+//! Tests live here (not in `crates/polars/tests/`) so they only need polars-core
+//! + the global Vortex session, without a circular dep on polars-stream.
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use polars_core::frame::DataFrame;
 use polars_core::prelude::Column;
+use polars_core::runtime::ASYNC;
+use polars_vortex::read::array_bridge::{ArrowUpstreamSchema, arrow_dtypes_from_schema, record_batch_to_dataframe};
+use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::{handle, session};
+use polars_vortex::vortex::array::VortexSessionExecute;
+use polars_vortex::vortex::array::arrow::ArrowArrayExecutor;
 use polars_vortex::vortex::file::{OpenOptionsSessionExt, VortexFile};
 use polars_vortex::vortex::io::VortexReadAt;
 use polars_vortex::vortex::io::std_file::FileReadAt;
@@ -27,6 +38,49 @@ async fn open_back(path: &std::path::Path) -> VortexFile {
         .expect("vortex open")
 }
 
+/// Open a Vortex file at `path` and read back into a Polars DataFrame, going
+/// through the same scan → execute_record_batch → C-ABI bridge path the
+/// streaming reader uses internally.
+fn read_back(path: &std::path::Path) -> DataFrame {
+    ASYNC.block_on(async {
+        let vxf = open_back(path).await;
+        let (pl_schema, arrow_schema) = vortex_dtype_to_schema(vxf.dtype()).expect("schema");
+        let arrow_dtypes = arrow_dtypes_from_schema(arrow_schema.as_ref());
+        let upstream_schema: Arc<ArrowUpstreamSchema> = Arc::new(
+            vxf.dtype()
+                .to_arrow_schema()
+                .expect("dtype -> upstream schema"),
+        );
+
+        let stream = vxf
+            .scan()
+            .expect("scan")
+            .into_array_stream()
+            .expect("array stream");
+        futures::pin_mut!(stream);
+
+        let session_ref = session();
+        let mut out: Option<DataFrame> = None;
+        while let Some(chunk) = stream.next().await {
+            let array = chunk.expect("chunk");
+            let mut ctx = session_ref.create_execution_ctx();
+            let rb = array
+                .execute_record_batch(upstream_schema.as_ref(), &mut ctx)
+                .expect("execute_record_batch");
+            let df =
+                record_batch_to_dataframe(rb, &pl_schema, &arrow_dtypes).expect("bridge");
+            out = Some(match out {
+                None => df,
+                Some(mut acc) => {
+                    acc.vstack_mut(&df).expect("vstack");
+                    acc
+                }
+            });
+        }
+        out.unwrap_or_else(|| DataFrame::empty_with_schema(pl_schema.as_ref()))
+    })
+}
+
 fn make_df() -> DataFrame {
     let s0 = Column::new("ints".into(), [1_i64, 2, 3, 4, 5].as_ref());
     let s1 = Column::new("floats".into(), [1.0_f64, 2.0, 3.0, 4.0, 5.0].as_ref());
@@ -42,12 +96,8 @@ fn roundtrip_default_options() {
     let df = make_df();
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
 
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
-    assert_eq!(vxf.row_count(), 5);
-    assert!(
-        path.metadata().expect("stat").len() > 0,
-        "file should be non-empty"
-    );
+    let back = read_back(&path);
+    assert!(df.equals_missing(&back), "DataFrame round-trip mismatch:\nwrote {df:?}\nread {back:?}");
 }
 
 #[test]
@@ -63,8 +113,8 @@ fn roundtrip_uncompressed() {
     };
     write_vortex(&df, &path, &opts).expect("write");
 
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
-    assert_eq!(vxf.row_count(), 5);
+    let back = read_back(&path);
+    assert!(df.equals_missing(&back));
 }
 
 #[test]
@@ -80,8 +130,8 @@ fn roundtrip_small_row_block() {
     };
     write_vortex(&df, &path, &opts).expect("write");
 
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
-    assert_eq!(vxf.row_count(), 5);
+    let back = read_back(&path);
+    assert!(df.equals_missing(&back));
 }
 
 #[test]
@@ -92,7 +142,7 @@ fn schema_preserved_field_names() {
     let df = make_df();
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
 
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
+    let vxf = ASYNC.block_on(async { open_back(&path).await });
     let names: Vec<&str> = vxf
         .dtype()
         .as_struct_fields_opt()
@@ -117,8 +167,8 @@ fn roundtrip_nullable() {
     let df = DataFrame::new(5, vec![s0, s1]).expect("build df");
 
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
-    assert_eq!(vxf.row_count(), 5);
+    let back = read_back(&path);
+    assert!(df.equals_missing(&back), "nullable mismatch:\nwrote {df:?}\nread {back:?}");
 }
 
 #[test]
@@ -130,8 +180,8 @@ fn roundtrip_boolean() {
     let df = DataFrame::new(5, vec![s0]).expect("build df");
 
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
-    assert_eq!(vxf.row_count(), 5);
+    let back = read_back(&path);
+    assert!(df.equals_missing(&back));
 }
 
 #[test]
@@ -143,8 +193,11 @@ fn roundtrip_empty_dataframe() {
     let df = DataFrame::new(0, vec![s0]).expect("build df");
 
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
-    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
-    assert_eq!(vxf.row_count(), 0);
+    let back = read_back(&path);
+    // Zero-row DataFrames may have 0 chunks (so `read_back` returns the
+    // empty-with-schema fallback) — verify row count + schema names match.
+    assert_eq!(back.height(), 0);
+    assert_eq!(back.get_column_names(), df.get_column_names());
 }
 
 #[test]

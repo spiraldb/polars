@@ -104,8 +104,9 @@ impl FileWriterStarter for VortexWriterStarter {
                 mpsc::channel::<VortexResult<VortexArrayRef>>(num_pipelines.get());
 
             // Producer: drain morsel_rx, convert each DataFrame to Vortex ArrayRefs,
-            // send through chunk_tx.
-            let producer_dtype = top_dtype.clone();
+            // send through chunk_tx. The chunk-level dtype derived inside
+            // `dataframe_to_vortex_chunks` equals `top_dtype` and is discarded here;
+            // the consumer side uses `top_dtype` directly via `ArrayStreamAdapter::new`.
             let producer = async_executor::AbortOnDropHandle::new(async_executor::spawn(
                 TaskPriority::High,
                 async move {
@@ -123,7 +124,6 @@ impl FileWriterStarter for VortexWriterStarter {
                     }
                     // Sentinel: drop tx → stream end-of-input
                     drop(tx);
-                    let _ = producer_dtype; // keep dtype alive for the producer's life
                     Ok(())
                 },
             ));

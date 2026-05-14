@@ -21,8 +21,9 @@ use crate::write::strategy::build_write_options;
 /// Write a Polars [`DataFrame`] to a Vortex file at `path`. Creates / truncates the
 /// destination.
 ///
-/// Options control layout (Adaptive / Flat / Chunked / Zoned) and compression. The
-/// default settings produce a BtrBlocks-compressed Zoned layout, which is the
+/// Options control the BtrBlocks compression scheme set, row-block size (zone-pruning
+/// granularity), and whether the Vortex DType is embedded. Defaults produce a
+/// fully-pruning BtrBlocks file (Vortex's standard chunked-zoned layout) — the
 /// recommended shape for filtered scans.
 pub fn write_vortex(
     df: &DataFrame,

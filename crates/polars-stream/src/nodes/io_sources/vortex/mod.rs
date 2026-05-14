@@ -1,9 +1,10 @@
 //! Streaming Vortex source node.
 //!
-//! `initialize()` is wired up: it opens the file via `VortexOpenOptions`, caches the
-//! `Footer`, and exposes the schema. `begin_read()` is still a stub — the projection /
-//! predicate / pre_slice → `ScanRequest` translation plus the morsel-emitting loop
-//! land in subsequent sub-PRs (see PR-2-impl in the plan).
+//! `initialize()` opens the file via `VortexOpenOptions`, caches the `Footer`, and
+//! exposes the schema. `begin_read()` builds a Vortex `ScanBuilder` from the args
+//! Polars passes in (`pre_slice`, predicate, scan concurrency), drives
+//! `into_array_stream()`, and feeds each chunk through the C-ABI bridge into
+//! Polars morsels.
 
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use polars_vortex::read::array_bridge::{
 use polars_vortex::read::predicate::polars_to_vortex_predicate;
 use polars_vortex::read::read_at::local_file_read_at;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
-use polars_vortex::session::{handle as vortex_handle, session};
+use polars_vortex::session::session;
 use polars_vortex::vortex;
 use polars_vortex::read::array_bridge::ArrowUpstreamSchema;
 use polars_vortex::vortex::array::ArrayRef as VortexArrayRef;
@@ -72,7 +73,8 @@ pub struct InitializedState {
 
 impl VortexFileReader {
     /// Build the underlying `VortexReadAt` based on the scan source. Local files go
-    /// through `polars-vortex`'s `local_file_read_at`. Cloud paths are PR-5.
+    /// through `polars-vortex`'s `local_file_read_at`; cloud paths go through
+    /// `cloud_read_at` (built on top of `polars_io::cloud::build_object_store`).
     async fn build_read_at(
         &self,
     ) -> PolarsResult<Arc<dyn vortex::io::VortexReadAt>> {
@@ -242,14 +244,14 @@ impl FileReader for VortexFileReader {
             None
         };
 
+        let scan_concurrency = self.options.scan_concurrency;
+
         let (mut tx, rx) = FileReaderOutputSend::new_serial();
 
         // Spawn the decode loop on the streaming async executor (Low priority — I/O work,
         // not on the critical path for the next pipeline operator).
         let handle = async_executor::spawn(TaskPriority::Low, async move {
-            // Touch the session so its runtime is installed before any Vortex spawns.
             let session_ref = session();
-            let _ = vortex_handle();
 
             // Build the scan.
             let mut scan = vxf
@@ -260,6 +262,9 @@ impl FileReader for VortexFileReader {
             }
             if let Some(filter) = filter_expr {
                 scan = scan.with_filter(filter);
+            }
+            if let Some(c) = scan_concurrency {
+                scan = scan.with_concurrency(c.get());
             }
 
             let stream = scan
@@ -296,8 +301,3 @@ impl FileReader for VortexFileReader {
         Ok((rx, handle))
     }
 }
-
-// Re-export the IOMetrics import so unused-import lints are happy when this module is
-// compiled standalone.
-#[allow(unused_imports)]
-use IOMetrics as _;

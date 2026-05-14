@@ -42,6 +42,13 @@ default = []
 cloud = ["vortex/object_store", "polars-io/cloud", "dep:object_store", "dep:tokio-util"]
 serde = ["dep:serde", "polars-io/serde", "polars-utils/serde"]
 dsl-schema = ["dep:schemars", "polars-utils/dsl-schema"]
+# Enables the temporal/decimal scalar arms in the predicate convertor. Off by
+# default — without these, filters on Date/Datetime/Time/Decimal scalars fall
+# back to the residual filter (still correct, just no pruning).
+dtype-date = ["polars-core/dtype-date"]
+dtype-datetime = ["polars-core/dtype-datetime"]
+dtype-time = ["polars-core/dtype-time"]
+dtype-decimal = ["polars-core/dtype-decimal"]
 
 [dev-dependencies]
 tempfile = "3"

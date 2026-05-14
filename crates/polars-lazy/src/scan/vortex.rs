@@ -27,10 +27,7 @@ pub struct ScanArgsVortex {
     pub allow_missing_columns: bool,
 
     // Vortex-specific knobs.
-    pub use_statistics: bool,
     pub push_predicate: bool,
-    pub push_projection: bool,
-    pub aggressive_pushdown: bool,
     pub initial_read_size: Option<usize>,
     pub scan_concurrency: Option<NonZeroUsize>,
     pub segment_cache: VortexCacheMode,
@@ -49,10 +46,7 @@ impl Default for ScanArgsVortex {
             glob: true,
             include_file_paths: None,
             allow_missing_columns: false,
-            use_statistics: true,
             push_predicate: true,
-            push_projection: true,
-            aggressive_pushdown: false,
             initial_read_size: None,
             scan_concurrency: None,
             segment_cache: VortexCacheMode::Global,
@@ -79,10 +73,7 @@ impl LazyFileListReader for LazyVortexReader {
     fn finish(self) -> PolarsResult<LazyFrame> {
         let vortex_options = VortexScanOptions {
             schema: self.args.schema,
-            use_statistics: self.args.use_statistics,
             push_predicate: self.args.push_predicate,
-            push_projection: self.args.push_projection,
-            aggressive_pushdown: self.args.aggressive_pushdown,
             initial_read_size: self.args.initial_read_size,
             scan_concurrency: self.args.scan_concurrency,
             cache: self.args.segment_cache,

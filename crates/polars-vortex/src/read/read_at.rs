@@ -157,7 +157,6 @@ pub async fn cloud_read_at(
     let object_path = ::object_store::path::Path::from(location.prefix.as_str());
     let inner = Arc::new(ObjectStoreReadAt::new(store, object_path, handle));
 
-    let _ = uri_str; // silence "unused if metrics is None" for clarity
     Ok(Arc::new(PolarsInstrumentedVortexReadAt::new(
         inner,
         Some(uri_str),

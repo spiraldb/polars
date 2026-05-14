@@ -110,9 +110,16 @@ fn bytes_to_like_literal(bytes: &[u8]) -> Option<&str> {
     Some(s)
 }
 
-/// Convert a Polars `Scalar` into a Vortex `Scalar` for the common primitive types.
-/// Returns `None` for variants we don't yet translate (extension types, nested types,
-/// etc.) — the caller treats this as "not pushable" and falls back to the residual.
+/// Convert a Polars `Scalar` into a Vortex `Scalar` for the common types.
+/// Returns `None` for variants we don't yet translate (extension types we don't have
+/// a Vortex analogue for, nested types, etc.) — the caller treats this as "not
+/// pushable" and falls back to the residual filter.
+///
+/// Scalars are constructed with `Nullability::Nullable` since the optimizer's
+/// `SpecializedColumnPredicate` doesn't carry the column's nullability. Vortex's
+/// type system unifies nullability when comparing against a `NonNullable` column,
+/// so this is correct but may reduce pruning effectiveness if Vortex's pruning
+/// evaluator is stricter than its comparison evaluator.
 fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<VortexScalar> {
     let nul = Nullability::Nullable;
     Some(match scalar.value() {
@@ -132,8 +139,103 @@ fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<Vorte
         AnyValue::StringOwned(s) => VortexScalar::utf8(s.to_string(), nul),
         AnyValue::Binary(b) => VortexScalar::binary(b.to_vec(), nul),
         AnyValue::BinaryOwned(b) => VortexScalar::binary(b.clone(), nul),
+        // Temporal and Decimal arms live in dedicated helpers so they can be
+        // feature-gated cleanly on polars-core's dtype-* features without
+        // ballooning this match.
+        #[cfg(feature = "dtype-date")]
+        AnyValue::Date(days) => temporal::date_scalar(*days, nul)?,
+        #[cfg(feature = "dtype-datetime")]
+        AnyValue::Datetime(value, unit, tz) => {
+            temporal::datetime_scalar(*value, *unit, tz.map(|t| t.as_ref()), nul)?
+        }
+        #[cfg(feature = "dtype-datetime")]
+        AnyValue::DatetimeOwned(value, unit, tz) => temporal::datetime_scalar(
+            *value,
+            *unit,
+            tz.as_ref().map(|t| t.as_ref().as_ref()),
+            nul,
+        )?,
+        #[cfg(feature = "dtype-time")]
+        AnyValue::Time(ns) => temporal::time_scalar(*ns, nul)?,
+        #[cfg(feature = "dtype-decimal")]
+        AnyValue::Decimal(v, precision, scale) => {
+            temporal::decimal_scalar(*v, *precision, *scale, nul)?
+        }
+        // Duration has no Vortex extension dtype analogue; fall through to residual.
         _ => return None,
     })
+}
+
+#[cfg(any(
+    feature = "dtype-date",
+    feature = "dtype-datetime",
+    feature = "dtype-time",
+    feature = "dtype-decimal",
+))]
+mod temporal {
+    use vortex::array::scalar::Scalar as VortexScalar;
+    use vortex::dtype::Nullability;
+
+    #[cfg(any(feature = "dtype-date", feature = "dtype-datetime", feature = "dtype-time"))]
+    use vortex::array::extension::datetime::TimeUnit as VortexTimeUnit;
+
+    #[cfg(feature = "dtype-datetime")]
+    use polars_core::prelude::TimeUnit as PolarsTimeUnit;
+
+    #[cfg(feature = "dtype-date")]
+    pub(super) fn date_scalar(days: i32, nul: Nullability) -> Option<VortexScalar> {
+        use vortex::array::extension::datetime::Date;
+        let ext = Date::new(VortexTimeUnit::Days, nul).erased();
+        let storage = VortexScalar::primitive(days, nul);
+        Some(VortexScalar::extension_ref(ext, storage))
+    }
+
+    #[cfg(feature = "dtype-datetime")]
+    pub(super) fn datetime_scalar(
+        value: i64,
+        unit: PolarsTimeUnit,
+        tz: Option<&str>,
+        nul: Nullability,
+    ) -> Option<VortexScalar> {
+        use std::sync::Arc;
+
+        use vortex::array::extension::datetime::Timestamp;
+
+        let vortex_unit = match unit {
+            PolarsTimeUnit::Nanoseconds => VortexTimeUnit::Nanoseconds,
+            PolarsTimeUnit::Microseconds => VortexTimeUnit::Microseconds,
+            PolarsTimeUnit::Milliseconds => VortexTimeUnit::Milliseconds,
+        };
+        let tz_arc: Option<Arc<str>> = tz.map(Arc::from);
+        let ext = Timestamp::new_with_tz(vortex_unit, tz_arc, nul).erased();
+        let storage = VortexScalar::primitive(value, nul);
+        Some(VortexScalar::extension_ref(ext, storage))
+    }
+
+    #[cfg(feature = "dtype-time")]
+    pub(super) fn time_scalar(ns: i64, nul: Nullability) -> Option<VortexScalar> {
+        use vortex::array::extension::datetime::Time;
+        let ext = Time::new(VortexTimeUnit::Nanoseconds, nul).erased();
+        let storage = VortexScalar::primitive(ns, nul);
+        Some(VortexScalar::extension_ref(ext, storage))
+    }
+
+    #[cfg(feature = "dtype-decimal")]
+    pub(super) fn decimal_scalar(
+        value: i128,
+        precision: usize,
+        scale: usize,
+        nul: Nullability,
+    ) -> Option<VortexScalar> {
+        use vortex::dtype::DecimalDType;
+        use vortex::scalar::DecimalValue;
+        let dtype = DecimalDType::new(precision as u8, scale as i8);
+        Some(VortexScalar::decimal(
+            DecimalValue::I128(value),
+            dtype,
+            nul,
+        ))
+    }
 }
 
 #[cfg(test)]

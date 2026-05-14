@@ -19,15 +19,26 @@ from polars.testing import assert_frame_equal
 def _vortex_available() -> bool:
     # `scan_vortex` is always exported from the Python side; whether the
     # underlying Rust binary has the `vortex` feature is what determines
-    # support. Probe by writing a tiny file — if the feature is off the call
-    # raises before any real work happens.
+    # support. Probe via a lightweight Rust-side check that's defined only
+    # when the feature is on — falls through to a write probe if the helper
+    # isn't found, so older builds still work.
     try:
-        import tempfile
+        from polars._plr import set_vortex_cache_bytes  # noqa: F401
+    except ImportError:
+        return False
+    # Real-world check that the write path is wired (catches a partial build
+    # where the symbol is present but the sink isn't). We pin on the specific
+    # AttributeError/PolarsError types so an unrelated bug doesn't silently
+    # skip the suite.
+    import tempfile
 
+    from polars.exceptions import ComputeError
+
+    try:
         with tempfile.NamedTemporaryFile(suffix=".vortex") as f:
             pl.DataFrame({"x": [1]}).write_vortex(f.name)
         return True
-    except Exception:
+    except (AttributeError, ComputeError):
         return False
 
 

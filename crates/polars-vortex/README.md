@@ -203,8 +203,9 @@ RAM, lower it explicitly (or `set_vortex_cache_bytes(0)`).
 `PolarsInstrumentedVortexReadAt` routes every read through Polars'
 `with_concurrency_budget`, controlled by `POLARS_CONCURRENCY_BUDGET` (same as other
 Polars I/O). The per-scan parallelism is controlled by
-`VortexScanOptions::scan_concurrency` (default: a function of `num_pipelines`),
-which becomes `ScanBuilder::with_concurrency`.
+`VortexScanOptions::scan_concurrency` — set to `Some(n)` to call
+`ScanBuilder::with_concurrency(n)`, or leave as `None` to let Vortex pick a
+default based on the layout's natural splits.
 
 ### Cloud auth
 
@@ -220,6 +221,9 @@ all flow through `polars_io::cloud::build_object_store`.
 | Slice (negative, e.g. `.tail(N)`) | ✅ | `restrict_to_bounds(row_count)` (footer-cached row count) |
 | Filter — `==`, `Between`, `is_in` | ✅ | `SpecializedColumnPredicate` → Vortex `Expression`     |
 | Filter — `starts_with`, `ends_with` | ✅ | LIKE pattern (wildcard-safe)                          |
+| Filter — temporal (`Date`, `Datetime`, `Time`) scalars | ✅ (when `dtype-*` features on) | Vortex Date/Time/Timestamp extension scalars |
+| Filter — `Decimal` scalars | ✅ (when `dtype-decimal` on) | Vortex `DecimalValue::I128`                            |
+| Filter — `Duration` scalars | ❌ residual | Vortex has no Duration extension dtype yet              |
 | Filter — regex             | ❌ residual | Vortex `like` doesn't do regex                       |
 | Filter — arithmetic (`col + 1 > 5`) | ❌ residual | AExpr traversal not yet wired (PR-13)           |
 | Filter — `CAST(col, ...)`  | ❌ residual | AExpr traversal (PR-13)                              |
@@ -291,13 +295,10 @@ DSL (`LazyFrame::scan_vortex`) is the right entry point.
 // Read options — embedded in FileScanIR::Vortex
 pub struct VortexScanOptions {
     pub schema: Option<SchemaRef>,
-    pub use_statistics: bool,
-    pub push_predicate: bool,         // default true — translate predicates to Vortex Expressions
-    pub push_projection: bool,        // default true
+    pub push_predicate: bool,            // default true — translate predicates to Vortex Expressions
     pub initial_read_size: Option<usize>,
     pub scan_concurrency: Option<NonZeroUsize>,
-    pub cache: VortexCacheMode,       // Global | Off | Dedicated(bytes)
-    pub aggressive_pushdown: bool,    // reserved for PR-13
+    pub cache: VortexCacheMode,          // Global | Off | Dedicated(bytes)
 }
 
 // Write options — embedded in FileWriteFormat::Vortex
@@ -326,8 +327,7 @@ pub fn polars_vortex::write::write_vortex(
 ```python
 # Read
 pl.scan_vortex(source, *, n_rows=None, row_index_name=None, row_index_offset=0,
-               use_statistics=True, push_predicate=True, push_projection=True,
-               aggressive_pushdown=False, initial_read_size=None,
+               push_predicate=True, initial_read_size=None,
                scan_concurrency=None, hive_partitioning=None, glob=True,
                hidden_file_prefix=None, schema=None, hive_schema=None,
                try_parse_hive_dates=True, rechunk=False, cache=True,

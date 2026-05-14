@@ -28,21 +28,30 @@ use polars_error::{PolarsResult, polars_err};
 /// Move a polars-arrow column into an upstream `arrow_array::ArrayRef` via the C
 /// Data Interface. The polars-arrow buffers stay where they are — the export
 /// publishes pointers, the import attaches them to upstream array structs.
+///
+/// See [`crate::read::array_bridge::record_batch_to_dataframe`] for a detailed
+/// explanation of why this bridge transmutes between the two `#[repr(C)]` C ABI
+/// structs and how the release callback handoff works.
 pub fn polars_array_to_upstream(
     array: Box<dyn PolarsArray>,
     field: &PolarsField,
 ) -> PolarsResult<UpstreamArrayRef> {
+    // Compile-time: matching struct size AND alignment for both the array
+    // and schema FFI structs.
+    const _: () = assert!(mem::size_of::<PolarsFfiArray>() == mem::size_of::<FFI_ArrowArray>());
+    const _: () = assert!(mem::align_of::<PolarsFfiArray>() == mem::align_of::<FFI_ArrowArray>());
+    const _: () = assert!(mem::size_of::<PolarsFfiSchema>() == mem::size_of::<FFI_ArrowSchema>());
+    const _: () = assert!(mem::align_of::<PolarsFfiSchema>() == mem::align_of::<FFI_ArrowSchema>());
+
+    let expected_len = array.len() as i64;
+
     // Step 1: polars-arrow side -> polars-arrow's C-ABI structs.
     let polars_array_ffi: PolarsFfiArray = export_array_to_c(array);
     let polars_schema_ffi: PolarsFfiSchema = export_field_to_c(field);
 
-    // Step 2: re-interpret the same bytes as upstream's C-ABI structs.
-    const _: () = assert!(mem::size_of::<PolarsFfiArray>() == mem::size_of::<FFI_ArrowArray>());
-    const _: () = assert!(mem::size_of::<PolarsFfiSchema>() == mem::size_of::<FFI_ArrowSchema>());
-
-    // SAFETY: same `#[repr(C)]` layout per the Arrow C Data Interface spec. The
-    // release callbacks in the polars-arrow structs correctly free the polars
-    // buffers when upstream drops the import.
+    // SAFETY: same `#[repr(C)]` layout per the Arrow C Data Interface spec —
+    // verified at compile time above. The release callbacks in the polars-arrow
+    // structs correctly free the polars buffers when upstream drops the import.
     let up_array: FFI_ArrowArray = unsafe { mem::transmute(polars_array_ffi) };
     let up_schema: FFI_ArrowSchema = unsafe { mem::transmute(polars_schema_ffi) };
 
@@ -50,7 +59,17 @@ pub fn polars_array_to_upstream(
     // SAFETY: structs came from a valid polars-arrow export, satisfying C ABI invariants.
     let array_data = unsafe { arrow_array::ffi::from_ffi(up_array, &up_schema) }
         .map_err(|e| polars_err!(ComputeError: "vortex write FFI import: {e}"))?;
-    Ok(make_array(array_data))
+    let imported = make_array(array_data);
+
+    // Runtime sanity check: bridge round-trip must preserve length.
+    if imported.len() as i64 != expected_len {
+        return Err(polars_err!(ComputeError:
+            "vortex bridge: FFI round-trip length mismatch (polars={expected_len}, \
+             upstream={}). This is a polars-arrow / arrow-rs layout incompatibility — \
+             please file an issue.", imported.len()));
+    }
+
+    Ok(imported)
 }
 
 /// Convert a slice of polars-arrow column arrays + a polars-arrow schema into an

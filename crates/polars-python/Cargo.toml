@@ -143,6 +143,10 @@ vortex = [
   "polars-mem-engine/vortex",
   "polars-lazy/vortex",
   "dep:polars-vortex",
+  # `serde` derives on VortexScanOptions are required by the lazyframe visitor
+  # (which serializes scan options to JSON for the Python AST view) — that
+  # visitor is built whenever `json` is on, which py-polars always enables.
+  "polars-vortex/serde",
 ]
 ipc = ["polars/ipc", "polars-mem-engine/ipc"]
 ipc_streaming = ["polars/ipc_streaming"]

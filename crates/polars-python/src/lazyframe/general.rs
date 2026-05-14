@@ -331,18 +331,13 @@ impl PyLazyFrame {
     #[cfg(feature = "vortex")]
     #[staticmethod]
     #[pyo3(signature = (
-        sources, schema, scan_options, use_statistics, push_predicate, push_projection,
-        aggressive_pushdown, initial_read_size, scan_concurrency
+        sources, schema, scan_options, push_predicate, initial_read_size, scan_concurrency
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn new_from_vortex(
         sources: Wrap<ScanSources>,
         schema: Option<Wrap<Schema>>,
         scan_options: PyScanOptions,
-        use_statistics: bool,
         push_predicate: bool,
-        push_projection: bool,
-        aggressive_pushdown: bool,
         initial_read_size: Option<usize>,
         scan_concurrency: Option<usize>,
     ) -> PyResult<Self> {
@@ -351,10 +346,7 @@ impl PyLazyFrame {
 
         let options = VortexScanOptions {
             schema: schema.map(|x| Arc::new(x.0)),
-            use_statistics,
             push_predicate,
-            push_projection,
-            aggressive_pushdown,
             initial_read_size,
             scan_concurrency: scan_concurrency.and_then(NonZeroUsize::new),
             cache: VortexCacheMode::Global,
