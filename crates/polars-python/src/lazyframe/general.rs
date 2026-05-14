@@ -769,16 +769,46 @@ impl PyLazyFrame {
     }
 
     #[cfg(feature = "vortex")]
-    #[pyo3(signature = (target, sink_options))]
+    #[pyo3(signature = (target, sink_options, compression, layout, chunk_size, include_dtype))]
     fn sink_vortex(
         &self,
         py: Python<'_>,
         target: PyFileSinkDestination,
         sink_options: PySinkOptions,
+        compression: &str,
+        layout: &str,
+        chunk_size: Option<u64>,
+        include_dtype: bool,
     ) -> PyResult<PyLazyFrame> {
-        use polars_vortex::VortexWriteOptions;
+        use polars_vortex::{VortexCompression, VortexLayoutKind, VortexWriteOptions};
 
-        let options = VortexWriteOptions::default();
+        let compression = match compression {
+            "btrblocks" => VortexCompression::BtrBlocks,
+            "uncompressed" => VortexCompression::Uncompressed,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid vortex compression: {other:?} (expected 'btrblocks' or 'uncompressed')",
+                )));
+            },
+        };
+        let layout = match layout {
+            "adaptive" => VortexLayoutKind::Adaptive,
+            "flat" => VortexLayoutKind::Flat,
+            "chunked" => VortexLayoutKind::Chunked,
+            "zoned" => VortexLayoutKind::Zoned,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid vortex layout: {other:?} (expected 'adaptive', 'flat', 'chunked', or 'zoned')",
+                )));
+            },
+        };
+
+        let options = VortexWriteOptions {
+            layout,
+            compression,
+            target_chunk_size: chunk_size,
+            include_dtype,
+        };
         let target = target.extract_file_sink_destination()?;
         let unified_sink_args = sink_options.extract_unified_sink_args(target.cloud_scheme())?;
 

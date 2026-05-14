@@ -4045,6 +4045,10 @@ class DataFrame:
         self,
         file: str | Path,
         *,
+        compression: Literal["btrblocks", "uncompressed"] = "btrblocks",
+        layout: Literal["adaptive", "flat", "chunked", "zoned"] = "adaptive",
+        chunk_size: int | None = None,
+        include_dtype: bool = True,
         storage_options: StorageOptionsDict | None = None,
         credential_provider: (
             CredentialProviderFunction | Literal["auto"] | None
@@ -4060,11 +4064,20 @@ class DataFrame:
         Parameters
         ----------
         file
-            Path or writable file-like object to which the Vortex data will be
-            written.
+            Local path or cloud URL (``s3://``, ``gs://``, ``az://``) to which the
+            Vortex data will be written.
+        compression
+            Column encoding policy: ``"btrblocks"`` (default, adaptive per-column)
+            or ``"uncompressed"`` (flat encodings only).
+        layout
+            File layout: ``"adaptive"`` (default), ``"flat"``, ``"chunked"``, or
+            ``"zoned"``. See ``LazyFrame.sink_vortex`` for trade-offs.
+        chunk_size
+            Target rows per chunk. ``None`` (default) lets Vortex pick.
+        include_dtype
+            Whether to embed the Vortex ``DType`` in the file's metadata segment.
         storage_options
-            Cloud storage authentication and configuration (cloud sink support is
-            pending — see ``LazyFrame.sink_vortex``).
+            Cloud storage authentication and configuration.
         credential_provider
             Cloud credential provider.
 
@@ -4079,6 +4092,10 @@ class DataFrame:
         with contextlib.suppress(UnstableWarning):
             self.lazy().sink_vortex(
                 file,
+                compression=compression,
+                layout=layout,
+                chunk_size=chunk_size,
+                include_dtype=include_dtype,
                 storage_options=storage_options,
                 credential_provider=credential_provider,
                 optimizations=QueryOptFlags._eager(),

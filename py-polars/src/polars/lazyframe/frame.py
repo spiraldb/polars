@@ -3140,6 +3140,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         self,
         path: str | Path | IO[bytes] | PartitionBy,
         *,
+        compression: Literal["btrblocks", "uncompressed"] = "btrblocks",
+        layout: Literal["adaptive", "flat", "chunked", "zoned"] = "adaptive",
+        chunk_size: int | None = None,
+        include_dtype: bool = True,
         maintain_order: bool = True,
         storage_options: StorageOptionsDict | None = None,
         credential_provider: CredentialProviderFunction
@@ -3161,15 +3165,31 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         Parameters
         ----------
         path
-            File path to which the file should be written.
+            File path to which the file should be written. Accepts local paths as
+            well as cloud URLs (``s3://``, ``gs://``, ``az://``).
+        compression
+            Column encoding policy. ``"btrblocks"`` (default) samples each column
+            and picks an encoding adaptively. ``"uncompressed"`` uses flat encodings
+            only — useful for benchmarking or strict-compliance scenarios.
+        layout
+            File layout. ``"adaptive"`` (default) is Vortex's chunked-zoned layout
+            with full pruning support. ``"flat"`` writes a single flat layout
+            (smallest, no pruning). ``"chunked"`` adds chunking for parallelism but
+            no zone-level pruning. ``"zoned"`` adds both for maximum prune-ability
+            during filtered scans.
+        chunk_size
+            Target rows per chunk. ``None`` (default) lets Vortex pick.
+        include_dtype
+            Whether to embed the Vortex ``DType`` in the file's metadata segment.
+            ``True`` (default) — disable only if you have a strict externally
+            managed schema.
         maintain_order
             Maintain the order in which data is processed (default ``True``).
         storage_options
-            Cloud storage auth — **not yet supported on the sink side**; will error
-            with a clear message. Local file paths work; for cloud, write locally
-            and upload.
+            Cloud storage auth (e.g. ``{"aws_access_key_id": ...}``). Honored by
+            both local and cloud sinks.
         credential_provider
-            Cloud credential provider (currently unused for the sink path).
+            Cloud credential provider.
         sync_on_close
             How aggressively to fsync after the write.
         mkdir
@@ -3213,6 +3233,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         ldf_py = self._ldf.sink_vortex(
             target=target,
             sink_options=sink_options,
+            compression=compression,
+            layout=layout,
+            chunk_size=chunk_size,
+            include_dtype=include_dtype,
         )
 
         if not lazy:
