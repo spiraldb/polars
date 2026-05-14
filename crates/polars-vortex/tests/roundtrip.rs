@@ -83,3 +83,86 @@ fn roundtrip_small_row_block() {
     let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
     assert_eq!(vxf.row_count(), 5);
 }
+
+#[test]
+fn schema_preserved_field_names() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("schema.vortex");
+
+    let df = make_df();
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+
+    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
+    let names: Vec<&str> = vxf
+        .dtype()
+        .as_struct_fields_opt()
+        .expect("top-level struct dtype")
+        .names()
+        .iter()
+        .map(|n| n.as_ref())
+        .collect();
+    assert_eq!(names, vec!["ints", "floats", "strs"]);
+}
+
+#[test]
+fn roundtrip_nullable() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nullable.vortex");
+
+    let s0 = Column::new("a".into(), &[Some(1_i32), None, Some(3), None, Some(5)]);
+    let s1 = Column::new(
+        "b".into(),
+        &[Some("x"), Some("y"), None, Some("z"), None],
+    );
+    let df = DataFrame::new(5, vec![s0, s1]).expect("build df");
+
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
+    assert_eq!(vxf.row_count(), 5);
+}
+
+#[test]
+fn roundtrip_boolean() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bool.vortex");
+
+    let s0 = Column::new("flag".into(), &[true, false, true, true, false]);
+    let df = DataFrame::new(5, vec![s0]).expect("build df");
+
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
+    assert_eq!(vxf.row_count(), 5);
+}
+
+#[test]
+fn roundtrip_empty_dataframe() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("empty.vortex");
+
+    let s0 = Column::new("a".into(), &[] as &[i64]);
+    let df = DataFrame::new(0, vec![s0]).expect("build df");
+
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+    let vxf = polars_core::runtime::ASYNC.block_on(async { open_back(&path).await });
+    assert_eq!(vxf.row_count(), 0);
+}
+
+#[test]
+fn roundtrip_omit_dtype_then_supply_at_read() {
+    // include_dtype=false produces a smaller file but requires the reader to
+    // pass the DType back in. We don't currently expose that on the Polars side
+    // (and probably never will — there's no realistic Polars workflow where
+    // you'd lose the schema), so this test just verifies the writer succeeds
+    // and the file exists.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("no_dtype.vortex");
+
+    let df = make_df();
+    let opts = VortexWriteOptions {
+        compression: VortexCompression::BtrBlocks,
+        row_block_size: None,
+        include_dtype: false,
+    };
+    write_vortex(&df, &path, &opts).expect("write");
+    assert!(path.metadata().expect("stat").len() > 0);
+}
