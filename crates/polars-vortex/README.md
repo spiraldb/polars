@@ -246,9 +246,8 @@ crates/polars-vortex/
     ├── lib.rs                       # re-exports + `vortex` umbrella passthrough
     ├── session.rs                   # global VortexSession + global Moka segment cache
     ├── read/
-    │   ├── mod.rs
-    │   ├── options.rs               # VortexScanOptions, VortexCacheMode
-    │   ├── metadata.rs              # VortexFooterRef (Arc<Footer>)
+    │   ├── mod.rs                   # VortexFooterRef alias + back-compat `metadata` re-export
+    │   ├── options.rs               # VortexScanOptions, VortexCacheMode (with resolve())
     │   ├── schema.rs                # Vortex DType → polars-arrow ArrowSchema walker
     │   ├── read_at.rs               # PolarsInstrumentedVortexReadAt decorator
     │   ├── predicate.rs             # ColumnPredicates → Vortex Expression
@@ -259,6 +258,7 @@ crates/polars-vortex/
         ├── strategy.rs              # build_write_options: public opts → Vortex's WriteOptions
         ├── array_bridge.rs          # polars-arrow Array → upstream ArrayRef via C-ABI
         ├── df_to_stream.rs          # DataFrame → Vec<ArrayRef> + DType derivation
+        ├── sink_writer.rs           # VortexSink enum (Local + Cloud → unified VortexWrite)
         └── writer.rs                # eager write_vortex(&df, path, &options)
 ```
 
