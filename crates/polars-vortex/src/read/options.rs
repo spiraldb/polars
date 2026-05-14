@@ -73,3 +73,60 @@ impl VortexCacheMode {
         }
     }
 }
+
+#[cfg(test)]
+mod cache_mode_tests {
+    use super::*;
+
+    #[test]
+    fn global_returns_same_arc_as_session_segment_cache() {
+        // `Global` should hand out the exact same `Arc<dyn SegmentCache>` that
+        // `session::segment_cache()` returns — that's the whole point of "the
+        // process-wide cache". Two `Global::resolve()` calls within the same
+        // process should point at the same underlying cache.
+        let a = VortexCacheMode::Global.resolve();
+        let b = VortexCacheMode::Global.resolve();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "VortexCacheMode::Global should always hand out the same Arc"
+        );
+        let g = crate::session::segment_cache();
+        assert!(
+            Arc::ptr_eq(&a, &g),
+            "VortexCacheMode::Global should equal session::segment_cache()"
+        );
+    }
+
+    #[test]
+    fn off_returns_distinct_noop_caches() {
+        // `Off` should hand out fresh `NoOpSegmentCache` instances, never the
+        // global cache. The point is to opt OUT of shared caching.
+        let off_a = VortexCacheMode::Off.resolve();
+        let off_b = VortexCacheMode::Off.resolve();
+        assert!(
+            !Arc::ptr_eq(&off_a, &off_b),
+            "VortexCacheMode::Off should produce distinct Arcs"
+        );
+        assert!(
+            !Arc::ptr_eq(&off_a, &VortexCacheMode::Global.resolve()),
+            "VortexCacheMode::Off should NOT alias the global cache"
+        );
+    }
+
+    #[test]
+    fn dedicated_returns_distinct_caches_per_call() {
+        // `Dedicated(N)` should allocate a fresh per-scan cache every call so
+        // two scans configured with the same budget don't accidentally share
+        // state.
+        let a = VortexCacheMode::Dedicated(4 * 1024 * 1024).resolve();
+        let b = VortexCacheMode::Dedicated(4 * 1024 * 1024).resolve();
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "Two Dedicated(N) resolves should yield distinct Arcs"
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &VortexCacheMode::Global.resolve()),
+            "Dedicated should not alias the global cache"
+        );
+    }
+}

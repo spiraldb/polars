@@ -4570,6 +4570,7 @@ dependencies = [
  "polars-io",
  "polars-schema",
  "polars-utils",
+ "regex",
  "schemars",
  "serde",
  "tempfile",

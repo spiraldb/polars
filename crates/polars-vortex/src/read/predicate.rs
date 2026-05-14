@@ -408,4 +408,91 @@ mod tests {
         let expr = convert_specialized(&"d".into(), &pred);
         assert!(expr.is_some(), "Date equality should be pushable when dtype-date is on");
     }
+
+    // ========================================================================
+    // Per-variant pushdown-engagement tests: each `SpecializedColumnPredicate`
+    // variant we claim to support should produce a non-None Vortex expression.
+    // ========================================================================
+
+    fn int32_scalar(v: i32) -> polars_core::scalar::Scalar {
+        use polars_core::prelude::DataType;
+        use polars_core::scalar::Scalar;
+        Scalar::new(DataType::Int32, AnyValue::Int32(v))
+    }
+
+    #[test]
+    fn equal_predicate_is_pushable() {
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred = SpecializedColumnPredicate::Equal(int32_scalar(42));
+        assert!(convert_specialized(&"a".into(), &pred).is_some());
+    }
+
+    #[test]
+    fn between_predicate_is_pushable() {
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred = SpecializedColumnPredicate::Between(int32_scalar(1), int32_scalar(10));
+        assert!(convert_specialized(&"a".into(), &pred).is_some());
+    }
+
+    #[test]
+    fn equal_one_of_predicate_is_pushable() {
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred = SpecializedColumnPredicate::EqualOneOf(
+            vec![int32_scalar(1), int32_scalar(2), int32_scalar(3)].into_boxed_slice(),
+        );
+        assert!(convert_specialized(&"a".into(), &pred).is_some());
+    }
+
+    #[test]
+    fn starts_with_predicate_is_pushable_for_safe_bytes() {
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred = SpecializedColumnPredicate::StartsWith(b"hello".to_vec().into_boxed_slice());
+        assert!(convert_specialized(&"s".into(), &pred).is_some());
+    }
+
+    #[test]
+    fn starts_with_predicate_refuses_unsafe_bytes() {
+        // Wildcard chars trigger the safety check — return None so the residual
+        // filter handles it correctly.
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred =
+            SpecializedColumnPredicate::StartsWith(b"hello%".to_vec().into_boxed_slice());
+        assert!(convert_specialized(&"s".into(), &pred).is_none());
+    }
+
+    #[test]
+    fn ends_with_predicate_is_pushable_for_safe_bytes() {
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred = SpecializedColumnPredicate::EndsWith(b"world".to_vec().into_boxed_slice());
+        assert!(convert_specialized(&"s".into(), &pred).is_some());
+    }
+
+    #[test]
+    fn regex_match_predicate_falls_back_to_residual() {
+        // RegexMatch is documented as residual-only.
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let regex = regex::bytes::Regex::new("^foo").unwrap();
+        let pred = SpecializedColumnPredicate::RegexMatch(regex);
+        assert!(convert_specialized(&"s".into(), &pred).is_none());
+    }
+
+    #[test]
+    fn equal_one_of_with_partial_failure_returns_none() {
+        // Documented behavior: if any scalar in the IN-list fails to convert
+        // (e.g., AnyValue::Null), the whole predicate falls back to residual
+        // — pushing a partial set would be narrower than the user's actual
+        // predicate, which would silently drop rows.
+        use polars_core::prelude::DataType;
+        use polars_core::scalar::Scalar;
+        use polars_io::predicates::SpecializedColumnPredicate;
+        let pred = SpecializedColumnPredicate::EqualOneOf(
+            vec![
+                int32_scalar(1),
+                Scalar::new(DataType::Int32, AnyValue::Null),
+                int32_scalar(3),
+            ]
+            .into_boxed_slice(),
+        );
+        assert!(convert_specialized(&"a".into(), &pred).is_none());
+    }
 }

@@ -445,6 +445,18 @@ fn create_physical_plan_impl(
                     create_skip_batch_predicate |= options.use_statistics;
                 }
             }
+            #[cfg(feature = "vortex")]
+            {
+                // Vortex does its own zone-level pruning inside `ScanBuilder` via
+                // `LayoutReader::pruning_evaluation` once given the converted filter
+                // expression. Skip-batch predicates work off Polars' Parquet-style
+                // per-row-group stats DataFrame — Vortex doesn't produce that shape,
+                // so the convertor would just be wasted work (and would risk double-
+                // pruning if it ever did produce false positives). Force off here.
+                if matches!(scan_type.as_ref(), FileScanIR::Vortex { .. }) {
+                    create_skip_batch_predicate = false;
+                }
+            }
 
             let predicate = predicate
                 .map(|predicate| {

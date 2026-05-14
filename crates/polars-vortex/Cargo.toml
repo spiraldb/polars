@@ -24,7 +24,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 
 vortex = { workspace = true, default-features = false, features = ["files", "tokio"] }
 object_store = { workspace = true, optional = true }
-tokio-util = { version = "0.7", default-features = false, features = ["compat"], optional = true }
+tokio-util = { workspace = true, features = ["compat"], optional = true }
 
 # Upstream Arrow crates used solely for the C Data Interface bridge in `read::array_bridge`.
 # Vortex's `ArrowArrayExecutor::execute_record_batch` returns a `arrow_array::RecordBatch`
@@ -51,6 +51,7 @@ dtype-time = ["polars-core/dtype-time"]
 dtype-decimal = ["polars-core/dtype-decimal"]
 
 [dev-dependencies]
+regex = { workspace = true }
 tempfile = "3"
 
 [lints]

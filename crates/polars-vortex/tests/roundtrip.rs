@@ -427,3 +427,89 @@ fn roundtrip_time() {
     let df = DataFrame::new(3, vec![s0]).expect("build df");
     assert_roundtrip(df, "time.vortex");
 }
+
+#[cfg(feature = "dtype-datetime")]
+#[test]
+fn roundtrip_datetime_with_timezone() {
+    use polars_core::prelude::{DataType, TimeUnit as PolarsTimeUnit, TimeZone};
+
+    // UTC is the easiest tz to assert — IANA, no DST quirks.
+    let s0 = Column::new(
+        "ts".into(),
+        &[1_700_000_000_000_000_i64, 1_700_000_001_000_000, 1_700_000_002_000_000],
+    )
+    .cast(&DataType::Datetime(
+        PolarsTimeUnit::Microseconds,
+        Some(TimeZone::UTC),
+    ))
+    .expect("cast to Datetime UTC");
+    let df = DataFrame::new(3, vec![s0]).expect("build df");
+    assert_roundtrip(df, "datetime_utc.vortex");
+}
+
+#[cfg(feature = "dtype-decimal")]
+#[test]
+fn roundtrip_decimal_basic() {
+    use polars_core::prelude::DataType;
+
+    let s0 = Column::new(
+        "amount".into(),
+        &[1_234_567_i128, 9_876_543, 0, -42],
+    )
+    .cast(&DataType::Decimal(10, 2))
+    .expect("cast to Decimal(10, 2)");
+    let df = DataFrame::new(4, vec![s0]).expect("build df");
+    assert_roundtrip(df, "decimal_basic.vortex");
+}
+
+#[cfg(feature = "dtype-decimal")]
+#[test]
+fn roundtrip_decimal_with_nulls() {
+    use polars_core::prelude::DataType;
+
+    let s0 = Column::new(
+        "amount".into(),
+        &[Some(1_000_i128), None, Some(2_000), None, Some(3_000)],
+    )
+    .cast(&DataType::Decimal(8, 4))
+    .expect("cast to Decimal(8, 4)");
+    let df = DataFrame::new(5, vec![s0]).expect("build df");
+    assert_roundtrip(df, "decimal_nullable.vortex");
+}
+
+#[cfg(feature = "dtype-decimal")]
+#[test]
+fn roundtrip_decimal_precision_38_boundary() {
+    // Precision 38 is the upper end of Polars' Decimal128 range — verify the
+    // schema converter's `precision <= 38 → Decimal` branch handles it.
+    use polars_core::prelude::DataType;
+
+    let s0 = Column::new("amount".into(), &[1_i128, 2, 3])
+        .cast(&DataType::Decimal(38, 0))
+        .expect("cast to Decimal(38, 0)");
+    let df = DataFrame::new(3, vec![s0]).expect("build df");
+    assert_roundtrip(df, "decimal_38.vortex");
+}
+
+/// Smoke test for the segment-cache integration: write a file, scan it twice
+/// (sharing the global cache), and verify both reads produce identical results.
+///
+/// We can't easily assert that the second scan hit cache without instrumenting
+/// Vortex's MokaSegmentCache (Moka doesn't expose hit counts on its `Cache` type),
+/// but this test does verify the cache wiring doesn't corrupt second-pass results
+/// — a regression that mismatched cached buffers with their layout metadata would
+/// surface as a frame mismatch.
+#[test]
+fn segment_cache_second_read_produces_same_data() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("cache_smoke.vortex");
+
+    let df = make_df();
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+
+    let back1 = read_back(&path);
+    let back2 = read_back(&path);
+    assert!(df.equals_missing(&back1));
+    assert!(df.equals_missing(&back2));
+    assert!(back1.equals_missing(&back2));
+}
