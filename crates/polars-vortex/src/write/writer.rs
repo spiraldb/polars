@@ -13,11 +13,10 @@ use polars_core::runtime::ASYNC;
 use polars_error::{PolarsResult, polars_err};
 use vortex::array::stream::ArrayStreamAdapter;
 use vortex::error::VortexResult;
-use vortex::file::WriteOptionsSessionExt;
 
-use crate::session::session;
 use crate::write::df_to_stream::dataframe_to_vortex_chunks;
 use crate::write::options::VortexWriteOptions;
+use crate::write::strategy::build_write_options;
 
 /// Write a Polars [`DataFrame`] to a Vortex file at `path`. Creates / truncates the
 /// destination.
@@ -28,16 +27,15 @@ use crate::write::options::VortexWriteOptions;
 pub fn write_vortex(
     df: &DataFrame,
     path: impl AsRef<Path>,
-    _options: &VortexWriteOptions,
+    options: &VortexWriteOptions,
 ) -> PolarsResult<()> {
     let path = path.as_ref().to_path_buf();
-    let session = session();
 
     // Convert all chunks up front. The C-ABI bridge moves buffers zero-copy, so
     // the only per-chunk memory cost is the struct/record-batch wrappers.
     let (top_dtype, chunks) = dataframe_to_vortex_chunks(df)?;
 
-    let write_opts = session.write_options();
+    let write_opts = build_write_options(options);
 
     // Wrap the chunks as a Vortex ArrayStream.
     let stream = ArrayStreamAdapter::new(

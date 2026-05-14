@@ -4046,8 +4046,7 @@ class DataFrame:
         file: str | Path,
         *,
         compression: Literal["btrblocks", "uncompressed"] = "btrblocks",
-        layout: Literal["adaptive", "flat", "chunked", "zoned"] = "adaptive",
-        chunk_size: int | None = None,
+        row_block_size: int | None = None,
         include_dtype: bool = True,
         storage_options: StorageOptionsDict | None = None,
         credential_provider: (
@@ -4068,12 +4067,10 @@ class DataFrame:
             Vortex data will be written.
         compression
             Column encoding policy: ``"btrblocks"`` (default, adaptive per-column)
-            or ``"uncompressed"`` (flat encodings only).
-        layout
-            File layout: ``"adaptive"`` (default), ``"flat"``, ``"chunked"``, or
-            ``"zoned"``. See ``LazyFrame.sink_vortex`` for trade-offs.
-        chunk_size
-            Target rows per chunk. ``None`` (default) lets Vortex pick.
+            or ``"uncompressed"`` (no schemes selected).
+        row_block_size
+            Granularity of zone-level pruning. ``None`` (default) uses Vortex's
+            8192-row default. See ``LazyFrame.sink_vortex`` for trade-offs.
         include_dtype
             Whether to embed the Vortex ``DType`` in the file's metadata segment.
         storage_options
@@ -4093,8 +4090,7 @@ class DataFrame:
             self.lazy().sink_vortex(
                 file,
                 compression=compression,
-                layout=layout,
-                chunk_size=chunk_size,
+                row_block_size=row_block_size,
                 include_dtype=include_dtype,
                 storage_options=storage_options,
                 credential_provider=credential_provider,

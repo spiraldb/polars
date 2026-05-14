@@ -4572,6 +4572,7 @@ dependencies = [
  "polars-utils",
  "schemars",
  "serde",
+ "tempfile",
  "tokio",
  "tokio-util",
  "vortex",

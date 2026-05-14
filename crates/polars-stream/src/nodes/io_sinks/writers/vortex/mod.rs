@@ -24,12 +24,11 @@ use polars_error::{PolarsResult, polars_bail, polars_err};
 use polars_io::utils::file::Writeable;
 use polars_utils::index::NonZeroIdxSize;
 use polars_vortex::VortexWriteOptions;
-use polars_vortex::session::session;
 use polars_vortex::vortex::array::ArrayRef as VortexArrayRef;
 use polars_vortex::vortex::array::stream::ArrayStreamAdapter;
 use polars_vortex::vortex::error::VortexResult;
-use polars_vortex::vortex::file::WriteOptionsSessionExt;
 use polars_vortex::write::VortexSink;
+use polars_vortex::write::strategy::build_write_options;
 
 use crate::async_executor::{self, TaskPriority};
 use crate::async_primitives::connector;
@@ -131,7 +130,7 @@ impl FileWriterStarter for VortexWriterStarter {
 
             // Build the Vortex ArrayStream and drive the write on ASYNC.
             let stream = ArrayStreamAdapter::new(top_dtype, chunk_rx);
-            let write_opts = session().write_options();
+            let write_opts = build_write_options(options.as_ref());
 
             let write_handle = ASYNC.spawn(async move {
                 write_opts
@@ -146,8 +145,6 @@ impl FileWriterStarter for VortexWriterStarter {
                 .await
                 .map_err(|e| polars_err!(ComputeError: "vortex sink tokio join: {e}"))??;
 
-            // Drop options to release Arc reference; silences "unused" lints.
-            drop(options);
             Ok(())
         });
 

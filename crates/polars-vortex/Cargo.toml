@@ -43,5 +43,8 @@ cloud = ["vortex/object_store", "polars-io/cloud", "dep:object_store", "dep:toki
 serde = ["dep:serde", "polars-io/serde", "polars-utils/serde"]
 dsl-schema = ["dep:schemars", "polars-utils/dsl-schema"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true
