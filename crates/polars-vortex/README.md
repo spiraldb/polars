@@ -252,7 +252,6 @@ crates/polars-vortex/
     │   ├── schema.rs                # Vortex DType → polars-arrow ArrowSchema walker
     │   ├── read_at.rs               # PolarsInstrumentedVortexReadAt decorator
     │   ├── predicate.rs             # ColumnPredicates → Vortex Expression
-    │   ├── projection.rs            # placeholder (projection handled in stream node)
     │   └── array_bridge.rs          # upstream RecordBatch → DataFrame via C-ABI
     └── write/
         ├── mod.rs
@@ -353,13 +352,19 @@ pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
 ## What works today
 
 - ✅ `pl.scan_vortex(local_path).filter(...).slice(...).collect()`
-- ✅ `pl.scan_vortex("s3://...", storage_options={...}).collect()`
-- ✅ `pl.scan_vortex(...).tail(N).collect()` — negative slice pushed
+- ✅ `pl.scan_vortex("s3://...", storage_options={...}).collect()` — cloud read AND
+       cloud schema discovery (no `schema=` required)
+- ✅ `pl.scan_vortex(...).tail(N).collect()` — negative slice pushed via the
+       footer's row count
 - ✅ `df.write_vortex(path)` and `lf.sink_vortex(path)` (local AND `s3://`/`gs://`/`az://`)
 - ✅ `lf.sink_vortex(pl.PartitionBy("base/", by=[...]))` — partitioned writes
+- ✅ Filter pushdown for Equal / Between / EqualOneOf / StartsWith / EndsWith,
+       and (when built with `dtype-date` / `dtype-datetime` / `dtype-time` /
+       `dtype-decimal`) for Date / Datetime / Time / Decimal scalar literals.
 - ✅ Multiple Vortex files in one scan (multi-file glob) via `UnifiedScanArgs`
 - ✅ Hive partitioning on read via `UnifiedScanArgs::hive_options`
 - ✅ Process-global decompressed-segment cache with `pl.set_vortex_cache_bytes(N)`
+- ✅ `scan_concurrency=N` knob → `ScanBuilder::with_concurrency`
 - ✅ `cargo check -p polars --features vortex,cloud,parquet` warm in ~5s
 
 ## Known limits / pending follow-ups
