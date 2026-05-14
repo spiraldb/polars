@@ -3136,6 +3136,92 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             return None
         return LazyFrame._from_pyldf(ldf_py)
 
+    def sink_vortex(
+        self,
+        path: str | Path | IO[bytes] | PartitionBy,
+        *,
+        maintain_order: bool = True,
+        storage_options: StorageOptionsDict | None = None,
+        credential_provider: CredentialProviderFunction
+        | Literal["auto"]
+        | None = "auto",
+        sync_on_close: SyncOnCloseMethod | None = None,
+        mkdir: bool = False,
+        lazy: bool = False,
+        engine: EngineType = "auto",
+        optimizations: QueryOptFlags = DEFAULT_QUERY_OPT_FLAGS,
+        _sinked_paths_callback: SinkedPathsCallback | None = None,
+    ) -> LazyFrame | None:
+        """
+        Evaluate the query in streaming mode and write to a Vortex file.
+
+        Vortex is a high-performance columnar file format with rich pushdown and
+        zone-level pruning. See ``pl.scan_vortex`` for the read side.
+
+        Parameters
+        ----------
+        path
+            File path to which the file should be written.
+        maintain_order
+            Maintain the order in which data is processed (default ``True``).
+        storage_options
+            Cloud storage auth — **not yet supported on the sink side**; will error
+            with a clear message. Local file paths work; for cloud, write locally
+            and upload.
+        credential_provider
+            Cloud credential provider (currently unused for the sink path).
+        sync_on_close
+            How aggressively to fsync after the write.
+        mkdir
+            Create parent directories if they don't exist.
+        lazy
+            If ``True``, return a LazyFrame that has the sink as a leaf instead of
+            executing eagerly.
+        engine
+            Which Polars engine drives the execution.
+        optimizations
+            Optimization flags.
+
+        Returns
+        -------
+        LazyFrame | None
+            ``None`` if ``lazy=False`` (default); a LazyFrame otherwise.
+
+        See Also
+        --------
+        pl.scan_vortex : Read a Vortex file lazily.
+        pl.read_vortex : Read a Vortex file eagerly.
+        """
+        credential_provider_builder = _init_credential_provider_builder(
+            credential_provider, path, storage_options, "sink_vortex"
+        )
+        del credential_provider
+
+        target = _to_sink_target(path)
+
+        from polars.io.partition import _SinkOptions
+
+        sink_options = _SinkOptions(
+            mkdir=mkdir,
+            maintain_order=maintain_order,
+            sync_on_close=sync_on_close,
+            storage_options=storage_options,
+            credential_provider=credential_provider_builder,
+            sinked_paths_callback=_sinked_paths_callback,
+        )
+
+        ldf_py = self._ldf.sink_vortex(
+            target=target,
+            sink_options=sink_options,
+        )
+
+        if not lazy:
+            ldf_py = ldf_py.with_optimizations(optimizations._pyoptflags)
+            ldf = LazyFrame._from_pyldf(ldf_py)
+            ldf.collect(engine=engine)
+            return None
+        return LazyFrame._from_pyldf(ldf_py)
+
     @overload
     def sink_delta(
         self,

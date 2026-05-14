@@ -16,6 +16,8 @@ mod ipc;
 mod ndjson;
 #[cfg(feature = "parquet")]
 mod parquet;
+#[cfg(feature = "vortex")]
+mod vortex;
 
 pub fn create_file_writer_starter(
     file_format: &FileWriteFormat,
@@ -82,11 +84,19 @@ pub fn create_file_writer_starter(
                 initialized_state: Default::default(),
             },
         ) as _,
+        #[cfg(feature = "vortex")]
+        FileWriteFormat::Vortex(options) => Arc::new(
+            crate::nodes::io_sinks::writers::vortex::VortexWriterStarter {
+                options: Arc::clone(options),
+                schema: file_schema.clone(),
+            },
+        ) as _,
         #[cfg(not(any(
             feature = "parquet",
             feature = "ipc",
             feature = "csv",
-            feature = "json"
+            feature = "json",
+            feature = "vortex",
         )))]
         _ => panic!("no enum variants on FileType (hint: missing feature flags?)"),
     })

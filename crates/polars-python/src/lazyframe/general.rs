@@ -768,6 +768,35 @@ impl PyLazyFrame {
         .map_err(Into::into)
     }
 
+    #[cfg(feature = "vortex")]
+    #[pyo3(signature = (target, sink_options))]
+    fn sink_vortex(
+        &self,
+        py: Python<'_>,
+        target: PyFileSinkDestination,
+        sink_options: PySinkOptions,
+    ) -> PyResult<PyLazyFrame> {
+        use polars_vortex::VortexWriteOptions;
+
+        let options = VortexWriteOptions::default();
+        let target = target.extract_file_sink_destination()?;
+        let unified_sink_args = sink_options.extract_unified_sink_args(target.cloud_scheme())?;
+
+        py.enter_polars(|| {
+            self.ldf
+                .read()
+                .clone()
+                .sink(
+                    target,
+                    FileWriteFormat::Vortex(Arc::new(options)),
+                    unified_sink_args,
+                )
+                .into()
+        })
+        .map(Into::into)
+        .map_err(Into::into)
+    }
+
     #[cfg(feature = "ipc")]
     #[pyo3(signature = (
         target, sink_options, compression, compat_level, record_batch_size, record_batch_statistics

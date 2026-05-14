@@ -6,15 +6,18 @@
 //! `ArrayRef::from_arrow(&StructArray, …)` ingests directly. The C-ABI bridge in
 //! [`crate::write::array_bridge`] moves the per-column buffers zero-copy.
 
+use std::mem;
 use std::sync::Arc;
 
 use arrow::array::{Array as PolarsArray, ArrayRef as PolarsArrayRef};
 use arrow::datatypes::ArrowSchema as PolarsArrowSchema;
+use arrow::ffi::{ArrowSchema as PolarsFfiSchema, export_field_to_c};
 use arrow_array::StructArray;
-use arrow_schema::Schema as UpstreamSchema;
+use arrow_array::ffi::FFI_ArrowSchema;
+use arrow_schema::{Field as UpstreamField, Schema as UpstreamSchema};
 use polars_core::frame::DataFrame;
 use polars_core::prelude::CompatLevel;
-use polars_core::schema::SchemaExt;
+use polars_core::schema::{Schema as PolarsSchema, SchemaExt};
 use polars_error::{PolarsResult, polars_err};
 use vortex::array::ArrayRef as VortexArrayRef;
 use vortex::array::arrow::FromArrowArray;
@@ -100,4 +103,28 @@ pub fn dataframe_to_vortex_chunks(
 
     let top_dtype = top_dtype.expect("at least one chunk");
     Ok((top_dtype, chunks))
+}
+
+/// Derive a top-level Vortex `DType::Struct` from a Polars `Schema` without needing
+/// any data. Used by the streaming sink to know the stream's dtype before the first
+/// morsel arrives.
+///
+/// Goes polars `Schema` → polars-arrow `ArrowSchema` → upstream `arrow_schema::Schema`
+/// (field-by-field via the C-ABI struct transmute) → Vortex `DType` via
+/// `FromArrowType<&Schema>`.
+pub fn polars_schema_to_vortex_dtype(pl_schema: &PolarsSchema) -> PolarsResult<DType> {
+    let pl_arrow_schema = pl_schema.to_arrow(CompatLevel::newest());
+    let mut up_fields: Vec<UpstreamField> = Vec::with_capacity(pl_arrow_schema.len());
+    for (_, pl_field) in pl_arrow_schema.iter() {
+        let pl_ffi: PolarsFfiSchema = export_field_to_c(pl_field);
+        const _: () = assert!(mem::size_of::<PolarsFfiSchema>() == mem::size_of::<FFI_ArrowSchema>());
+        // SAFETY: both structs are `#[repr(C)]` with the Arrow C Data Interface layout.
+        let up_ffi: FFI_ArrowSchema = unsafe { mem::transmute(pl_ffi) };
+        let up_field = UpstreamField::try_from(&up_ffi).map_err(|e| {
+            polars_err!(ComputeError: "vortex write: schema FFI Field conversion: {e}")
+        })?;
+        up_fields.push(up_field);
+    }
+    let up_schema = UpstreamSchema::new(up_fields);
+    Ok(<DType as FromArrowType<&UpstreamSchema>>::from_arrow(&up_schema))
 }
