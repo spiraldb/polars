@@ -214,14 +214,22 @@ impl FileReader for VortexFileReader {
         let upstream_schema = Arc::clone(&st.upstream_schema);
         let pl_schema = st.pl_schema.clone();
 
-        // Apply pre_slice as a row range. Positive only for now; negative slice is PR-4.
-        let row_range = args.pre_slice.as_ref().and_then(|slice| match slice {
-            Slice::Positive { offset, len } => {
-                let start = *offset as u64;
-                let end = start.saturating_add(*len as u64);
-                Some(start..end)
+        // Apply pre_slice as a row range. Negative slices get a cheap `row_count()`
+        // probe (the file's row count is in the cached footer — free) and translate
+        // to positive via `restrict_to_bounds`.
+        let row_range = args.pre_slice.as_ref().map(|slice| {
+            let positive = match slice {
+                Slice::Positive { .. } => slice.clone(),
+                Slice::Negative { .. } => slice.clone().restrict_to_bounds(st.row_count as usize),
+            };
+            match positive {
+                Slice::Positive { offset, len } => {
+                    let start = offset as u64;
+                    let end = start.saturating_add(len as u64);
+                    start..end
+                }
+                Slice::Negative { .. } => unreachable!("restrict_to_bounds always returns Positive"),
             }
-            Slice::Negative { .. } => None,
         });
 
         // Translate the pushable bits of args.predicate into a Vortex `Expression`. We

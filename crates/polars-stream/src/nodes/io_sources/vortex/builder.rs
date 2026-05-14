@@ -39,8 +39,13 @@ impl FileReaderBuilder for VortexReaderBuilder {
         //   - PARTIAL_FILTER: convertor may leave a residual filter.
         //   - FULL_FILTER:    advertised when convertor consumes the whole predicate.
         //   - MAPPED_COLUMN_PROJECTION: projection is a Vortex `pack(...)` expression.
-        // Deferred until the corresponding sub-PRs: NEGATIVE_PRE_SLICE, EXTERNAL_FILTER_MASK.
-        RC::ROW_INDEX | RC::PRE_SLICE | RC::PARTIAL_FILTER | RC::MAPPED_COLUMN_PROJECTION
+        // EXTERNAL_FILTER_MASK is the remaining capability — needs Vortex `Selection`
+        // bitmap plumbing; tracked under PR-13.
+        RC::ROW_INDEX
+            | RC::PRE_SLICE
+            | RC::NEGATIVE_PRE_SLICE
+            | RC::PARTIAL_FILTER
+            | RC::MAPPED_COLUMN_PROJECTION
     }
 
     fn set_io_metrics(&self, io_metrics: Arc<IOMetrics>) {
