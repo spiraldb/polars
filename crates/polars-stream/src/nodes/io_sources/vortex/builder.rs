@@ -35,12 +35,10 @@ impl FileReaderBuilder for VortexReaderBuilder {
 
     fn reader_capabilities(&self) -> ReaderCapabilities {
         use ReaderCapabilities as RC;
-        // Conservative initial capability set. Once the actual reader is implemented:
-        //   - PARTIAL_FILTER: convertor may leave a residual filter.
-        //   - FULL_FILTER:    advertised when convertor consumes the whole predicate.
-        //   - MAPPED_COLUMN_PROJECTION: projection is a Vortex `pack(...)` expression.
-        // EXTERNAL_FILTER_MASK is the remaining capability — needs Vortex `Selection`
-        // bitmap plumbing; tracked under PR-13.
+        // The multi-scan layer reapplies the full predicate post-decode, so PARTIAL_FILTER
+        // is always safe; FULL_FILTER would require the convertor to consume every shape
+        // it sees (out-of-scope while we lean on `SpecializedColumnPredicate`).
+        // EXTERNAL_FILTER_MASK would need Vortex `Selection` bitmap plumbing.
         RC::ROW_INDEX
             | RC::PRE_SLICE
             | RC::NEGATIVE_PRE_SLICE
