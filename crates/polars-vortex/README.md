@@ -252,7 +252,8 @@ crates/polars-vortex/
     │   └── array_bridge.rs          # upstream RecordBatch → DataFrame via C-ABI
     └── write/
         ├── mod.rs
-        ├── options.rs               # VortexWriteOptions, VortexLayoutKind, VortexCompression
+        ├── options.rs               # VortexWriteOptions + VortexCompression
+        ├── strategy.rs              # build_write_options: public opts → Vortex's WriteOptions
         ├── array_bridge.rs          # polars-arrow Array → upstream ArrayRef via C-ABI
         ├── df_to_stream.rs          # DataFrame → Vec<ArrayRef> + DType derivation
         └── writer.rs                # eager write_vortex(&df, path, &options)
@@ -301,10 +302,9 @@ pub struct VortexScanOptions {
 
 // Write options — embedded in FileWriteFormat::Vortex
 pub struct VortexWriteOptions {
-    pub layout: VortexLayoutKind,     // Adaptive (default) | Flat | Chunked | Zoned
     pub compression: VortexCompression, // BtrBlocks (default) | Uncompressed
-    pub target_chunk_size: Option<u64>,
-    pub include_dtype: bool,
+    pub row_block_size: Option<u64>,    // None → Vortex default (8192)
+    pub include_dtype: bool,            // default true (manual Default impl)
 }
 
 // Session helpers
@@ -338,10 +338,13 @@ pl.scan_vortex(source, *, n_rows=None, row_index_name=None, row_index_offset=0,
 pl.read_vortex(source, ...) -> DataFrame    # eager: scan_vortex(...).collect()
 
 # Write
-LazyFrame.sink_vortex(path, *, maintain_order=True, storage_options=None,
+LazyFrame.sink_vortex(path, *, compression="btrblocks", row_block_size=None,
+                      include_dtype=True, maintain_order=True, storage_options=None,
                       credential_provider="auto", sync_on_close=None, mkdir=False,
                       lazy=False, engine="auto", optimizations=...)
-DataFrame.write_vortex(file, *, storage_options=None, credential_provider="auto")
+DataFrame.write_vortex(file, *, compression="btrblocks", row_block_size=None,
+                       include_dtype=True, storage_options=None,
+                       credential_provider="auto")
 
 # Config
 pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
@@ -361,9 +364,6 @@ pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
 
 ## Known limits / pending follow-ups
 
-- **`VortexWriteOptions` are not yet plumbed to Python sinks.** `lf.sink_vortex(...)`
-  currently always uses `VortexWriteOptions::default()` (BtrBlocks Zoned layout).
-  Exposing `layout=` / `compression=` / `chunk_size=` is a small follow-up.
 - **Aggressive predicate pushdown** (arithmetic, CAST, struct field access, temporal
   extracts) is not yet wired — these stay as residual filters. Implementing them
   requires walking AExpr at IR-build time instead of relying on
