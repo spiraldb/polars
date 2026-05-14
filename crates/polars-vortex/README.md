@@ -1,0 +1,428 @@
+# polars-vortex
+
+Native [Vortex](https://vortex.dev) file-format support for [Polars](https://pola.rs) — a first-class peer of `polars-parquet`.
+
+```toml
+# Cargo.toml
+[dependencies]
+polars = { version = "...", features = ["vortex"] }              # local files
+polars = { version = "...", features = ["vortex", "cloud"] }     # + s3:// / gs:// / az://
+```
+
+```python
+import polars as pl
+
+# Read
+lf = pl.scan_vortex("data.vortex")
+lf = pl.scan_vortex("s3://bucket/data.vortex", storage_options={...})
+df = (
+    lf
+    .filter(pl.col("user_id") == 42)         # → pushed to Vortex
+    .filter(pl.col("name").str.starts_with("ada"))  # → pushed (LIKE)
+    .slice(-100, 50)                         # → pushed (negative slice)
+    .select(["user_id", "name", "score"])    # → pushed (projection)
+    .collect()
+)
+
+# Write
+df.write_vortex("out.vortex")                # eager
+lf.sink_vortex("out.vortex")                 # streaming
+lf.sink_vortex(pl.PartitionBy("base/", by=["year", "month"]))  # partitioned
+
+# Tune the process-global decompressed-segment cache (default 512 MiB)
+pl.set_vortex_cache_bytes(2 * 1024**3)       # 2 GiB
+```
+
+## Why Vortex
+
+Vortex is a columnar file format designed for **rich pushdown**: an expression IR, layout-aware
+zone pruning, BtrBlocks-style adaptive compression, and a cross-query segment cache that
+holds *decompressed* data between scans of the same file. The integration is structured
+so that Polars uses *all* of these properties — not just "Vortex as another Parquet".
+
+What this looks like in practice:
+
+- **Filter pushdown**: predicates that the optimizer extracts as
+  `SpecializedColumnPredicate` (Equal / Between / EqualOneOf / StartsWith / EndsWith)
+  are translated to Vortex `Expression`s and handed to `ScanBuilder::with_filter`.
+  Inside Vortex, `LayoutReader::pruning_evaluation` consults per-zone statistics and
+  skips chunks that can't satisfy the predicate — *without decompressing them*.
+- **Negative slice pushdown**: `lf.tail(N)` becomes `ScanBuilder::with_row_range(...)`,
+  not "decode everything and take the last N". The file's row count comes from the
+  footer (free).
+- **Segment cache reuse**: second and subsequent scans of the same file skip
+  decompression for any zone already in the cache. Process-global, tunable.
+
+## How it plugs into Polars
+
+The integration runs entirely on Polars' existing infrastructure — no second Tokio
+runtime, no shadow scheduler, no extra binding layer beyond Polars' standard
+`FileScanIR` / `FileWriteFormat` / `FileReaderBuilder` / `FileWriterStarter` traits.
+
+```
+LazyFrame::scan_vortex(path, args)
+  → DslBuilder::scan_vortex
+    → FileScanDsl::Vortex { options }
+      → vortex_file_info (DSL → IR: open file, derive schema, cache Footer)
+        → FileScanIR::Vortex { options, metadata: Option<Arc<Footer>> }
+          → polars-mem-engine delegates to polars-stream (lp.rs:1206)
+            → lower_ir.rs builds a VortexReaderBuilder
+              → VortexFileReader (impl FileReader)
+                ├─ initialize(): VortexOpenOptions::open(read_at).await
+                │   read_at = PolarsInstrumentedVortexReadAt
+                │     (wraps vortex_io::FileReadAt / ObjectStoreReadAt
+                │      with IOMetrics + with_concurrency_budget)
+                └─ begin_read(args):
+                    projection  → vortex::expr::pack(get_item(...))
+                    predicate   → polars_to_vortex_predicate (ColumnPredicates)
+                    pre_slice   → ScanBuilder::with_row_range
+                    .into_array_stream() → Stream<ArrayRef>
+                    for each chunk:
+                      ArrowArrayExecutor::execute_record_batch
+                        → upstream arrow_array::RecordBatch
+                      → C-ABI mem::transmute (read/array_bridge.rs)
+                        → polars-arrow chunks
+                      → DataFrame → Morsel → FileReaderOutputSend::send_morsel
+```
+
+Sink mirrors the same shape: `LazyFrame::sink_vortex(path)` →
+`FileWriteFormat::Vortex(Arc<VortexWriteOptions>)` → `VortexWriterStarter`
+(`FileWriterStarter` impl) → morsels are converted to Vortex `ArrayRef`s by the
+reverse C-ABI bridge in `write/array_bridge.rs`, streamed through a
+`futures::channel::mpsc<ArrayRef>`, wrapped in `ArrayStreamAdapter`, and handed to
+`VortexWriteOptions::write(tokio_file, stream).await` on Polars' `ASYNC` runtime.
+
+## The four key design decisions
+
+1. **One Tokio runtime, not two.** All Vortex async I/O runs on Polars' global `ASYNC`
+   runtime via Vortex's `Handle` adapter built from `ASYNC.handle()` once at startup
+   in [`session.rs`]. We deliberately avoid:
+   - `CurrentThreadRuntime` (would bottleneck multi-pipeline streaming).
+   - Spawning a second multi-thread Tokio (doubles thread count, confuses
+     `object_store`'s ambient-runtime selection, no win).
+   - A custom `Executor` impl over Polars' `polars-stream::async_executor` (no blocking
+     pool, so cloud reads would hang).
+
+2. **Arrow C Data Interface as a zero-copy bridge.** Both `polars-arrow::ffi::ArrowArray`
+   and upstream `arrow_array::ffi::FFI_ArrowArray` are `#[repr(C)]` with the standard
+   9-field Arrow C ABI layout. We `mem::transmute` between them — moves the ~80-byte
+   struct, leaves the buffers in place. Compile-time `size_of` assertions enforce
+   struct identity. Same trick `vortex-duckdb` uses with DuckDB.
+
+   Read-side ([`read/array_bridge.rs`]):
+   ```
+   vortex ArrayRef
+   → ArrowArrayExecutor::execute_record_batch(&upstream_schema)
+     → upstream arrow_array::RecordBatch
+       → arrow_array::ffi::to_ffi(&ArrayData) → FFI_ArrowArray
+         → mem::transmute → polars_arrow::ffi::ArrowArray
+           → polars_arrow::ffi::import_array_from_c(array, dtype)
+             → polars-arrow Box<dyn Array>
+               → Series → Column → DataFrame
+   ```
+
+   Write-side ([`write/array_bridge.rs`]):
+   ```
+   polars-arrow Box<dyn Array>
+   → polars_arrow::ffi::export_array_to_c → polars_arrow::ffi::ArrowArray
+     → mem::transmute → FFI_ArrowArray
+       → arrow_array::ffi::from_ffi(array, &schema) → ArrayData
+         → make_array → upstream arrow_array::ArrayRef
+           → StructArray → vortex ArrayRef (via FromArrowArray)
+   ```
+
+3. **`PolarsInstrumentedVortexReadAt` as a thin decorator** ([`read/read_at.rs`]) — wraps
+   Vortex's native `FileReadAt` (local) and `ObjectStoreReadAt` (cloud) and splices in:
+   - `polars_io::pl_async::with_concurrency_budget(1, ...)` around every `read_at`, so
+     Vortex reads share Polars' global cross-format concurrency cap with Parquet et al.
+   - `OptIOMetrics::record_io_read(len, fut)` for the same `bytes_requested` /
+     `bytes_received` / `io_timer` instrumentation that `pl.explain()` and verbose mode
+     surface for other formats.
+
+   For cloud, the `Arc<dyn ObjectStore>` is constructed via
+   `polars_io::cloud::build_object_store`, so all `CloudOptions` semantics (auth,
+   retry, region overrides, credential providers) are honored — the same way Parquet's
+   cloud reads work. No buffer copy.
+
+4. **Filter pushdown via `SpecializedColumnPredicate`** ([`read/predicate.rs`]) — the
+   Polars optimizer already extracts single-column predicates into structured form:
+   `ColumnPredicates::predicates: PlHashMap<PlSmallStr, (PhysicalIoExpr, Option<SpecializedColumnPredicate>)>`.
+   We pattern-match on the specialized variant and emit Vortex `Expression`s:
+
+   | Polars `SpecializedColumnPredicate` | Vortex `Expression`                                  |
+   |---|---|
+   | `Equal(scalar)`            | `eq(get_item(col, root()), lit(scalar))`             |
+   | `Between(lo, hi)`          | `and(gt_eq(col, lo), lt_eq(col, hi))`                |
+   | `EqualOneOf(scalars)`      | `or_collect` of `eq(col, lit(s))` (all-or-nothing)   |
+   | `StartsWith(bytes)`        | `like(col, lit("prefix%"))` (wildcard-safe)          |
+   | `EndsWith(bytes)`          | `like(col, lit("%suffix"))` (wildcard-safe)          |
+   | `RegexMatch(...)`          | not pushed (Vortex `like` doesn't do regex)          |
+
+   `EqualOneOf` requires *every* scalar in the IN-list to convert successfully —
+   otherwise we leave the whole predicate as residual. This prevents accidentally
+   pushing a narrower predicate than the user wrote.
+
+   Anything we can't push (multi-column predicates, arithmetic, regex, struct field
+   access, etc.) stays as a residual filter. The reader advertises
+   `ReaderCapabilities::PARTIAL_FILTER`, so Polars' multi-scan layer always
+   re-applies the original full predicate post-decode. Result: pushdown is always
+   *safe*, just sometimes *partial*.
+
+## Cargo features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `cloud`       | off | Enables `s3://` / `gs://` / `az://` / `http(s)://` reads. Pulls `vortex/object_store` and `polars-io/cloud`. Cloud *sink* is not yet wired (errors with a clear message). |
+| `serde`       | off | Crate-wide `Serialize` / `Deserialize` on the option types — required when `polars-plan/serde` is enabled. |
+| `dsl-schema`  | off | `schemars::JsonSchema` derives on option types — required when `polars-plan/dsl-schema` is enabled. |
+
+The umbrella `polars` crate's `vortex` feature pulls in `polars-lazy/vortex` and turns
+on `new_streaming` (Vortex scans go through the streaming engine).
+
+## Configuration
+
+### Process-global segment cache
+
+Vortex's segment cache stores *decompressed* columnar segments across queries on the
+same file — one of the biggest perf wins over Parquet's "decompress every time"
+model. The cache is process-global; size controlled via:
+
+```python
+pl.set_vortex_cache_bytes(2 * 1024**3)   # 2 GiB
+pl.set_vortex_cache_bytes(0)             # disable
+```
+
+…or via the `POLARS_VORTEX_CACHE_BYTES` environment variable (default 512 MiB).
+Eviction is tiny-LFU (good fit for "read the same file many times" workloads).
+
+Memory note: the 512 MiB default is meaningful resident memory. If you're tight on
+RAM, lower it explicitly (or `set_vortex_cache_bytes(0)`).
+
+### Concurrency
+
+`PolarsInstrumentedVortexReadAt` routes every read through Polars'
+`with_concurrency_budget`, controlled by `POLARS_CONCURRENCY_BUDGET` (same as other
+Polars I/O). The per-scan parallelism is controlled by
+`VortexScanOptions::scan_concurrency` (default: a function of `num_pipelines`),
+which becomes `ScanBuilder::with_concurrency`.
+
+### Cloud auth
+
+Standard Polars `storage_options=` — credentials, retry config, endpoint overrides,
+all flow through `polars_io::cloud::build_object_store`.
+
+## Pushdown coverage at a glance
+
+| Pushdown                   | Status | Path                                            |
+|---|---|---|
+| Projection (column subset) | ✅     | `polars Projection` → `vortex::expr::pack(get_item(...))` |
+| Slice (positive)           | ✅     | `Slice::Positive` → `ScanBuilder::with_row_range`         |
+| Slice (negative, e.g. `.tail(N)`) | ✅ | `restrict_to_bounds(row_count)` (footer-cached row count) |
+| Filter — `==`, `Between`, `is_in` | ✅ | `SpecializedColumnPredicate` → Vortex `Expression`     |
+| Filter — `starts_with`, `ends_with` | ✅ | LIKE pattern (wildcard-safe)                          |
+| Filter — regex             | ❌ residual | Vortex `like` doesn't do regex                       |
+| Filter — arithmetic (`col + 1 > 5`) | ❌ residual | AExpr traversal not yet wired (PR-13)           |
+| Filter — `CAST(col, ...)`  | ❌ residual | AExpr traversal (PR-13)                              |
+| Filter — struct field access | ❌ residual | AExpr traversal (PR-13)                              |
+| Zone-level pruning         | ✅     | Vortex's `LayoutReader::pruning_evaluation` when given any filter |
+| Hive partitioning          | ✅ (free) | `UnifiedScanArgs::hive_options`                       |
+| Schema evolution           | ✅ (free) | `UnifiedScanArgs::{cast_columns_policy, missing_columns_policy, extra_columns_policy}` |
+| Row index                  | ✅ (free) | `UnifiedScanArgs::row_index` (attached post-decode)   |
+
+Residual predicates are always re-applied by Polars' multi-scan layer post-decode —
+partial pushdown is correct, never *less correct* than no pushdown.
+
+## Crate layout
+
+```
+crates/polars-vortex/
+├── README.md
+├── Cargo.toml
+└── src/
+    ├── lib.rs                       # re-exports + `vortex` umbrella passthrough
+    ├── session.rs                   # global VortexSession + global Moka segment cache
+    ├── read/
+    │   ├── mod.rs
+    │   ├── options.rs               # VortexScanOptions, VortexCacheMode
+    │   ├── metadata.rs              # VortexFooterRef (Arc<Footer>)
+    │   ├── schema.rs                # Vortex DType → polars-arrow ArrowSchema walker
+    │   ├── read_at.rs               # PolarsInstrumentedVortexReadAt decorator
+    │   ├── predicate.rs             # ColumnPredicates → Vortex Expression
+    │   ├── projection.rs            # placeholder (projection handled in stream node)
+    │   └── array_bridge.rs          # upstream RecordBatch → DataFrame via C-ABI
+    └── write/
+        ├── mod.rs
+        ├── options.rs               # VortexWriteOptions, VortexLayoutKind, VortexCompression
+        ├── array_bridge.rs          # polars-arrow Array → upstream ArrayRef via C-ABI
+        ├── df_to_stream.rs          # DataFrame → Vec<ArrayRef> + DType derivation
+        └── writer.rs                # eager write_vortex(&df, path, &options)
+```
+
+The streaming source/sink nodes live in `polars-stream` (so they can see the streaming
+engine's internals):
+
+```
+crates/polars-stream/src/nodes/
+├── io_sources/vortex/
+│   ├── mod.rs                       # VortexFileReader (FileReader impl)
+│   └── builder.rs                   # VortexReaderBuilder (FileReaderBuilder impl)
+└── io_sinks/writers/vortex/
+    └── mod.rs                       # VortexWriterStarter (FileWriterStarter impl)
+```
+
+And the IR / DSL touchpoints sit alongside the existing format variants:
+
+- `polars-plan/src/dsl/file_scan/mod.rs` — `FileScanDsl::Vortex` + `FileScanIR::Vortex`
+- `polars-plan/src/dsl/options/mod.rs` — `FileWriteFormat::Vortex`
+- `polars-plan/src/plans/conversion/dsl_to_ir/scans.rs::vortex_file_info`
+- `polars-plan/src/dsl/builder_dsl.rs::DslBuilder::scan_vortex`
+- `polars-lazy/src/scan/vortex.rs` — `LazyFrame::scan_vortex` + `ScanArgsVortex`
+- `polars-python/src/lazyframe/general.rs` — `new_from_vortex`, `sink_vortex`
+- `py-polars/src/polars/io/vortex/{__init__,functions}.py` — `pl.scan_vortex` / `pl.read_vortex` / `pl.set_vortex_cache_bytes`
+- `py-polars/src/polars/{lazyframe,dataframe}/frame.py` — `LazyFrame.sink_vortex` / `DataFrame.write_vortex`
+
+## API surface — Rust
+
+The Rust API in this crate is intentionally low-level; for most users, the Polars
+DSL (`LazyFrame::scan_vortex`) is the right entry point.
+
+```rust
+// Read options — embedded in FileScanIR::Vortex
+pub struct VortexScanOptions {
+    pub schema: Option<SchemaRef>,
+    pub use_statistics: bool,
+    pub push_predicate: bool,         // default true — translate predicates to Vortex Expressions
+    pub push_projection: bool,        // default true
+    pub initial_read_size: Option<usize>,
+    pub scan_concurrency: Option<NonZeroUsize>,
+    pub cache: VortexCacheMode,       // Global | Off | Dedicated(bytes)
+    pub aggressive_pushdown: bool,    // reserved for PR-13
+}
+
+// Write options — embedded in FileWriteFormat::Vortex
+pub struct VortexWriteOptions {
+    pub layout: VortexLayoutKind,     // Adaptive (default) | Flat | Chunked | Zoned
+    pub compression: VortexCompression, // BtrBlocks (default) | Uncompressed
+    pub target_chunk_size: Option<u64>,
+    pub include_dtype: bool,
+}
+
+// Session helpers
+pub fn polars_vortex::session::session() -> &'static VortexSession;
+pub fn polars_vortex::session::handle() -> vortex::io::runtime::Handle;
+pub fn polars_vortex::session::segment_cache() -> Arc<dyn SegmentCache>;
+pub fn polars_vortex::session::set_global_cache_bytes(bytes: u64);
+
+// Eager Rust write
+pub fn polars_vortex::write::write_vortex(
+    df: &DataFrame,
+    path: impl AsRef<Path>,
+    options: &VortexWriteOptions,
+) -> PolarsResult<()>;
+```
+
+## API surface — Python
+
+```python
+# Read
+pl.scan_vortex(source, *, n_rows=None, row_index_name=None, row_index_offset=0,
+               use_statistics=True, push_predicate=True, push_projection=True,
+               aggressive_pushdown=False, initial_read_size=None,
+               scan_concurrency=None, hive_partitioning=None, glob=True,
+               hidden_file_prefix=None, schema=None, hive_schema=None,
+               try_parse_hive_dates=True, rechunk=False, cache=True,
+               storage_options=None, credential_provider="auto",
+               include_file_paths=None,
+               missing_columns="raise", extra_columns="raise") -> LazyFrame
+
+pl.read_vortex(source, ...) -> DataFrame    # eager: scan_vortex(...).collect()
+
+# Write
+LazyFrame.sink_vortex(path, *, maintain_order=True, storage_options=None,
+                      credential_provider="auto", sync_on_close=None, mkdir=False,
+                      lazy=False, engine="auto", optimizations=...)
+DataFrame.write_vortex(file, *, storage_options=None, credential_provider="auto")
+
+# Config
+pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
+```
+
+## What works today
+
+- ✅ `pl.scan_vortex(local_path).filter(...).slice(...).collect()`
+- ✅ `pl.scan_vortex("s3://...", storage_options={...}).collect()`
+- ✅ `pl.scan_vortex(...).tail(N).collect()` — negative slice pushed
+- ✅ `df.write_vortex(path)` and `lf.sink_vortex(path)` (local)
+- ✅ `lf.sink_vortex(pl.PartitionBy("base/", by=[...]))` — partitioned writes
+- ✅ Multiple Vortex files in one scan (multi-file glob) via `UnifiedScanArgs`
+- ✅ Hive partitioning on read via `UnifiedScanArgs::hive_options`
+- ✅ Process-global decompressed-segment cache with `pl.set_vortex_cache_bytes(N)`
+- ✅ `cargo check -p polars --features vortex,cloud,parquet` warm in ~5s
+
+## Known limits / pending follow-ups
+
+- **Cloud sink errors with a clear message.** Local sinks work; cloud sinks need a
+  `tokio_util::compat::Compat` bridge between Polars' `AsyncWriteable::Cloud`
+  (`tokio::io::AsyncWrite`) and Vortex's `AsyncWriteAdapter` (`futures::AsyncWrite`).
+- **`VortexWriteOptions` are not yet plumbed to Python sinks.** `lf.sink_vortex(...)`
+  currently always uses `VortexWriteOptions::default()` (BtrBlocks Zoned layout).
+  Exposing `layout=` / `compression=` / `chunk_size=` is a small follow-up.
+- **Aggressive predicate pushdown** (arithmetic, CAST, struct field access, temporal
+  extracts) is not yet wired — these stay as residual filters. Implementing them
+  requires walking AExpr at IR-build time instead of relying on
+  `SpecializedColumnPredicate`.
+- **File-level optimizer stats** (whole-file pruning at IR time) are not wired.
+  Vortex's zone-level pruning already runs inside the scan, so this is a modest
+  optimization — useful mainly for very large multi-file scans where opening every
+  file at IR time is acceptable.
+- **Polars `Categorical` / `Enum`** doesn't have a direct Vortex representation;
+  writes fall back to UTF-8.
+
+## Test recipes
+
+End-to-end roundtrip from Python:
+
+```python
+import polars as pl
+df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+df.write_vortex("/tmp/test.vortex")
+out = pl.read_vortex("/tmp/test.vortex")
+assert out.equals(df)
+```
+
+Check filter pushdown is engaged:
+
+```python
+lf = pl.scan_vortex("/tmp/test.vortex").filter(pl.col("a") == 2)
+print(lf.explain(optimized=True))
+# Expect the filter to be absorbed into the Scan node (no separate Filter step
+# above), with `selection: ...` reflecting the pushed Vortex expression.
+```
+
+Verify the segment cache helps on a second read:
+
+```python
+import time
+pl.set_vortex_cache_bytes(1 * 1024**3)
+t1 = time.time(); pl.read_vortex("/tmp/big.vortex"); print("cold:", time.time() - t1)
+t2 = time.time(); pl.read_vortex("/tmp/big.vortex"); print("warm:", time.time() - t2)
+```
+
+## Pointers — reading the source
+
+- The runtime wiring is the most subtle piece: see [`session.rs`] for how the global
+  `VortexSession` is built from `ASYNC.handle()`.
+- The C-ABI bridge is the most surprising piece: see the comments in
+  [`read/array_bridge.rs`] and [`write/array_bridge.rs`].
+- The predicate convertor is the highest-leverage piece for perf: see
+  [`read/predicate.rs`].
+- The streaming source's morsel loop is the heart of `begin_read`:
+  `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs`.
+- The streaming sink's writer task is the inverse:
+  `crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs`.
+
+[`session.rs`]: src/session.rs
+[`read/array_bridge.rs`]: src/read/array_bridge.rs
+[`write/array_bridge.rs`]: src/write/array_bridge.rs
+[`read/predicate.rs`]: src/read/predicate.rs
+[`read/read_at.rs`]: src/read/read_at.rs
