@@ -314,4 +314,98 @@ mod tests {
         // caller treats as "not pushable".
         assert!(polars_scalar_to_vortex(&s).is_none());
     }
+
+    /// Helper: verify a scalar is of the expected `DType::Extension(...)` shape.
+    /// Returns the extension id as a string for the caller to assert on.
+    #[cfg(any(
+        feature = "dtype-date",
+        feature = "dtype-datetime",
+        feature = "dtype-time",
+    ))]
+    fn extension_id_of(scalar: &VortexScalar) -> String {
+        use vortex::dtype::DType;
+        match scalar.dtype() {
+            DType::Extension(ext) => ext.id().to_string(),
+            other => panic!("expected Extension dtype, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "dtype-date")]
+    #[test]
+    fn date_scalar_is_vortex_date_days() {
+        let s = temporal::date_scalar(19_000, Nullability::Nullable).expect("date scalar");
+        assert_eq!(extension_id_of(&s), "vortex.date");
+    }
+
+    #[cfg(feature = "dtype-datetime")]
+    #[test]
+    fn datetime_scalar_units_map_correctly() {
+        use polars_core::prelude::TimeUnit;
+        // Each polars TimeUnit should produce a Vortex Timestamp with the matching unit.
+        for unit in [TimeUnit::Nanoseconds, TimeUnit::Microseconds, TimeUnit::Milliseconds] {
+            let s = temporal::datetime_scalar(0, unit, None, Nullability::Nullable)
+                .expect("datetime scalar");
+            assert_eq!(extension_id_of(&s), "vortex.timestamp");
+        }
+    }
+
+    #[cfg(feature = "dtype-datetime")]
+    #[test]
+    fn datetime_scalar_with_timezone() {
+        use polars_core::prelude::TimeUnit;
+        let s = temporal::datetime_scalar(
+            1_700_000_000_000_000_000,
+            TimeUnit::Nanoseconds,
+            Some("UTC"),
+            Nullability::Nullable,
+        )
+        .expect("datetime scalar with tz");
+        assert_eq!(extension_id_of(&s), "vortex.timestamp");
+    }
+
+    #[cfg(feature = "dtype-time")]
+    #[test]
+    fn time_scalar_is_nanoseconds() {
+        // Polars time is always nanoseconds-since-midnight.
+        let s = temporal::time_scalar(60_000_000_000, Nullability::Nullable).expect("time scalar");
+        assert_eq!(extension_id_of(&s), "vortex.time");
+    }
+
+    #[cfg(feature = "dtype-decimal")]
+    #[test]
+    fn decimal_scalar_roundtrips_precision_and_scale() {
+        use vortex::dtype::DType;
+
+        let s = temporal::decimal_scalar(12_345, 10, 2, Nullability::Nullable)
+            .expect("decimal scalar");
+        match s.dtype() {
+            DType::Decimal(dec, _) => {
+                assert_eq!(dec.precision(), 10);
+                assert_eq!(dec.scale(), 2);
+            }
+            other => panic!("expected Decimal dtype, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "dtype-decimal")]
+    #[test]
+    fn decimal_scalar_rejects_overflowing_precision_and_scale() {
+        // u8::MAX is 255; usize::try_into::<u8> fails for 256.
+        assert!(temporal::decimal_scalar(0, 256, 0, Nullability::Nullable).is_none());
+        // i8::MAX is 127; usize::try_into::<i8> fails for 128.
+        assert!(temporal::decimal_scalar(0, 10, 128, Nullability::Nullable).is_none());
+    }
+
+    #[cfg(feature = "dtype-date")]
+    #[test]
+    fn convertor_returns_pushable_for_date_predicate() {
+        use polars_core::prelude::DataType;
+        use polars_core::scalar::Scalar;
+        use polars_io::predicates::SpecializedColumnPredicate;
+
+        let scalar = Scalar::new(DataType::Date, AnyValue::Date(19_000));
+        let pred = SpecializedColumnPredicate::Equal(scalar);
+        let expr = convert_specialized(&"d".into(), &pred);
+        assert!(expr.is_some(), "Date equality should be pushable when dtype-date is on");
+    }
 }

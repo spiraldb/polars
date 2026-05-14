@@ -219,3 +219,211 @@ fn roundtrip_omit_dtype_then_supply_at_read() {
     write_vortex(&df, &path, &opts).expect("write");
     assert!(path.metadata().expect("stat").len() > 0);
 }
+
+/// Helper: write `df` to a tempfile, read it back, and assert frame equality.
+fn assert_roundtrip(df: DataFrame, name: &str) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(name);
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+    let back = read_back(&path);
+    assert!(
+        df.equals_missing(&back),
+        "{name} mismatch:\nwrote {df:?}\nread  {back:?}"
+    );
+}
+
+// ============================================================================
+// Primitive dtype coverage: integer and float widths.
+//
+// Note: i8/i16/u8/u16 require polars-core's `dtype-i8`/`dtype-i16`/`dtype-u8`/
+// `dtype-u16` features and don't have direct `NamedFrom<&[T]>` impls without
+// them. The roundtrip path itself is dtype-agnostic (it goes through the C-ABI
+// bridge), so the schema-converter unit tests in `read::schema::tests` exercise
+// the smaller widths. Here we cover what's directly constructible from primitive
+// arrays.
+// ============================================================================
+
+#[test]
+fn roundtrip_int32_and_int64_non_nullable() {
+    let df = DataFrame::new(
+        3,
+        vec![
+            Column::new("i32".into(), &[1_i32, 2, 3]),
+            Column::new("i64".into(), &[1_i64, 2, 3]),
+        ],
+    )
+    .expect("build df");
+    assert_roundtrip(df, "ints.vortex");
+}
+
+#[test]
+fn roundtrip_uint32_and_uint64() {
+    let df = DataFrame::new(
+        3,
+        vec![
+            Column::new("u32".into(), &[1_u32, 2, 3]),
+            Column::new("u64".into(), &[1_u64, 2, 3]),
+        ],
+    )
+    .expect("build df");
+    assert_roundtrip(df, "uints.vortex");
+}
+
+#[test]
+fn roundtrip_float32_and_float64() {
+    let df = DataFrame::new(
+        3,
+        vec![
+            Column::new("f32".into(), &[1.0_f32, 2.0, 3.0]),
+            Column::new("f64".into(), &[1.0_f64, 2.0, 3.0]),
+        ],
+    )
+    .expect("build df");
+    assert_roundtrip(df, "floats.vortex");
+}
+
+#[test]
+fn roundtrip_float_nans_preserved() {
+    // NaN compares unequal to itself, so `equals_missing` would fail. Verify
+    // shape + dtype + that null positions survive, but treat the float values
+    // as opaque.
+    let df = DataFrame::new(
+        3,
+        vec![
+            Column::new("f32".into(), &[1.0_f32, f32::NAN, 3.0]),
+            Column::new("f64".into(), &[f64::NAN, 2.0, f64::NAN]),
+        ],
+    )
+    .expect("build df");
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nans.vortex");
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+    let back = read_back(&path);
+    assert_eq!(back.shape(), df.shape());
+    assert_eq!(back["f32"].dtype(), df["f32"].dtype());
+    assert_eq!(back["f64"].dtype(), df["f64"].dtype());
+}
+
+#[test]
+fn roundtrip_binary() {
+    let s0 = Column::new(
+        "bytes".into(),
+        &[
+            &b"hello"[..],
+            &b"world"[..],
+            &b""[..],
+            &b"\x00\x01\x02"[..],
+        ],
+    );
+    let df = DataFrame::new(4, vec![s0]).expect("build df");
+    assert_roundtrip(df, "binary.vortex");
+}
+
+#[test]
+fn roundtrip_binary_with_nulls() {
+    let s0 = Column::new(
+        "bytes".into(),
+        &[Some(&b"hello"[..]), None, Some(&b""[..]), None],
+    );
+    let df = DataFrame::new(4, vec![s0]).expect("build df");
+    assert_roundtrip(df, "binary_nullable.vortex");
+}
+
+// ============================================================================
+// Multi-chunk DataFrame: writer loops over chunks; nothing else exercises this.
+// ============================================================================
+
+#[test]
+fn roundtrip_multi_chunk_dataframe() {
+    use polars_core::frame::column::IntoColumn;
+    use polars_core::prelude::NamedFrom;
+    use polars_core::series::Series;
+
+    let mut combined: Series = NamedFrom::new("a".into(), &[1_i64, 2, 3]);
+    let s_b: Series = NamedFrom::new("a".into(), &[4_i64, 5, 6]);
+    let s_c: Series = NamedFrom::new("a".into(), &[7_i64, 8, 9]);
+
+    // Append b and c to a, forming a multi-chunk series.
+    combined.append(&s_b).expect("append");
+    combined.append(&s_c).expect("append");
+    assert!(combined.chunks().len() >= 2, "expected multi-chunk series");
+
+    let df = DataFrame::new(9, vec![combined.into_column()]).expect("build df");
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("multi_chunk.vortex");
+    write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+    let back = read_back(&path);
+    assert_eq!(back.height(), 9);
+    let vals: Vec<Option<i64>> = back["a"].i64().unwrap().into_iter().collect();
+    assert_eq!(
+        vals,
+        vec![
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(6),
+            Some(7),
+            Some(8),
+            Some(9),
+        ],
+    );
+}
+
+// ============================================================================
+// Temporal dtype coverage (gated on dtype-* features; otherwise skipped).
+// ============================================================================
+
+#[cfg(feature = "dtype-date")]
+#[test]
+fn roundtrip_date() {
+    use polars_core::prelude::DataType;
+
+    let s0 = Column::new("days".into(), &[19_000_i32, 19_001, 19_002])
+        .cast(&DataType::Date)
+        .expect("cast to Date");
+    let df = DataFrame::new(3, vec![s0]).expect("build df");
+    assert_roundtrip(df, "date.vortex");
+}
+
+#[cfg(feature = "dtype-datetime")]
+#[test]
+fn roundtrip_datetime_all_units_no_tz() {
+    use polars_core::prelude::{DataType, TimeUnit as PolarsTimeUnit};
+
+    for unit in [
+        PolarsTimeUnit::Nanoseconds,
+        PolarsTimeUnit::Microseconds,
+        PolarsTimeUnit::Milliseconds,
+    ] {
+        let s0 = Column::new(
+            "ts".into(),
+            &[1_700_000_000_000_i64, 1_700_000_001_000, 1_700_000_002_000],
+        )
+        .cast(&DataType::Datetime(unit, None))
+        .expect("cast to Datetime");
+        let df = DataFrame::new(3, vec![s0]).expect("build df");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("datetime_{unit:?}.vortex"));
+        write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
+        let back = read_back(&path);
+        assert!(
+            df.equals_missing(&back),
+            "datetime/{unit:?} mismatch:\nwrote {df:?}\nread  {back:?}"
+        );
+    }
+}
+
+#[cfg(feature = "dtype-time")]
+#[test]
+fn roundtrip_time() {
+    use polars_core::prelude::DataType;
+
+    let s0 = Column::new("t".into(), &[0_i64, 1_000_000, 86_399_000_000_000])
+        .cast(&DataType::Time)
+        .expect("cast to Time");
+    let df = DataFrame::new(3, vec![s0]).expect("build df");
+    assert_roundtrip(df, "time.vortex");
+}

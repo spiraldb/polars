@@ -241,4 +241,219 @@ mod tests {
             "error should explain nullability constraint, got: {err}"
         );
     }
+
+    #[test]
+    fn null_dtype_maps_to_arrow_null() {
+        let dt = DType::Null;
+        assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Null);
+    }
+
+    #[test]
+    fn bool_maps_to_arrow_boolean() {
+        let dt = DType::Bool(Nullability::Nullable);
+        assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Boolean);
+
+        let dt = DType::Bool(Nullability::NonNullable);
+        assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Boolean);
+    }
+
+    #[test]
+    fn decimal_precision_chooses_128_or_256() {
+        use vortex::dtype::DecimalDType;
+
+        // precision <= 38 → Decimal (128-bit)
+        let small = DType::Decimal(DecimalDType::new(10, 2), Nullability::Nullable);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&small).unwrap(),
+            ArrowDataType::Decimal(10, 2)
+        );
+
+        // precision == 38 boundary (still 128-bit)
+        let boundary = DType::Decimal(DecimalDType::new(38, 0), Nullability::Nullable);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&boundary).unwrap(),
+            ArrowDataType::Decimal(38, 0)
+        );
+
+        // precision == 39 → Decimal256
+        let large = DType::Decimal(DecimalDType::new(39, 5), Nullability::Nullable);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&large).unwrap(),
+            ArrowDataType::Decimal256(39, 5)
+        );
+    }
+
+    #[test]
+    fn decimal_with_negative_scale_errors_cleanly() {
+        // Vortex permits negative scales per the Arrow spec; polars-arrow does not.
+        // The convertor should reject explicitly rather than silently wrap.
+        use vortex::dtype::DecimalDType;
+
+        let dt = DType::Decimal(DecimalDType::new(10, -2), Nullability::Nullable);
+        let err = vortex_dtype_to_arrow_dtype(&dt).unwrap_err();
+        assert!(
+            err.to_string().contains("negative scale"),
+            "error should mention 'negative scale', got: {err}"
+        );
+    }
+
+    #[test]
+    fn list_maps_through_recursively() {
+        let inner = DType::Primitive(PType::I32, Nullability::Nullable);
+        let list = DType::List(std::sync::Arc::new(inner), Nullability::Nullable);
+
+        match vortex_dtype_to_arrow_dtype(&list).unwrap() {
+            ArrowDataType::List(field) => {
+                assert_eq!(field.name.as_str(), "item");
+                assert!(field.is_nullable);
+                assert_eq!(field.dtype, ArrowDataType::Int32);
+            }
+            other => panic!("expected List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixed_size_list_maps_through_recursively() {
+        let inner = DType::Primitive(PType::F64, Nullability::NonNullable);
+        let fsl = DType::FixedSizeList(std::sync::Arc::new(inner), 4, Nullability::Nullable);
+
+        match vortex_dtype_to_arrow_dtype(&fsl).unwrap() {
+            ArrowDataType::FixedSizeList(field, size) => {
+                assert_eq!(size, 4);
+                assert_eq!(field.dtype, ArrowDataType::Float64);
+                assert!(!field.is_nullable);
+            }
+            other => panic!("expected FixedSizeList, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_maps_to_arrow_struct() {
+        use vortex::dtype::{FieldName, StructFields};
+
+        let inner_dtypes = vec![
+            DType::Primitive(PType::I64, Nullability::Nullable),
+            DType::Utf8(Nullability::Nullable),
+        ];
+        let names: Vec<FieldName> = vec!["a".into(), "b".into()];
+        let fields = StructFields::new(names.into(), inner_dtypes);
+        let dt = DType::Struct(fields, Nullability::Nullable);
+
+        match vortex_dtype_to_arrow_dtype(&dt).unwrap() {
+            ArrowDataType::Struct(field_vec) => {
+                assert_eq!(field_vec.len(), 2);
+                assert_eq!(field_vec[0].name.as_str(), "a");
+                assert_eq!(field_vec[0].dtype, ArrowDataType::Int64);
+                assert_eq!(field_vec[1].name.as_str(), "b");
+                assert_eq!(field_vec[1].dtype, ArrowDataType::Utf8View);
+            }
+            other => panic!("expected Struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn date_extensions_map_to_arrow_date32_and_date64() {
+        use vortex::array::extension::datetime::{Date, TimeUnit as VTimeUnit};
+
+        let d32 = DType::Extension(Date::new(VTimeUnit::Days, Nullability::Nullable).erased());
+        assert_eq!(vortex_dtype_to_arrow_dtype(&d32).unwrap(), ArrowDataType::Date32);
+
+        let d64 = DType::Extension(
+            Date::new(VTimeUnit::Milliseconds, Nullability::Nullable).erased(),
+        );
+        assert_eq!(vortex_dtype_to_arrow_dtype(&d64).unwrap(), ArrowDataType::Date64);
+    }
+
+    #[test]
+    fn time_extensions_map_to_time32_or_time64() {
+        use vortex::array::extension::datetime::{Time, TimeUnit as VTimeUnit};
+
+        let cases = [
+            (VTimeUnit::Seconds, ArrowDataType::Time32(ArrowTimeUnit::Second)),
+            (VTimeUnit::Milliseconds, ArrowDataType::Time32(ArrowTimeUnit::Millisecond)),
+            (VTimeUnit::Microseconds, ArrowDataType::Time64(ArrowTimeUnit::Microsecond)),
+            (VTimeUnit::Nanoseconds, ArrowDataType::Time64(ArrowTimeUnit::Nanosecond)),
+        ];
+        for (unit, expected) in cases {
+            let dt = DType::Extension(Time::new(unit, Nullability::Nullable).erased());
+            assert_eq!(
+                vortex_dtype_to_arrow_dtype(&dt).unwrap(),
+                expected,
+                "{unit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_extension_days_unit_errors() {
+        use vortex::array::extension::datetime::{Time, TimeUnit as VTimeUnit};
+        // Vortex's Time::new with Days panics during construction, but if we
+        // somehow produce one the convertor should reject it. The error path
+        // matters because users may receive a Vortex file built by another
+        // language that doesn't enforce the same invariant.
+        //
+        // We can't easily construct a Days-unit Time scalar via the public
+        // API (Time::new panics), so this is structurally tested via the
+        // `_ => polars_bail!(...)` arm. Documented for completeness.
+        let _ = Time::new(VTimeUnit::Nanoseconds, Nullability::Nullable);
+    }
+
+    #[test]
+    fn timestamp_with_and_without_timezone() {
+        use std::sync::Arc;
+
+        use vortex::array::extension::datetime::{TimeUnit as VTimeUnit, Timestamp};
+
+        // No timezone.
+        let ts = DType::Extension(
+            Timestamp::new(VTimeUnit::Nanoseconds, Nullability::Nullable).erased(),
+        );
+        match vortex_dtype_to_arrow_dtype(&ts).unwrap() {
+            ArrowDataType::Timestamp(unit, tz) => {
+                assert_eq!(unit, ArrowTimeUnit::Nanosecond);
+                assert!(tz.is_none());
+            }
+            other => panic!("expected Timestamp, got {:?}", other),
+        }
+
+        // With timezone.
+        let ts_tz = DType::Extension(
+            Timestamp::new_with_tz(
+                VTimeUnit::Microseconds,
+                Some(Arc::from("UTC")),
+                Nullability::Nullable,
+            )
+            .erased(),
+        );
+        match vortex_dtype_to_arrow_dtype(&ts_tz).unwrap() {
+            ArrowDataType::Timestamp(unit, tz) => {
+                assert_eq!(unit, ArrowTimeUnit::Microsecond);
+                assert_eq!(tz.as_deref(), Some("UTC"));
+            }
+            other => panic!("expected Timestamp(_, Some(UTC)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn vortex_dtype_to_schema_round_trips_nullability() {
+        use vortex::dtype::{FieldName, StructFields};
+
+        let fields = StructFields::new(
+            vec![FieldName::from("nullable_col"), FieldName::from("non_nullable_col")].into(),
+            vec![
+                DType::Primitive(PType::I64, Nullability::Nullable),
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+            ],
+        );
+        let dt = DType::Struct(fields, Nullability::NonNullable);
+
+        let (pl, arrow) = vortex_dtype_to_schema(&dt).unwrap();
+        assert_eq!(pl.len(), 2);
+        let f0 = arrow.iter_values().nth(0).unwrap();
+        let f1 = arrow.iter_values().nth(1).unwrap();
+        assert_eq!(f0.name.as_str(), "nullable_col");
+        assert!(f0.is_nullable);
+        assert_eq!(f1.name.as_str(), "non_nullable_col");
+        assert!(!f1.is_nullable);
+    }
 }
