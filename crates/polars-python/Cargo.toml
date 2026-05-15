@@ -50,7 +50,7 @@ parking_lot = { workspace = true }
 pyo3 = { workspace = true, features = ["abi3-py310", "chrono", "chrono-tz", "multiple-pymethods"] }
 rayon = { workspace = true }
 recursive = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dependencies.polars]
@@ -154,7 +154,6 @@ is_in = ["polars/is_in"]
 json = [
   "polars/serde",
   "polars-buffer/serde",
-  "serde_json",
   "polars/json",
   "polars-utils/serde",
   "polars-mem-engine/json",
