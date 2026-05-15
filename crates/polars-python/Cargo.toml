@@ -24,11 +24,11 @@ polars-ooc = { workspace = true, default-features = false }
 polars-ops = { workspace = true, features = ["bitwise"] }
 polars-parquet = { workspace = true, optional = true }
 polars-plan = { workspace = true }
-polars-vortex = { workspace = true, optional = true }
 polars-row = { workspace = true }
 polars-testing = { workspace = true }
 polars-time = { workspace = true }
 polars-utils = { workspace = true, features = ["python"] }
+polars-vortex = { workspace = true, optional = true }
 
 arboard = { workspace = true, optional = true }
 arrow = { workspace = true }
