@@ -240,6 +240,19 @@ mod tests {
     }
 
     #[test]
+    fn variant_dtype_errors_with_clear_message() {
+        // DType::Variant is in vortex 0.70.0's public enum but polars-vortex
+        // does not (yet) map it to an Arrow type; the bail-path should remain
+        // user-readable rather than degrading to a generic match-fail or panic.
+        let dt = DType::Variant(Nullability::Nullable);
+        let err = vortex_dtype_to_arrow_dtype(&dt).unwrap_err();
+        assert!(
+            err.to_string().contains("Variant"),
+            "error should mention Variant, got: {err}"
+        );
+    }
+
+    #[test]
     fn null_dtype_maps_to_arrow_null() {
         let dt = DType::Null;
         assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Null);
