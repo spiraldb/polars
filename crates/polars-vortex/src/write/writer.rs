@@ -44,17 +44,16 @@ pub fn write_vortex(
         stream::iter(chunks.into_iter().map(VortexResult::Ok)),
     );
 
-    ASYNC
-        .block_on(async move {
-            let file = tokio::fs::File::create(&path)
-                .await
-                .map_err(|e| polars_err!(ComputeError: "vortex write: create {}: {e}", path.display()))?;
-            write_opts
-                .write(file, stream)
-                .await
-                .map_err(|e| polars_err!(ComputeError: "vortex write: {e}"))?;
-            Ok::<_, polars_error::PolarsError>(())
-        })?;
+    ASYNC.block_on(async move {
+        let file = tokio::fs::File::create(&path).await.map_err(
+            |e| polars_err!(ComputeError: "vortex write: create {}: {e}", path.display()),
+        )?;
+        write_opts
+            .write(file, stream)
+            .await
+            .map_err(|e| polars_err!(ComputeError: "vortex write: {e}"))?;
+        Ok::<_, polars_error::PolarsError>(())
+    })?;
 
     Ok(())
 }

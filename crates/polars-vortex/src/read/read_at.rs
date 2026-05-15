@@ -23,8 +23,7 @@ use std::sync::Arc;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use polars_io::metrics::{IOMetrics, OptIOMetrics};
-use vortex::buffer::Alignment;
-use vortex::buffer::ByteBuffer;
+use vortex::buffer::{Alignment, ByteBuffer};
 use vortex::error::VortexResult;
 use vortex::io::{CoalesceConfig, VortexReadAt};
 
@@ -222,11 +221,8 @@ mod tests {
     #[test]
     fn decorator_forwards_reads_and_preserves_length() {
         let inner = CountingReadAt::new(8);
-        let decorated = PolarsInstrumentedVortexReadAt::new(
-            inner.clone() as Arc<dyn VortexReadAt>,
-            None,
-            None,
-        );
+        let decorated =
+            PolarsInstrumentedVortexReadAt::new(inner.clone() as Arc<dyn VortexReadAt>, None, None);
 
         polars_core::runtime::ASYNC.block_on(async {
             let buf = decorated
@@ -246,11 +242,8 @@ mod tests {
         // The decorator caches the inner's concurrency at construction time and
         // delegates coalesce_config every call.
         let inner = CountingReadAt::new(42);
-        let decorated = PolarsInstrumentedVortexReadAt::new(
-            inner as Arc<dyn VortexReadAt>,
-            None,
-            None,
-        );
+        let decorated =
+            PolarsInstrumentedVortexReadAt::new(inner as Arc<dyn VortexReadAt>, None, None);
         assert_eq!(decorated.concurrency(), 42);
         assert!(decorated.coalesce_config().is_none());
     }

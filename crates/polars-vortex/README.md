@@ -172,7 +172,7 @@ reverse C-ABI bridge in `write/array_bridge.rs`, streamed through a
 
 | Feature | Default | Effect |
 |---|---|---|
-| `cloud`       | off | Enables `s3://` / `gs://` / `az://` / `http(s)://` reads. Pulls `vortex/object_store` and `polars-io/cloud`. Cloud *sink* is not yet wired (errors with a clear message). |
+| `cloud`       | off | Enables `s3://` / `gs://` / `az://` / `http(s)://` reads. Pulls `vortex/object_store` and `polars-io/cloud`. Cloud _sink_ is not yet wired (errors with a clear message). |
 | `serde`       | off | Crate-wide `Serialize` / `Deserialize` on the option types — required when `polars-plan/serde` is enabled. |
 | `dsl-schema`  | off | `schemars::JsonSchema` derives on option types — required when `polars-plan/dsl-schema` is enabled. |
 

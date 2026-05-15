@@ -183,10 +183,7 @@ impl LazyFrame {
     }
 
     /// Create a LazyFrame directly from a Vortex scan over multiple file paths.
-    pub fn scan_vortex_files(
-        paths: Buffer<PlRefPath>,
-        args: ScanArgsVortex,
-    ) -> PolarsResult<Self> {
+    pub fn scan_vortex_files(paths: Buffer<PlRefPath>, args: ScanArgsVortex) -> PolarsResult<Self> {
         Self::scan_vortex_sources(ScanSources::Paths(paths), args)
     }
 }

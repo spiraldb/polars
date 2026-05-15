@@ -31,9 +31,7 @@ use crate::write::array_bridge::polars_chunk_to_upstream_record_batch;
 ///
 /// All columns must share the same chunk count — call `df.rechunk()` first if they
 /// don't. Returns `(top_dtype, chunks)`.
-pub fn dataframe_to_vortex_chunks(
-    df: &DataFrame,
-) -> PolarsResult<(DType, Vec<VortexArrayRef>)> {
+pub fn dataframe_to_vortex_chunks(df: &DataFrame) -> PolarsResult<(DType, Vec<VortexArrayRef>)> {
     // Build the polars-arrow schema once and derive the top-level Vortex DType
     // upfront. Doing this before any chunk conversion gives us a real dtype for
     // the n_chunks == 0 case and avoids re-computing it per chunk. Going through
@@ -68,8 +66,10 @@ pub fn dataframe_to_vortex_chunks(
                     .chunks()
                     .get(chunk_idx)
                     .map(|a| a.to_boxed())
-                    .ok_or_else(|| polars_err!(ComputeError:
-                        "vortex write: column missing chunk {chunk_idx} (have {n_chunks})"))
+                    .ok_or_else(|| {
+                        polars_err!(ComputeError:
+                        "vortex write: column missing chunk {chunk_idx} (have {n_chunks})")
+                    })
             })
             .collect::<PolarsResult<_>>()?;
 
@@ -80,11 +80,11 @@ pub fn dataframe_to_vortex_chunks(
         // `FromArrowArray<&StructArray>`. RecordBatch -> StructArray is a no-op
         // wrap (same schema, same columns).
         let struct_array: StructArray = rb.into();
-        let arr = <VortexArrayRef as FromArrowArray<&StructArray>>::from_arrow(
-            &struct_array,
-            false,
-        )
-        .map_err(|e| polars_err!(ComputeError: "vortex write: from_arrow StructArray: {e}"))?;
+        let arr =
+            <VortexArrayRef as FromArrowArray<&StructArray>>::from_arrow(&struct_array, false)
+                .map_err(
+                    |e| polars_err!(ComputeError: "vortex write: from_arrow StructArray: {e}"),
+                )?;
         chunks.push(arr);
     }
 
@@ -120,11 +120,13 @@ pub fn polars_arrow_schema_to_vortex_dtype(
         // SAFETY: both structs are `#[repr(C)]` with the Arrow C Data Interface layout
         // (verified above).
         let up_ffi: FFI_ArrowSchema = unsafe { mem::transmute(pl_ffi) };
-        let up_field = UpstreamField::try_from(&up_ffi).map_err(|e| {
-            polars_err!(ComputeError: "vortex write: schema FFI Field conversion: {e}")
-        })?;
+        let up_field = UpstreamField::try_from(&up_ffi).map_err(
+            |e| polars_err!(ComputeError: "vortex write: schema FFI Field conversion: {e}"),
+        )?;
         up_fields.push(up_field);
     }
     let up_schema = UpstreamSchema::new(up_fields);
-    Ok(<DType as FromArrowType<&UpstreamSchema>>::from_arrow(&up_schema))
+    Ok(<DType as FromArrowType<&UpstreamSchema>>::from_arrow(
+        &up_schema,
+    ))
 }

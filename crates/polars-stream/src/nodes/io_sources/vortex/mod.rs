@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{ArrowSchema, ArrowSchemaRef, ArrowDataType};
+use arrow::datatypes::{ArrowDataType, ArrowSchema, ArrowSchemaRef};
 use async_trait::async_trait;
 use futures::StreamExt;
 use polars_core::runtime::ASYNC;
@@ -18,21 +18,18 @@ use polars_io::cloud::CloudOptions;
 use polars_io::metrics::IOMetrics;
 use polars_plan::dsl::{ScanSource, ScanSourceRef};
 use polars_utils::slice_enum::Slice;
-use polars_vortex::VortexScanOptions;
 use polars_vortex::read::array_bridge::{
-    arrow_dtypes_from_schema, record_batch_to_dataframe,
+    ArrowUpstreamSchema, arrow_dtypes_from_schema, record_batch_to_dataframe,
 };
 use polars_vortex::read::predicate::polars_to_vortex_predicate;
 use polars_vortex::read::read_at::local_file_read_at;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::session;
-use polars_vortex::vortex;
-use polars_vortex::read::array_bridge::ArrowUpstreamSchema;
-use polars_vortex::vortex::array::ArrayRef as VortexArrayRef;
-use polars_vortex::vortex::array::VortexSessionExecute;
 use polars_vortex::vortex::array::arrow::ArrowArrayExecutor;
 use polars_vortex::vortex::array::stream::ArrayStreamExt;
+use polars_vortex::vortex::array::{ArrayRef as VortexArrayRef, VortexSessionExecute};
 use polars_vortex::vortex::file::{Footer, OpenOptionsSessionExt, VortexFile};
+use polars_vortex::{VortexScanOptions, vortex};
 
 use crate::async_executor::{self, JoinHandle};
 use crate::metrics::OptIOMetrics;
@@ -75,9 +72,7 @@ impl VortexFileReader {
     /// Build the underlying `VortexReadAt` based on the scan source. Local files go
     /// through `polars-vortex`'s `local_file_read_at`; cloud paths go through
     /// `cloud_read_at` (built on top of `polars_io::cloud::build_object_store`).
-    async fn build_read_at(
-        &self,
-    ) -> PolarsResult<Arc<dyn vortex::io::VortexReadAt>> {
+    async fn build_read_at(&self) -> PolarsResult<Arc<dyn vortex::io::VortexReadAt>> {
         let io_metrics = self.io_metrics.0.clone();
         match self.scan_source.as_scan_source_ref() {
             ScanSourceRef::Path(path) if !path.has_scheme() => {
@@ -85,37 +80,37 @@ impl VortexFileReader {
                 tokio::task::spawn_blocking(move || local_file_read_at(&path, io_metrics))
                     .await
                     .map_err(|e| polars_err!(ComputeError: "spawn_blocking failed: {e}"))?
-            }
+            },
             #[cfg(feature = "cloud")]
             ScanSourceRef::Path(path) => {
                 let cloud_opts = self.cloud_options.as_deref();
-                polars_vortex::read::read_at::cloud_read_at(
-                    path.clone(),
-                    cloud_opts,
-                    io_metrics,
-                )
-                .await
-            }
+                polars_vortex::read::read_at::cloud_read_at(path.clone(), cloud_opts, io_metrics)
+                    .await
+            },
             #[cfg(not(feature = "cloud"))]
             ScanSourceRef::Path(_) => {
                 polars_bail!(ComputeError:
                     "Vortex was built without the `cloud` feature; rebuild Polars with \
                      `--features vortex,cloud` to enable S3/GCS/Azure reads.")
-            }
+            },
             ScanSourceRef::Buffer(buf) => {
                 let bytes = buf.as_slice().to_vec();
-                let uri: Arc<str> = self.scan_source.as_scan_source_ref().to_include_path_name().into();
+                let uri: Arc<str> = self
+                    .scan_source
+                    .as_scan_source_ref()
+                    .to_include_path_name()
+                    .into();
                 Ok(polars_vortex::read::read_at::in_memory_read_at(
                     bytes,
                     Some(uri),
                     io_metrics,
                 ))
-            }
+            },
             ScanSourceRef::File(_) => {
                 polars_bail!(ComputeError:
                     "Vortex reads from open File handles are not yet supported; \
                      pass a path or in-memory buffer instead.")
-            }
+            },
         }
     }
 }
@@ -156,11 +151,9 @@ impl FileReader for VortexFileReader {
 
         let (pl_schema, arrow_schema) = vortex_dtype_to_schema(vxf.dtype())?;
         let arrow_dtypes = arrow_dtypes_from_schema(arrow_schema.as_ref());
-        let upstream_schema = Arc::new(
-            vxf.dtype()
-                .to_arrow_schema()
-                .map_err(|e| polars_err!(ComputeError: "vortex DType -> upstream arrow schema: {e}"))?,
-        );
+        let upstream_schema = Arc::new(vxf.dtype().to_arrow_schema().map_err(
+            |e| polars_err!(ComputeError: "vortex DType -> upstream arrow schema: {e}"),
+        )?);
         let row_count = vxf.row_count();
 
         self.init_data = Some(InitializedState {
@@ -176,7 +169,12 @@ impl FileReader for VortexFileReader {
 
     async fn file_schema(&mut self) -> PolarsResult<SchemaRef> {
         self.initialize().await?;
-        Ok(self.init_data.as_ref().expect("initialized").pl_schema.clone())
+        Ok(self
+            .init_data
+            .as_ref()
+            .expect("initialized")
+            .pl_schema
+            .clone())
     }
 
     async fn file_arrow_schema(&mut self) -> PolarsResult<Option<ArrowSchemaRef>> {
@@ -229,8 +227,10 @@ impl FileReader for VortexFileReader {
                     let start = offset as u64;
                     let end = start.saturating_add(len as u64);
                     start..end
-                }
-                Slice::Negative { .. } => unreachable!("restrict_to_bounds always returns Positive"),
+                },
+                Slice::Negative { .. } => {
+                    unreachable!("restrict_to_bounds always returns Positive")
+                },
             }
         });
 
@@ -276,17 +276,18 @@ impl FileReader for VortexFileReader {
             let source_token = SourceToken::default();
 
             while let Some(array_res) = stream.next().await {
-                let array: VortexArrayRef = array_res
-                    .map_err(|e| polars_err!(ComputeError: "vortex stream item: {e}"))?;
+                let array: VortexArrayRef =
+                    array_res.map_err(|e| polars_err!(ComputeError: "vortex stream item: {e}"))?;
                 // Convert vortex ArrayRef -> upstream RecordBatch via ArrowArrayExecutor.
                 let mut ctx = session_ref.create_execution_ctx();
                 let record_batch = array
                     .execute_record_batch(upstream_schema.as_ref(), &mut ctx)
-                    .map_err(|e| polars_err!(ComputeError:
-                        "vortex execute_record_batch: {e}"))?;
+                    .map_err(|e| {
+                        polars_err!(ComputeError:
+                        "vortex execute_record_batch: {e}")
+                    })?;
                 // Bridge upstream RecordBatch -> Polars DataFrame via the C ABI.
-                let df =
-                    record_batch_to_dataframe(record_batch, &pl_schema, &arrow_dtypes)?;
+                let df = record_batch_to_dataframe(record_batch, &pl_schema, &arrow_dtypes)?;
                 let morsel = Morsel::new(df, seq, source_token.clone());
                 seq = seq.successor();
                 if tx.send_morsel(morsel).await.is_err() {

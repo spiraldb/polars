@@ -766,11 +766,13 @@ pub fn lower_ir(
                     FileScanIR::Vortex {
                         options,
                         metadata: first_metadata,
-                    } => Arc::new(crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
-                        options: Arc::new(options.clone()),
-                        first_metadata: first_metadata.clone(),
-                        io_metrics: std::sync::OnceLock::new(),
-                    }) as _,
+                    } => Arc::new(
+                        crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
+                            options: Arc::new(options.clone()),
+                            first_metadata: first_metadata.clone(),
+                            io_metrics: std::sync::OnceLock::new(),
+                        },
+                    ) as _,
 
                     #[cfg(feature = "csv")]
                     FileScanIR::Csv { options } => {

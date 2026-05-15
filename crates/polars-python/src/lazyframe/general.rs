@@ -344,8 +344,9 @@ impl PyLazyFrame {
         cache_mode_kind: &str,
         cache_dedicated_bytes: Option<u64>,
     ) -> PyResult<Self> {
-        use crate::utils::to_py_err;
         use polars_vortex::{VortexCacheMode, VortexScanOptions};
+
+        use crate::utils::to_py_err;
 
         let segment_cache = match (cache_mode_kind, cache_dedicated_bytes) {
             ("global", _) => VortexCacheMode::Global,

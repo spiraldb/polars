@@ -16,7 +16,9 @@ use futures::StreamExt;
 use polars_core::frame::DataFrame;
 use polars_core::prelude::Column;
 use polars_core::runtime::ASYNC;
-use polars_vortex::read::array_bridge::{ArrowUpstreamSchema, arrow_dtypes_from_schema, record_batch_to_dataframe};
+use polars_vortex::read::array_bridge::{
+    ArrowUpstreamSchema, arrow_dtypes_from_schema, record_batch_to_dataframe,
+};
 use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::{handle, session};
 use polars_vortex::vortex::array::VortexSessionExecute;
@@ -67,14 +69,13 @@ fn read_back(path: &std::path::Path) -> DataFrame {
             let rb = array
                 .execute_record_batch(upstream_schema.as_ref(), &mut ctx)
                 .expect("execute_record_batch");
-            let df =
-                record_batch_to_dataframe(rb, &pl_schema, &arrow_dtypes).expect("bridge");
+            let df = record_batch_to_dataframe(rb, &pl_schema, &arrow_dtypes).expect("bridge");
             out = Some(match out {
                 None => df,
                 Some(mut acc) => {
                     acc.vstack_mut(&df).expect("vstack");
                     acc
-                }
+                },
             });
         }
         out.unwrap_or_else(|| DataFrame::empty_with_schema(pl_schema.as_ref()))
@@ -97,7 +98,10 @@ fn roundtrip_default_options() {
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
 
     let back = read_back(&path);
-    assert!(df.equals_missing(&back), "DataFrame round-trip mismatch:\nwrote {df:?}\nread {back:?}");
+    assert!(
+        df.equals_missing(&back),
+        "DataFrame round-trip mismatch:\nwrote {df:?}\nread {back:?}"
+    );
 }
 
 #[test]
@@ -160,15 +164,15 @@ fn roundtrip_nullable() {
     let path = dir.path().join("nullable.vortex");
 
     let s0 = Column::new("a".into(), &[Some(1_i32), None, Some(3), None, Some(5)]);
-    let s1 = Column::new(
-        "b".into(),
-        &[Some("x"), Some("y"), None, Some("z"), None],
-    );
+    let s1 = Column::new("b".into(), &[Some("x"), Some("y"), None, Some("z"), None]);
     let df = DataFrame::new(5, vec![s0, s1]).expect("build df");
 
     write_vortex(&df, &path, &VortexWriteOptions::default()).expect("write");
     let back = read_back(&path);
-    assert!(df.equals_missing(&back), "nullable mismatch:\nwrote {df:?}\nread {back:?}");
+    assert!(
+        df.equals_missing(&back),
+        "nullable mismatch:\nwrote {df:?}\nread {back:?}"
+    );
 }
 
 #[test]
@@ -308,12 +312,7 @@ fn roundtrip_float_nans_preserved() {
 fn roundtrip_binary() {
     let s0 = Column::new(
         "bytes".into(),
-        &[
-            &b"hello"[..],
-            &b"world"[..],
-            &b""[..],
-            &b"\x00\x01\x02"[..],
-        ],
+        &[&b"hello"[..], &b"world"[..], &b""[..], &b"\x00\x01\x02"[..]],
     );
     let df = DataFrame::new(4, vec![s0]).expect("build df");
     assert_roundtrip(df, "binary.vortex");
@@ -436,7 +435,11 @@ fn roundtrip_datetime_with_timezone() {
     // UTC is the easiest tz to assert — IANA, no DST quirks.
     let s0 = Column::new(
         "ts".into(),
-        &[1_700_000_000_000_000_i64, 1_700_000_001_000_000, 1_700_000_002_000_000],
+        &[
+            1_700_000_000_000_000_i64,
+            1_700_000_001_000_000,
+            1_700_000_002_000_000,
+        ],
     )
     .cast(&DataType::Datetime(
         PolarsTimeUnit::Microseconds,
@@ -452,12 +455,9 @@ fn roundtrip_datetime_with_timezone() {
 fn roundtrip_decimal_basic() {
     use polars_core::prelude::DataType;
 
-    let s0 = Column::new(
-        "amount".into(),
-        &[1_234_567_i128, 9_876_543, 0, -42],
-    )
-    .cast(&DataType::Decimal(10, 2))
-    .expect("cast to Decimal(10, 2)");
+    let s0 = Column::new("amount".into(), &[1_234_567_i128, 9_876_543, 0, -42])
+        .cast(&DataType::Decimal(10, 2))
+        .expect("cast to Decimal(10, 2)");
     let df = DataFrame::new(4, vec![s0]).expect("build df");
     assert_roundtrip(df, "decimal_basic.vortex");
 }

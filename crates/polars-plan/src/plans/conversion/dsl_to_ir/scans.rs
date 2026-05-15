@@ -295,7 +295,10 @@ pub(super) async fn vortex_file_info(
     row_index: Option<&RowIndex>,
     cloud_options: Option<&polars_io::cloud::CloudOptions>,
     n_sources: usize,
-) -> PolarsResult<(FileInfo, Option<polars_vortex::read::metadata::VortexFooterRef>)> {
+) -> PolarsResult<(
+    FileInfo,
+    Option<polars_vortex::read::metadata::VortexFooterRef>,
+)> {
     use polars_core::runtime::ASYNC;
     use polars_vortex::read::read_at::{in_memory_read_at, local_file_read_at};
     use polars_vortex::read::schema::vortex_dtype_to_schema;
@@ -306,27 +309,24 @@ pub(super) async fn vortex_file_info(
     let read_at = match first_scan_source {
         ScanSourceRef::Path(path) if !path.has_scheme() => {
             local_file_read_at(path.as_std_path(), None)?
-        }
+        },
         #[cfg(feature = "cloud")]
         ScanSourceRef::Path(path) => {
-            polars_vortex::read::read_at::cloud_read_at(path.clone(), cloud_options, None)
-                .await?
-        }
+            polars_vortex::read::read_at::cloud_read_at(path.clone(), cloud_options, None).await?
+        },
         #[cfg(not(feature = "cloud"))]
         ScanSourceRef::Path(_) => {
             let _ = cloud_options;
             polars_bail!(ComputeError:
                 "Vortex was built without the `cloud` feature; rebuild Polars with \
                  `--features vortex,cloud` to discover schemas from S3/GCS/Azure paths.")
-        }
-        ScanSourceRef::Buffer(buf) => {
-            in_memory_read_at(buf.as_slice().to_vec(), None, None)
-        }
+        },
+        ScanSourceRef::Buffer(buf) => in_memory_read_at(buf.as_slice().to_vec(), None, None),
         ScanSourceRef::File(_) => {
             polars_bail!(ComputeError:
                 "Vortex schema discovery from open File handles is not yet supported; \
                  pass a path or `schema=...`.")
-        }
+        },
     };
 
     let vxf = ASYNC
@@ -347,7 +347,11 @@ pub(super) async fn vortex_file_info(
         insert_row_index_to_schema(Arc::make_mut(&mut pl_schema), ri.name.clone())?;
     }
 
-    let known_size = if n_sources == 1 { Some(row_count) } else { None };
+    let known_size = if n_sources == 1 {
+        Some(row_count)
+    } else {
+        None
+    };
     let file_info = FileInfo::new(
         pl_schema,
         Some(either::Either::Left(arrow_schema)),

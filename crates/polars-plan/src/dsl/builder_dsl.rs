@@ -9,9 +9,9 @@ use polars_io::csv::read::CsvReadOptions;
 use polars_io::ipc::IpcScanOptions;
 #[cfg(feature = "parquet")]
 use polars_io::parquet::read::ParquetOptions;
+use polars_utils::unique_id::UniqueId;
 #[cfg(feature = "vortex")]
 use polars_vortex::VortexScanOptions;
-use polars_utils::unique_id::UniqueId;
 
 use crate::dsl::functions::lit;
 #[cfg(feature = "python")]

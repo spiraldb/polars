@@ -5,8 +5,7 @@ use std::sync::Arc;
 use polars_io::cloud::CloudOptions;
 use polars_io::metrics::IOMetrics;
 use polars_plan::dsl::ScanSource;
-use polars_vortex::VortexScanOptions;
-use polars_vortex::vortex;
+use polars_vortex::{VortexScanOptions, vortex};
 
 use super::VortexFileReader;
 use crate::metrics::OptIOMetrics;

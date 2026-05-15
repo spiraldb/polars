@@ -45,9 +45,7 @@ pub fn polars_to_vortex_predicate(scan_predicate: &ScanIOPredicate) -> Option<Ex
         .column_predicates
         .predicates
         .iter()
-        .filter_map(|(name, (_, specialized_opt))| {
-            specialized_opt.as_ref().map(|s| (name, s))
-        })
+        .filter_map(|(name, (_, specialized_opt))| specialized_opt.as_ref().map(|s| (name, s)))
         .collect();
     per_column_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
 
@@ -65,15 +63,13 @@ fn convert_specialized(
     let col = get_item(column_name.as_str(), root());
 
     Some(match specialized {
-        SpecializedColumnPredicate::Equal(scalar) => {
-            eq(col, lit(polars_scalar_to_vortex(scalar)?))
-        }
+        SpecializedColumnPredicate::Equal(scalar) => eq(col, lit(polars_scalar_to_vortex(scalar)?)),
         SpecializedColumnPredicate::Between(low, high) => {
             let lo = lit(polars_scalar_to_vortex(low)?);
             let hi = lit(polars_scalar_to_vortex(high)?);
             // Closed range: low <= col <= high.
             vortex::expr::and(gt_eq(col.clone(), lo), lt_eq(col, hi))
-        }
+        },
         SpecializedColumnPredicate::EqualOneOf(scalars) => {
             let terms: Vec<Expression> = scalars
                 .iter()
@@ -87,19 +83,25 @@ fn convert_specialized(
                 return None;
             }
             or_collect(terms)?
-        }
+        },
         SpecializedColumnPredicate::StartsWith(bytes) => {
             let prefix = bytes_to_like_literal(bytes)?;
             // `prefix%`
             let pattern = format!("{prefix}%");
-            like(col, lit(VortexScalar::utf8(pattern, Nullability::NonNullable)))
-        }
+            like(
+                col,
+                lit(VortexScalar::utf8(pattern, Nullability::NonNullable)),
+            )
+        },
         SpecializedColumnPredicate::EndsWith(bytes) => {
             let suffix = bytes_to_like_literal(bytes)?;
             // `%suffix`
             let pattern = format!("%{suffix}");
-            like(col, lit(VortexScalar::utf8(pattern, Nullability::NonNullable)))
-        }
+            like(
+                col,
+                lit(VortexScalar::utf8(pattern, Nullability::NonNullable)),
+            )
+        },
         // No native regex in Vortex's `like`; let the multi-scan residual handle it.
         SpecializedColumnPredicate::RegexMatch(_) => return None,
     })
@@ -159,20 +161,17 @@ fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<Vorte
         #[cfg(feature = "dtype-datetime")]
         AnyValue::Datetime(value, unit, tz) => {
             temporal::datetime_scalar(*value, *unit, tz.map(|t| t.as_ref()), nul)?
-        }
+        },
         #[cfg(feature = "dtype-datetime")]
-        AnyValue::DatetimeOwned(value, unit, tz) => temporal::datetime_scalar(
-            *value,
-            *unit,
-            tz.as_ref().map(|t| t.as_ref().as_ref()),
-            nul,
-        )?,
+        AnyValue::DatetimeOwned(value, unit, tz) => {
+            temporal::datetime_scalar(*value, *unit, tz.as_ref().map(|t| t.as_ref().as_ref()), nul)?
+        },
         #[cfg(feature = "dtype-time")]
         AnyValue::Time(ns) => temporal::time_scalar(*ns, nul)?,
         #[cfg(feature = "dtype-decimal")]
         AnyValue::Decimal(v, precision, scale) => {
             temporal::decimal_scalar(*v, *precision, *scale, nul)?
-        }
+        },
         // Duration has no Vortex extension dtype analogue; fall through to residual.
         _ => return None,
     })
@@ -185,14 +184,16 @@ fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<Vorte
     feature = "dtype-decimal",
 ))]
 mod temporal {
-    use vortex::array::scalar::Scalar as VortexScalar;
-    use vortex::dtype::Nullability;
-
-    #[cfg(any(feature = "dtype-date", feature = "dtype-datetime", feature = "dtype-time"))]
-    use vortex::array::extension::datetime::TimeUnit as VortexTimeUnit;
-
     #[cfg(feature = "dtype-datetime")]
     use polars_core::prelude::TimeUnit as PolarsTimeUnit;
+    #[cfg(any(
+        feature = "dtype-date",
+        feature = "dtype-datetime",
+        feature = "dtype-time"
+    ))]
+    use vortex::array::extension::datetime::TimeUnit as VortexTimeUnit;
+    use vortex::array::scalar::Scalar as VortexScalar;
+    use vortex::dtype::Nullability;
 
     #[cfg(feature = "dtype-date")]
     pub(super) fn date_scalar(days: i32, nul: Nullability) -> Option<VortexScalar> {
@@ -250,11 +251,7 @@ mod temporal {
         let p: u8 = precision.try_into().ok()?;
         let s: i8 = scale.try_into().ok()?;
         let dtype = DecimalDType::new(p, s);
-        Some(VortexScalar::decimal(
-            DecimalValue::I128(value),
-            dtype,
-            nul,
-        ))
+        Some(VortexScalar::decimal(DecimalValue::I128(value), dtype, nul))
     }
 }
 
@@ -287,8 +284,8 @@ mod tests {
 
     #[test]
     fn scalar_primitive_types_convert() {
-        use polars_core::scalar::Scalar;
         use polars_core::prelude::DataType;
+        use polars_core::scalar::Scalar;
 
         let s = Scalar::new(DataType::Int32, AnyValue::Int32(42));
         assert!(polars_scalar_to_vortex(&s).is_some());
@@ -305,8 +302,8 @@ mod tests {
 
     #[test]
     fn scalar_null_does_not_convert() {
-        use polars_core::scalar::Scalar;
         use polars_core::prelude::DataType;
+        use polars_core::scalar::Scalar;
 
         let s = Scalar::new(DataType::Int32, AnyValue::Null);
         // We don't yet translate AnyValue::Null because Vortex's `null` literal
@@ -342,7 +339,11 @@ mod tests {
     fn datetime_scalar_units_map_correctly() {
         use polars_core::prelude::TimeUnit;
         // Each polars TimeUnit should produce a Vortex Timestamp with the matching unit.
-        for unit in [TimeUnit::Nanoseconds, TimeUnit::Microseconds, TimeUnit::Milliseconds] {
+        for unit in [
+            TimeUnit::Nanoseconds,
+            TimeUnit::Microseconds,
+            TimeUnit::Milliseconds,
+        ] {
             let s = temporal::datetime_scalar(0, unit, None, Nullability::Nullable)
                 .expect("datetime scalar");
             assert_eq!(extension_id_of(&s), "vortex.timestamp");
@@ -376,13 +377,13 @@ mod tests {
     fn decimal_scalar_roundtrips_precision_and_scale() {
         use vortex::dtype::DType;
 
-        let s = temporal::decimal_scalar(12_345, 10, 2, Nullability::Nullable)
-            .expect("decimal scalar");
+        let s =
+            temporal::decimal_scalar(12_345, 10, 2, Nullability::Nullable).expect("decimal scalar");
         match s.dtype() {
             DType::Decimal(dec, _) => {
                 assert_eq!(dec.precision(), 10);
                 assert_eq!(dec.scale(), 2);
-            }
+            },
             other => panic!("expected Decimal dtype, got {:?}", other),
         }
     }
@@ -406,7 +407,10 @@ mod tests {
         let scalar = Scalar::new(DataType::Date, AnyValue::Date(19_000));
         let pred = SpecializedColumnPredicate::Equal(scalar);
         let expr = convert_specialized(&"d".into(), &pred);
-        assert!(expr.is_some(), "Date equality should be pushable when dtype-date is on");
+        assert!(
+            expr.is_some(),
+            "Date equality should be pushable when dtype-date is on"
+        );
     }
 
     // ========================================================================
@@ -455,8 +459,7 @@ mod tests {
         // Wildcard chars trigger the safety check — return None so the residual
         // filter handles it correctly.
         use polars_io::predicates::SpecializedColumnPredicate;
-        let pred =
-            SpecializedColumnPredicate::StartsWith(b"hello%".to_vec().into_boxed_slice());
+        let pred = SpecializedColumnPredicate::StartsWith(b"hello%".to_vec().into_boxed_slice());
         assert!(convert_specialized(&"s".into(), &pred).is_none());
     }
 

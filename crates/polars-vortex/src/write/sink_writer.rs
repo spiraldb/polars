@@ -17,14 +17,13 @@
 
 use std::io;
 
-use vortex::io::{IoBuf, VortexWrite};
-
 #[cfg(feature = "cloud")]
 use polars_io::cloud::cloud_writer::CloudWriterIoTraitWrap;
 #[cfg(feature = "cloud")]
 use tokio_util::compat::Compat;
 #[cfg(feature = "cloud")]
 use vortex::io::AsyncWriteAdapter;
+use vortex::io::{IoBuf, VortexWrite};
 
 /// Unified Vortex sink. Pass an instance of this enum to
 /// `VortexWriteOptions::write(sink, stream)`.

@@ -13,12 +13,12 @@ use polars_io::ipc::IpcScanOptions;
 use polars_io::parquet::metadata::FileMetadataRef;
 #[cfg(feature = "parquet")]
 use polars_io::parquet::read::ParquetOptions;
+use polars_io::{HiveOptions, RowIndex};
+use polars_utils::slice_enum::Slice;
 #[cfg(feature = "vortex")]
 use polars_vortex::VortexScanOptions;
 #[cfg(feature = "vortex")]
 use polars_vortex::read::metadata::VortexFooterRef;
-use polars_io::{HiveOptions, RowIndex};
-use polars_utils::slice_enum::Slice;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use strum_macros::IntoStaticStr;

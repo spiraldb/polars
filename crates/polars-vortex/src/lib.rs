@@ -11,12 +11,11 @@ pub mod read;
 pub mod session;
 pub mod write;
 
-pub use read::options::{VortexCacheMode, VortexScanOptions};
-pub use session::session;
-pub use write::options::{VortexCompression, VortexWriteOptions};
-
 /// Re-exports of upstream Vortex types that appear in our public APIs (in particular the
 /// streaming source node's footer cache). Re-exporting here means downstream Polars crates
 /// can refer to them as `polars_vortex::vortex::file::Footer` without adding a direct
 /// dependency on `vortex` themselves.
 pub use ::vortex;
+pub use read::options::{VortexCacheMode, VortexScanOptions};
+pub use session::session;
+pub use write::options::{VortexCompression, VortexWriteOptions};

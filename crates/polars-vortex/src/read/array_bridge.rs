@@ -22,9 +22,9 @@
 
 use std::mem;
 
-use arrow::ffi::ArrowArray as PolarsFfiArray;
 use arrow::array::ArrayRef as PolarsArrayRef;
 use arrow::datatypes::ArrowDataType as PolarsArrowDataType;
+use arrow::ffi::ArrowArray as PolarsFfiArray;
 use arrow_array::RecordBatch as UpstreamRecordBatch;
 use arrow_array::ffi::FFI_ArrowArray;
 use polars_core::frame::DataFrame;

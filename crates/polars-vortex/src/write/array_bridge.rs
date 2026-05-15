@@ -20,9 +20,8 @@ use arrow::ffi::{
     ArrowArray as PolarsFfiArray, ArrowSchema as PolarsFfiSchema, export_array_to_c,
     export_field_to_c,
 };
-use arrow_array::ArrayRef as UpstreamArrayRef;
 use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use arrow_array::make_array;
+use arrow_array::{ArrayRef as UpstreamArrayRef, make_array};
 use polars_error::{PolarsResult, polars_err};
 
 /// Move a polars-arrow column into an upstream `arrow_array::ArrayRef` via the C
@@ -96,11 +95,11 @@ pub fn polars_chunk_to_upstream_record_batch(
     let mut upstream_fields = Vec::with_capacity(columns.len());
     let mut upstream_arrays = Vec::with_capacity(columns.len());
     for (col_idx, polars_array) in columns.into_iter().enumerate() {
-        let (polars_name, polars_field) = polars_schema
-            .get_at_index(col_idx)
-            .ok_or_else(|| polars_err!(ComputeError:
+        let (polars_name, polars_field) = polars_schema.get_at_index(col_idx).ok_or_else(|| {
+            polars_err!(ComputeError:
                 "vortex write: column index {} outside schema (len {})",
-                col_idx, polars_schema.len()))?;
+                col_idx, polars_schema.len())
+        })?;
 
         let arrow_array = polars_array_to_upstream(polars_array, polars_field)?;
         let dt: DataType = arrow_array.data_type().clone();

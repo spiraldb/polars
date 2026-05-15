@@ -15,9 +15,9 @@ use polars_core::prelude::Schema;
 use polars_core::schema::{SchemaExt, SchemaRef};
 use polars_error::{PolarsResult, polars_bail, polars_err};
 use polars_utils::pl_str::PlSmallStr;
-use vortex::array::extension::datetime::AnyTemporal;
-use vortex::array::extension::datetime::TemporalMetadata;
-use vortex::array::extension::datetime::TimeUnit as VortexTimeUnit;
+use vortex::array::extension::datetime::{
+    AnyTemporal, TemporalMetadata, TimeUnit as VortexTimeUnit,
+};
 use vortex::dtype::{DType, Nullability, PType};
 
 /// Translate a top-level Vortex [`DType::Struct`] (the shape every Vortex file's schema takes)
@@ -88,7 +88,7 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
             } else {
                 ArrowDataType::Decimal256(precision, scale)
             }
-        }
+        },
         // Vortex's Utf8/Binary map to polars-arrow's view variants — matches what
         // Vortex's own to_arrow_dtype emits and what the file format produces at decode.
         DType::Utf8(_) => ArrowDataType::Utf8View,
@@ -100,7 +100,7 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
                 elem_dtype.is_nullable(),
             );
             ArrowDataType::List(Box::new(inner))
-        }
+        },
         DType::FixedSizeList(elem_dtype, size, _) => {
             let inner = ArrowField::new(
                 PlSmallStr::from("item"),
@@ -108,7 +108,7 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
                 elem_dtype.is_nullable(),
             );
             ArrowDataType::FixedSizeList(Box::new(inner), *size as usize)
-        }
+        },
         DType::Struct(fields, _) => {
             let mut out = Vec::with_capacity(fields.names().len());
             for (name, field_dt) in fields.names().iter().zip(fields.fields()) {
@@ -119,10 +119,10 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
                 ));
             }
             ArrowDataType::Struct(out)
-        }
+        },
         DType::Variant(_) => {
             polars_bail!(ComputeError: "Vortex Variant types are not yet supported in Polars")
-        }
+        },
         DType::Extension(ext) => {
             // Temporal extensions are the only common case; everything else is bailed for now.
             if let Some(temporal) = ext.metadata_opt::<AnyTemporal>() {
@@ -141,13 +141,13 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
                         VortexTimeUnit::Seconds => ArrowDataType::Time32(ArrowTimeUnit::Second),
                         VortexTimeUnit::Milliseconds => {
                             ArrowDataType::Time32(ArrowTimeUnit::Millisecond)
-                        }
+                        },
                         VortexTimeUnit::Microseconds => {
                             ArrowDataType::Time64(ArrowTimeUnit::Microsecond)
-                        }
+                        },
                         VortexTimeUnit::Nanoseconds => {
                             ArrowDataType::Time64(ArrowTimeUnit::Nanosecond)
-                        }
+                        },
                         VortexTimeUnit::Days => polars_bail!(ComputeError:
                             "invalid Vortex time unit Days for Time extension"),
                     },
@@ -155,7 +155,7 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
             }
             polars_bail!(ComputeError:
                 "unsupported Vortex extension type \"{}\"", ext.id())
-        }
+        },
     })
 }
 
@@ -171,7 +171,7 @@ fn vortex_time_unit_to_arrow(
         VortexTimeUnit::Days => {
             return Err(polars_err!(ComputeError:
                 "invalid Vortex time unit Days for {}", context));
-        }
+        },
     })
 }
 
@@ -207,10 +207,16 @@ mod tests {
     #[test]
     fn utf8_and_binary_become_view_variants() {
         let utf8 = DType::Utf8(Nullability::Nullable);
-        assert_eq!(vortex_dtype_to_arrow_dtype(&utf8).unwrap(), ArrowDataType::Utf8View);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&utf8).unwrap(),
+            ArrowDataType::Utf8View
+        );
 
         let bin = DType::Binary(Nullability::Nullable);
-        assert_eq!(vortex_dtype_to_arrow_dtype(&bin).unwrap(), ArrowDataType::BinaryView);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&bin).unwrap(),
+            ArrowDataType::BinaryView
+        );
     }
 
     #[test]
@@ -255,16 +261,25 @@ mod tests {
     #[test]
     fn null_dtype_maps_to_arrow_null() {
         let dt = DType::Null;
-        assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Null);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&dt).unwrap(),
+            ArrowDataType::Null
+        );
     }
 
     #[test]
     fn bool_maps_to_arrow_boolean() {
         let dt = DType::Bool(Nullability::Nullable);
-        assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Boolean);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&dt).unwrap(),
+            ArrowDataType::Boolean
+        );
 
         let dt = DType::Bool(Nullability::NonNullable);
-        assert_eq!(vortex_dtype_to_arrow_dtype(&dt).unwrap(), ArrowDataType::Boolean);
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&dt).unwrap(),
+            ArrowDataType::Boolean
+        );
     }
 
     #[test]
@@ -317,7 +332,7 @@ mod tests {
                 assert_eq!(field.name.as_str(), "item");
                 assert!(field.is_nullable);
                 assert_eq!(field.dtype, ArrowDataType::Int32);
-            }
+            },
             other => panic!("expected List, got {:?}", other),
         }
     }
@@ -332,7 +347,7 @@ mod tests {
                 assert_eq!(size, 4);
                 assert_eq!(field.dtype, ArrowDataType::Float64);
                 assert!(!field.is_nullable);
-            }
+            },
             other => panic!("expected FixedSizeList, got {:?}", other),
         }
     }
@@ -356,7 +371,7 @@ mod tests {
                 assert_eq!(field_vec[0].dtype, ArrowDataType::Int64);
                 assert_eq!(field_vec[1].name.as_str(), "b");
                 assert_eq!(field_vec[1].dtype, ArrowDataType::Utf8View);
-            }
+            },
             other => panic!("expected Struct, got {:?}", other),
         }
     }
@@ -366,12 +381,17 @@ mod tests {
         use vortex::array::extension::datetime::{Date, TimeUnit as VTimeUnit};
 
         let d32 = DType::Extension(Date::new(VTimeUnit::Days, Nullability::Nullable).erased());
-        assert_eq!(vortex_dtype_to_arrow_dtype(&d32).unwrap(), ArrowDataType::Date32);
-
-        let d64 = DType::Extension(
-            Date::new(VTimeUnit::Milliseconds, Nullability::Nullable).erased(),
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&d32).unwrap(),
+            ArrowDataType::Date32
         );
-        assert_eq!(vortex_dtype_to_arrow_dtype(&d64).unwrap(), ArrowDataType::Date64);
+
+        let d64 =
+            DType::Extension(Date::new(VTimeUnit::Milliseconds, Nullability::Nullable).erased());
+        assert_eq!(
+            vortex_dtype_to_arrow_dtype(&d64).unwrap(),
+            ArrowDataType::Date64
+        );
     }
 
     #[test]
@@ -379,10 +399,22 @@ mod tests {
         use vortex::array::extension::datetime::{Time, TimeUnit as VTimeUnit};
 
         let cases = [
-            (VTimeUnit::Seconds, ArrowDataType::Time32(ArrowTimeUnit::Second)),
-            (VTimeUnit::Milliseconds, ArrowDataType::Time32(ArrowTimeUnit::Millisecond)),
-            (VTimeUnit::Microseconds, ArrowDataType::Time64(ArrowTimeUnit::Microsecond)),
-            (VTimeUnit::Nanoseconds, ArrowDataType::Time64(ArrowTimeUnit::Nanosecond)),
+            (
+                VTimeUnit::Seconds,
+                ArrowDataType::Time32(ArrowTimeUnit::Second),
+            ),
+            (
+                VTimeUnit::Milliseconds,
+                ArrowDataType::Time32(ArrowTimeUnit::Millisecond),
+            ),
+            (
+                VTimeUnit::Microseconds,
+                ArrowDataType::Time64(ArrowTimeUnit::Microsecond),
+            ),
+            (
+                VTimeUnit::Nanoseconds,
+                ArrowDataType::Time64(ArrowTimeUnit::Nanosecond),
+            ),
         ];
         for (unit, expected) in cases {
             let dt = DType::Extension(Time::new(unit, Nullability::Nullable).erased());
@@ -422,7 +454,7 @@ mod tests {
             ArrowDataType::Timestamp(unit, tz) => {
                 assert_eq!(unit, ArrowTimeUnit::Nanosecond);
                 assert!(tz.is_none());
-            }
+            },
             other => panic!("expected Timestamp, got {:?}", other),
         }
 
@@ -439,7 +471,7 @@ mod tests {
             ArrowDataType::Timestamp(unit, tz) => {
                 assert_eq!(unit, ArrowTimeUnit::Microsecond);
                 assert_eq!(tz.as_deref(), Some("UTC"));
-            }
+            },
             other => panic!("expected Timestamp(_, Some(UTC)), got {:?}", other),
         }
     }
@@ -449,7 +481,11 @@ mod tests {
         use vortex::dtype::{FieldName, StructFields};
 
         let fields = StructFields::new(
-            vec![FieldName::from("nullable_col"), FieldName::from("non_nullable_col")].into(),
+            vec![
+                FieldName::from("nullable_col"),
+                FieldName::from("non_nullable_col"),
+            ]
+            .into(),
             vec![
                 DType::Primitive(PType::I64, Nullability::Nullable),
                 DType::Primitive(PType::I64, Nullability::NonNullable),

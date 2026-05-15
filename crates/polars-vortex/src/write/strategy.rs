@@ -20,7 +20,8 @@ pub fn build_write_options(opts: &VortexWriteOptions) -> VortexFileWriteOptions 
     };
 
     // Build the layout strategy with the requested row-block size.
-    let mut strategy_builder = WriteStrategyBuilder::default().with_btrblocks_builder(compressor_builder);
+    let mut strategy_builder =
+        WriteStrategyBuilder::default().with_btrblocks_builder(compressor_builder);
     if let Some(rbs) = opts.row_block_size {
         strategy_builder = strategy_builder.with_row_block_size(rbs as usize);
     }
