@@ -13,7 +13,7 @@ phase_index: 1
 current_pr: PR-1.2
 pr_index: 2
 outstanding_must_fix: 0
-deferred_items_total: 1
+deferred_items_total: 2
 last_user_touchpoint: 2026-05-15T15:01:18Z
 last_user_touchpoint_what: "started PR-1.2 (Phase 1 polish): ruff errors + VortexCacheMode python surface + visitor feature-gating"
 subagent_invocations_this_pr: 0
@@ -350,7 +350,7 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
 - **`takeable_rows_provider` morsel size**: defaults to IPC's 122,880 rows; Vortex's natural zone block is 8,192. Deferred — low ROI, may surface during Phase 4 benches if measurement shows it matters.
 - **~~Workspace `vortex = { path = "..." }` → crates.io version~~**: **RESOLVED in PR-1.1.** Vortex 0.70.0 is published; the migration is in Phase 1 scope, not deferred.
 - **Pre-existing visitor feature-gating** in `polars-python::lazyframe::visitor::nodes.rs::scan_type_to_pyobject`: latent (py-polars wheel always enables `json`). Targeted for inclusion in PR-1.2 (Phase 1 polish).
-- **In-memory `ScanSourceRef::Buffer` zero-copy** (currently `to_vec()`s): targeted for inclusion in PR-1.2 if low-effort; else deferred.
+- **In-memory `ScanSourceRef::Buffer` zero-copy** (`dsl_to_ir/scans.rs:323` does `buf.as_slice().to_vec()` then hands the owned `Vec<u8>` to `in_memory_read_at`): considered in PR-1.2, deferred as not-low-effort. The fix requires changing `in_memory_read_at`'s signature to accept a refcounted slice (e.g., `Arc<[u8]>` or polars' `MemSlice`) and threading the change through Vortex's `ByteBuffer::from` constructor. Modest effort, modest ROI (only the in-memory scan path; cloud/local already zero-copy). Revisit in PR-14 benches if measurement shows the copy matters; otherwise leave permanently deferred.
 - **Rust-level tests for the polars-stream Vortex source/sink** (currently only Python): deferred to Phase 3 or follow-up.
 - **Hard-cached segment-cache hit count test**: Moka's `Cache` doesn't expose hit/miss stats; would need wrapping in `InstrumentedSegmentCache` from upstream Vortex. Deferred.
 - **PR-1.1 Python local-verification** (criterion b "8 Python tests pass locally"): this worktree's env has no `maturin` / `pytest` / installed py-polars wheel. Subsumed by Phase 1 exit criterion (e) which runs `gh pr checks 1` (the spiraldb/polars CI runs the full `test-python.yml` matrix against the pushed PR). Resolution: CI verification IS the Python test execution; no further local work required. (Deferred from PR-1.1 gauntlet cycle 1 should-fix #2, 2026-05-15.)
