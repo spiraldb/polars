@@ -13,7 +13,7 @@ from polars.io.cloud.credential_provider._builder import (
 from polars.io.scan_options._options import ScanOptions
 
 with contextlib.suppress(ImportError):
-    from polars import _plr as plr  # noqa: F401
+    from polars import _plr as plr
     from polars._plr import PyLazyFrame
 
 if TYPE_CHECKING:

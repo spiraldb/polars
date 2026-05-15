@@ -8,12 +8,15 @@ only when the Polars binary was built with the ``vortex`` feature; otherwise
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import polars as pl
 from polars.testing import assert_frame_equal
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _vortex_available() -> bool:
@@ -37,9 +40,10 @@ def _vortex_available() -> bool:
     try:
         with tempfile.NamedTemporaryFile(suffix=".vortex") as f:
             pl.DataFrame({"x": [1]}).write_vortex(f.name)
-        return True
     except (AttributeError, ComputeError):
         return False
+    else:
+        return True
 
 
 pytestmark = pytest.mark.skipif(

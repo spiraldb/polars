@@ -3208,6 +3208,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         pl.scan_vortex : Read a Vortex file lazily.
         pl.read_vortex : Read a Vortex file eagerly.
         """
+        from polars.io.cloud.credential_provider._builder import (
+            _init_credential_provider_builder,
+        )
+
         credential_provider_builder = _init_credential_provider_builder(
             credential_provider, path, storage_options, "sink_vortex"
         )
