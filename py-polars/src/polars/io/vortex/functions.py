@@ -191,19 +191,27 @@ def _resolve_cache_mode(
         return "global", None
     if cache_mode == "off":
         return "off", None
-    if isinstance(cache_mode, int) and not isinstance(cache_mode, bool):
-        if cache_mode <= 0:
-            msg = (
-                "cache_mode int must be a positive byte count; "
-                "pass 'off' to disable caching"
-            )
-            raise ValueError(msg)
-        return "dedicated", cache_mode
-    msg = (
-        f"cache_mode must be None, 'global', 'off', or a positive int "
-        f"(got {cache_mode!r})"
-    )
-    raise TypeError(msg)
+    # `bool` is a subclass of `int` in Python; reject True/False explicitly so
+    # callers don't accidentally get a 1- or 0-byte dedicated cache.
+    if isinstance(cache_mode, bool):
+        msg = (
+            f"cache_mode must be None, 'global', 'off', or a positive int "
+            f"(got bool {cache_mode!r})"
+        )
+        raise TypeError(msg)
+    if not isinstance(cache_mode, int):
+        msg = (
+            f"cache_mode must be None, 'global', 'off', or a positive int "
+            f"(got {cache_mode!r})"
+        )
+        raise TypeError(msg)
+    if cache_mode <= 0:
+        msg = (
+            "cache_mode int must be a positive byte count; "
+            "pass 'off' to disable caching"
+        )
+        raise ValueError(msg)
+    return "dedicated", cache_mode
 
 
 def set_vortex_cache_bytes(byte_budget: int) -> None:

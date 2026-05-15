@@ -883,6 +883,17 @@ class PyLazyFrame:
         use_statistics: bool,
     ) -> PyLazyFrame: ...
     @staticmethod
+    def new_from_vortex(
+        sources: Any,
+        schema: Any | None,
+        scan_options: ScanOptions,
+        push_predicate: bool,
+        initial_read_size: int | None,
+        scan_concurrency: int | None,
+        cache_mode_kind: str,
+        cache_dedicated_bytes: int | None,
+    ) -> PyLazyFrame: ...
+    @staticmethod
     def new_from_ipc(
         sources: Any,
         record_batch_statistics: bool | None,
@@ -972,6 +983,14 @@ class PyLazyFrame:
         data_page_size: int | None,
         metadata: KeyValueMetadata | None,
         arrow_schema: ArrowSchemaExportable | None = None,
+    ) -> PyLazyFrame: ...
+    def sink_vortex(
+        self,
+        target: SinkTarget,
+        sink_options: Any,
+        compression: str,
+        row_block_size: int | None,
+        include_dtype: bool,
     ) -> PyLazyFrame: ...
     def sink_ipc(
         self,
@@ -2263,6 +2282,7 @@ def _parquet_metadata_pruned_json(
 ) -> str: ...
 def read_clipboard_string() -> str: ...
 def write_clipboard_string(s: str) -> None: ...
+def set_vortex_cache_bytes(bytes: int) -> None: ...
 
 # functions.meta
 def get_index_type() -> Any: ...
