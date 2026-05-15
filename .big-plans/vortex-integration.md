@@ -5,25 +5,25 @@
 ## Current State
 
 ```yaml
-status: executing
+status: planning
 branch: vortex-integration
-planning_sub_flow: null
-current_phase: "Ratify + crates.io transition"
+planning_sub_flow: initial
+current_phase: ""
 phase_index: 1
-current_pr: PR-1.1
+current_pr: null
 pr_index: 1
 outstanding_must_fix: 0
 deferred_items_total: 0
 last_user_touchpoint: 2026-05-15T14:34:14Z
-last_user_touchpoint_what: "started PR-1.1 (crates.io vortex migration); Phase 1 entered"
+last_user_touchpoint_what: "reverted premature executing transition; re-opening 4 Step 1.4 design-tree decisions Claude resolved without surfacing"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 6
 review_cycles_this_pr: 0
-phase_entry_sha: 61ddaf89b
+phase_entry_sha: null
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
-last_commit: 61ddaf89b
+last_commit: ce2a2b900
 ```
 
 ## Context
@@ -123,11 +123,11 @@ Populated incrementally during Step 1.4 design-tree interview. Each row is a lea
 | Reuse existing 31 commits vs rewrite from scratch | **Reuse** | 73 tests passing locally; two prior gauntlet review passes already surfaced + fixed substantive bugs; architecture documented; prior planning session decided same with full context. (Resolved Phase 0.) |
 | Work shape | **feature-integration** | Adding Vortex into existing Polars systems with many touch points. Highest-leverage insight: Analogous prior art. (Resolved Step 1.1.) |
 | Phase 1.2 fan-out | **6 subagents** (Slots 1, 3, 4, 5, 6, 7) | Skipped Slot 2 (threading settled per existing plan). Each slot's report informs a distinct plan section. (Resolved Step 1.2.) |
-| PR-13 architecture | **Option B → A via PR-13.6 cutover** | Subagent 7's recommendation. Ship parallel paths first (PR-13.1–.5), then PR-13.6 deletes the `SpecializedColumnPredicate` fast path once the AExpr-direct path proves itself. More bisectable than Option A's big-bang cutover; `POLARS_VORTEX_VERIFY_PUSHDOWN=1` debug env var (added in PR-2.2) catches semantic divergence during the parallel-path window. (Resolved Step 1.4.) |
-| CI green-up approach | **crates.io `vortex = "0.70.0"`** (user-confirmed; Vortex is published) | Replace workspace path-dep `path = "../../../../vortex/vortex"` with `version = "0.70.0"`. Strictly better than git-rev, CI-workflow clone, or feature-gating: cleanest dep, no release blocker, version-pinned. PR-1.1 scope. (Resolved Step 1.4.) |
-| Per-phase review-counts | **4 / 3 / 3 / 4** | Phase 1 4-vote because it's the retroactive ratification of 31 commits worth of integration code (high stakes; never reviewed externally). Phase 2 3-vote (Spec + Correctness + Maintainability) and Phase 3 3-vote — standard for feature work. Phase 4 4-vote because it's the final architectural-coherence review on the FULL cumulative diff vs main pre-squash-merge. (Resolved Step 1.6 inline.) |
-| PR-8 leads Parquet on `table_statistics` | **Yes, lead the pattern** | Vortex's footer carries per-column min/max/null_count cheaply; populating `UnifiedScanArgs::table_statistics` enables whole-file pruning at IR-time before readers are instantiated (a layer above Vortex's own zone-level pruning). No Polars format currently does this from its own footer. PR-3.1 designs the `VortexFile::file_stats() → DataFrame` shape carefully and we surface to upstream maintainers (file an RFC issue) before squash-merge. (Resolved Step 1.4.) |
-| Final phase plan (4 phases / ~14 PRs) | **Confirmed as drafted** | Handoff plan's 4-phase skeleton is sound. Phase 1 absorbs CI green-up as PR-1.1 (now a clean ~1-2-commit migration thanks to crates.io). Phases 2/3/4 as enumerated. (Resolved Step 1.4 implicitly via handoff acceptance.) |
+| CI green-up approach | **crates.io `vortex = "0.70.0"`** (user-confirmed; Vortex is published) | Replace workspace path-dep `path = "../../../../vortex/vortex"` with `version = "0.70.0"`. Strictly better than git-rev, CI-workflow clone, or feature-gating: cleanest dep, no release blocker, version-pinned. PR-1.1 scope. (Resolved Step 1.4 by user.) |
+| PR-13 architecture | **RE-OPENED for explicit user input** (Claude pre-resolved as Option B → A; reverted 2026-05-15) | Subagent 7 recommended Option B (parallel paths, PR-13.1–.5) → migrate to Option A via PR-13.6 cutover. Claude applied this without surfacing; user redirected. Trigger condition: upcoming AskUserQuestion. |
+| Per-phase review-counts | **RE-OPENED for explicit user input** (Claude pre-resolved as 4/3/3/4 per handoff sketch; reverted 2026-05-15) | Handoff plan sketched 4/3/3/4. Claude applied this without surfacing; user redirected. Trigger condition: upcoming AskUserQuestion. |
+| PR-8 leads Parquet on `table_statistics` | **RE-OPENED for explicit user input** (Claude pre-resolved as "lead the pattern"; reverted 2026-05-15) | No Polars file format currently populates this from its own footer (only `PythonDataset` via Iceberg/Delta). Decision: lead the pattern (PR-8 ships first) vs wait for upstream. Claude applied "lead" without surfacing; user redirected. Trigger condition: upcoming AskUserQuestion. |
+| Final phase plan (4 phases / ~14 PRs) | **RE-OPENED for explicit user input** (Claude pre-resolved as "confirmed as drafted"; reverted 2026-05-15) | Handoff plan's 4-phase skeleton: (1) Ratify+CI, (2) PR-13, (3) PR-8+PR-6, (4) Benches. Claude assumed implicit confirmation via Phase 0 "reuse" answer; user redirected. Trigger condition: upcoming AskUserQuestion. |
 
 ## Project-specific BANS
 
