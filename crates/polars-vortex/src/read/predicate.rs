@@ -290,7 +290,7 @@ mod tests {
         let s = Scalar::new(DataType::Int32, AnyValue::Int32(42));
         assert!(polars_scalar_to_vortex(&s).is_some());
 
-        let s = Scalar::new(DataType::Float64, AnyValue::Float64(3.14));
+        let s = Scalar::new(DataType::Float64, AnyValue::Float64(2.5));
         assert!(polars_scalar_to_vortex(&s).is_some());
 
         let s = Scalar::new(DataType::Boolean, AnyValue::Boolean(true));

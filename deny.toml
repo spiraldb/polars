@@ -48,6 +48,7 @@ allow = [
   "Unicode-3.0",
   # Public domain / no-rights-reserved
   "CC0-1.0",
+  "0BSD",
   # Other permissive / widely-used
   "BSL-1.0",
   "OpenSSL",
