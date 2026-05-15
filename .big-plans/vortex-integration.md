@@ -5,25 +5,25 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: executing
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: PR-1.1
-pr_index: 1
+current_pr: null
+pr_index: 2
 outstanding_must_fix: 0
 deferred_items_total: 1
 last_user_touchpoint: 2026-05-15T15:01:18Z
-last_user_touchpoint_what: "PR-1.1 gauntlet cycle 1 accepted (0 must-fix, 2 should-fix, 2 nit)"
-subagent_invocations_this_pr: 1
+last_user_touchpoint_what: "PR-1.1 complete (confidence: high, deferred: 1); BETWEEN-PRs handoff to PR-1.2"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 7
-review_cycles_this_pr: 1
+review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
-last_commit: 79119848a
+last_commit: 04751d0d1
 ```
 
 ## Context
@@ -326,7 +326,18 @@ df = pl.read_vortex("nested.vortex")  # List/Struct roundtrip
 
 ## Implementation status
 
-Living ledger — populated by inner-loop and phase-end reviews. Empty at planning time.
+Living ledger — populated by inner-loop and phase-end reviews.
+
+### PR-1.1: crates.io transition (2 PR-work commits, ending at `018f2ce43`)
+
+- **Scope shipped**: workspace `Cargo.toml:115` replaced `vortex = { path = "../../../../vortex/vortex", ... }` with `vortex = { version = "0.70.0", default-features = false, features = ["files", "tokio"] }`. Single API-drift fix: `DType::Union(_)` arm removed from `crates/polars-vortex/src/read/schema.rs` (not present in 0.70.0); `DType::Variant(_)` arm retained (present in 0.70.0). Cargo.lock refreshed: +87 / −31 lines, mechanical version bumps from path-local `0.1.0` to crates.io `0.70.0` for 29 `vortex-*` crates; `smallvec` transitive dep dropped from `vortex-array` and `vortex-sequence`.
+- **Tests added**: `variant_dtype_errors_with_clear_message` in `crates/polars-vortex/src/read/schema.rs:243-253` (covers the retained `DType::Variant(_)` bail-arm; resolves gauntlet cycle 1 should-fix #1).
+- **Review**: 2-vote (gauntlet `preset=pr-2`, lenses=fresh+correctness) / **accepted** (cycles: 1). 0 must-fix, 2 should-fix, 2 nit. Both reviewers `overall: accept` at `confidence: high`. Full Synthesizer Output JSON in plan-commit `a21aab471` `<details>` block.
+- **Confidence**: high
+- **Deferred items**: 1 (Python local verification → CI; PR-1.1 criterion (b) subsumed by Phase 1 (e) `gh pr checks 1`).
+- **Surprises during implementation**:
+  - vortex 0.70.0 doesn't expose `DType::Union` (the local Vortex workspace's `0.1.0` did); fix was a single-arm removal in `schema.rs`. `DType::Variant` is in 0.70.0 — the original PR-1.1 fix incorrectly removed both arms; rolled back to keep `Variant`.
+  - The `GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false` env-shim is no longer required (user notified 2026-05-15 mid-cycle). Memory `polars_build_tips.md` + plan BAN updated. Plan-commit `79a9ecdbf` strikethrough'd the BAN.
 
 ## Deferred work
 
