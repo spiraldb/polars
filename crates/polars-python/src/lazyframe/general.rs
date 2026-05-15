@@ -331,7 +331,8 @@ impl PyLazyFrame {
     #[cfg(feature = "vortex")]
     #[staticmethod]
     #[pyo3(signature = (
-        sources, schema, scan_options, push_predicate, initial_read_size, scan_concurrency
+        sources, schema, scan_options, push_predicate, initial_read_size, scan_concurrency,
+        cache_mode_kind, cache_dedicated_bytes
     ))]
     fn new_from_vortex(
         sources: Wrap<ScanSources>,
@@ -340,16 +341,34 @@ impl PyLazyFrame {
         push_predicate: bool,
         initial_read_size: Option<usize>,
         scan_concurrency: Option<usize>,
+        cache_mode_kind: &str,
+        cache_dedicated_bytes: Option<u64>,
     ) -> PyResult<Self> {
         use crate::utils::to_py_err;
         use polars_vortex::{VortexCacheMode, VortexScanOptions};
+
+        let segment_cache = match (cache_mode_kind, cache_dedicated_bytes) {
+            ("global", _) => VortexCacheMode::Global,
+            ("off", _) => VortexCacheMode::Off,
+            ("dedicated", Some(bytes)) => VortexCacheMode::Dedicated(bytes),
+            ("dedicated", None) => {
+                return Err(PyValueError::new_err(
+                    "cache_mode='dedicated' requires cache_dedicated_bytes",
+                ));
+            },
+            (other, _) => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown cache_mode_kind {other:?}; expected 'global', 'off', or 'dedicated'",
+                )));
+            },
+        };
 
         let options = VortexScanOptions {
             schema: schema.map(|x| Arc::new(x.0)),
             push_predicate,
             initial_read_size,
             scan_concurrency: scan_concurrency.and_then(NonZeroUsize::new),
-            segment_cache: VortexCacheMode::Global,
+            segment_cache,
         };
 
         let sources = sources.0;

@@ -130,3 +130,32 @@ def test_scan_with_negative_slice(tmp_path: Path) -> None:
 
     out = pl.scan_vortex(path).tail(5).collect()
     assert out["x"].to_list() == [95, 96, 97, 98, 99]
+
+
+def test_cache_mode_accepts_all_valid_inputs(tmp_path: Path) -> None:
+    """The cache_mode dispatch accepts None / "global" / "off" / positive int.
+
+    The cache is a perf knob, not a correctness one, so all four modes should
+    return identical data. (Moka's Cache doesn't expose hit/miss stats, so a
+    hit-ratio assertion would require wrapping in an InstrumentedSegmentCache
+    — deferred per plan.)
+    """
+    path = tmp_path / "cache_modes.vortex"
+    pl.DataFrame({"x": list(range(10))}).write_vortex(path)
+
+    for mode in (None, "global", "off", 4 * 1024 * 1024):
+        out = pl.scan_vortex(path, cache_mode=mode).collect()  # type: ignore[arg-type]
+        assert out["x"].to_list() == list(range(10))
+
+
+def test_cache_mode_rejects_invalid_inputs(tmp_path: Path) -> None:
+    """The cache_mode dispatch rejects bad input cleanly at scan-construction time."""
+    path = tmp_path / "cache_invalid.vortex"
+    pl.DataFrame({"x": [1]}).write_vortex(path)
+
+    with pytest.raises(ValueError, match="positive byte count"):
+        pl.scan_vortex(path, cache_mode=0)
+    with pytest.raises(ValueError, match="positive byte count"):
+        pl.scan_vortex(path, cache_mode=-5)
+    with pytest.raises(TypeError, match="cache_mode must be"):
+        pl.scan_vortex(path, cache_mode="invalid")  # type: ignore[arg-type]
