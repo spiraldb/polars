@@ -120,9 +120,6 @@ pub fn vortex_dtype_to_arrow_dtype(dt: &DType) -> PolarsResult<ArrowDataType> {
             }
             ArrowDataType::Struct(out)
         }
-        DType::Union(_) => {
-            polars_bail!(ComputeError: "Vortex Union types are not yet supported in Polars")
-        }
         DType::Variant(_) => {
             polars_bail!(ComputeError: "Vortex Variant types are not yet supported in Polars")
         }

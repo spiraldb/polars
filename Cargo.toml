@@ -112,10 +112,7 @@ xxhash-rust = { version = "0.8.6", features = ["xxh3"] }
 zmij = "1.0.0"
 zstd = "0.13"
 
-# Local path dependency on Vortex. The repo is expected to live next to the Polars repo
-# (e.g., both checked out under the same parent directory). For a public release, this would
-# point at a published crates.io version.
-vortex = { path = "../../../../vortex/vortex", default-features = false, features = ["files", "tokio"] }
+vortex = { version = "0.70.0", default-features = false, features = ["files", "tokio"] }
 
 polars = { version = "0.53.0", path = "crates/polars", default-features = false }
 polars-buffer = { version = "0.53.0", path = "crates/polars-buffer", default-features = false }
