@@ -13,7 +13,7 @@ phase_index: 1
 current_pr: PR-1.1
 pr_index: 1
 outstanding_must_fix: 0
-deferred_items_total: 0
+deferred_items_total: 1
 last_user_touchpoint: 2026-05-15T15:01:18Z
 last_user_touchpoint_what: "PR-1.1 gauntlet cycle 1 accepted (0 must-fix, 2 should-fix, 2 nit)"
 subagent_invocations_this_pr: 1
@@ -342,6 +342,7 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
 - **In-memory `ScanSourceRef::Buffer` zero-copy** (currently `to_vec()`s): targeted for inclusion in PR-1.2 if low-effort; else deferred.
 - **Rust-level tests for the polars-stream Vortex source/sink** (currently only Python): deferred to Phase 3 or follow-up.
 - **Hard-cached segment-cache hit count test**: Moka's `Cache` doesn't expose hit/miss stats; would need wrapping in `InstrumentedSegmentCache` from upstream Vortex. Deferred.
+- **PR-1.1 Python local-verification** (criterion b "8 Python tests pass locally"): this worktree's env has no `maturin` / `pytest` / installed py-polars wheel. Subsumed by Phase 1 exit criterion (e) which runs `gh pr checks 1` (the spiraldb/polars CI runs the full `test-python.yml` matrix against the pushed PR). Resolution: CI verification IS the Python test execution; no further local work required. (Deferred from PR-1.1 gauntlet cycle 1 should-fix #2, 2026-05-15.)
 
 ## Accepted tradeoffs / r1 traps
 
