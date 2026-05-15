@@ -495,8 +495,9 @@ mod tests {
 
         let (pl, arrow) = vortex_dtype_to_schema(&dt).unwrap();
         assert_eq!(pl.len(), 2);
-        let f0 = arrow.iter_values().nth(0).unwrap();
-        let f1 = arrow.iter_values().nth(1).unwrap();
+        let mut fields = arrow.iter_values();
+        let f0 = fields.next().unwrap();
+        let f1 = fields.next().unwrap();
         assert_eq!(f0.name.as_str(), "nullable_col");
         assert!(f0.is_nullable);
         assert_eq!(f1.name.as_str(), "non_nullable_col");

@@ -47,7 +47,7 @@ pub fn polars_to_vortex_predicate(scan_predicate: &ScanIOPredicate) -> Option<Ex
         .iter()
         .filter_map(|(name, (_, specialized_opt))| specialized_opt.as_ref().map(|s| (name, s)))
         .collect();
-    per_column_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    per_column_pairs.sort_by_key(|(name, _)| name.as_str());
 
     let per_column: Vec<Expression> = per_column_pairs
         .into_iter()
@@ -245,7 +245,7 @@ mod temporal {
         // Vortex's `DecimalDType::new(u8, i8)` has narrower precision/scale ranges
         // than Polars' `Decimal(usize, usize)`. A bare `as`-cast would silently
         // wrap for out-of-range values, producing a Vortex scalar with completely
-        // wrong precision/scale that would mis-prune the scan. `try_into` on
+        // wrong precision/scale that would cause incorrect pruning. `try_into` on
         // failure → return None, so the convertor falls back to the residual
         // filter (which is always correct).
         let p: u8 = precision.try_into().ok()?;

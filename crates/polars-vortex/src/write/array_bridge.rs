@@ -77,6 +77,9 @@ pub fn polars_array_to_upstream(
 /// Per-column field metadata on `polars_schema` is preserved into the upstream
 /// `Field::metadata` so that downstream Vortex sees the same key/value annotations
 /// the user attached.
+// `arrow_schema::Field::with_metadata` requires `std::collections::HashMap<String, String>`
+// from upstream arrow-rs; we cannot substitute `PlHashMap` here.
+#[allow(clippy::disallowed_types)]
 pub fn polars_chunk_to_upstream_record_batch(
     columns: Vec<Box<dyn PolarsArray>>,
     polars_schema: &arrow::datatypes::ArrowSchema,
@@ -110,6 +113,7 @@ pub fn polars_chunk_to_upstream_record_batch(
             && !md.is_empty()
         {
             let upstream_md: HashMap<String, String> = md
+
                 .iter()
                 .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
                 .collect();

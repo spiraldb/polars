@@ -8,14 +8,13 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{ArrowDataType, ArrowSchema, ArrowSchemaRef};
+use arrow::datatypes::{ArrowDataType, ArrowSchemaRef};
 use async_trait::async_trait;
 use futures::StreamExt;
 use polars_core::runtime::ASYNC;
 use polars_core::schema::SchemaRef;
 use polars_error::{PolarsResult, polars_bail, polars_err};
 use polars_io::cloud::CloudOptions;
-use polars_io::metrics::IOMetrics;
 use polars_plan::dsl::{ScanSource, ScanSourceRef};
 use polars_utils::slice_enum::Slice;
 use polars_vortex::read::array_bridge::{
@@ -26,7 +25,6 @@ use polars_vortex::read::read_at::local_file_read_at;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::session;
 use polars_vortex::vortex::array::arrow::ArrowArrayExecutor;
-use polars_vortex::vortex::array::stream::ArrayStreamExt;
 use polars_vortex::vortex::array::{ArrayRef as VortexArrayRef, VortexSessionExecute};
 use polars_vortex::vortex::file::{Footer, OpenOptionsSessionExt, VortexFile};
 use polars_vortex::{VortexScanOptions, vortex};
