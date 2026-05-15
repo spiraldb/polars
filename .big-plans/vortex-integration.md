@@ -169,7 +169,7 @@ Reviewers must flag these as immediate **must-fix** if found in the diff. Seeded
 **User preferences:**
 
 - **No emoji** in code/comments/commit messages unless explicitly requested.
-- **Cargo invocations** always prefixed with `GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false` in this worktree (workspace `[patch.crates-io]` SSH-rewrite issue).
+- ~~**Cargo invocations** always prefixed with `GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false`~~: **RESOLVED 2026-05-15** — the `init-agent-pats` setup provides credentials libgit2 can use; plain `cargo …` invocations now succeed in this worktree. Memory `polars_build_tips.md` updated to reflect the new state.
 
 **Work-shape highest-leverage insight (feature-integration):** **Analogous prior-art** — every new PR-13 shape MUST cite the equivalent in `/Users/will/git/vortex/vortex-datafusion/src/convert/exprs.rs`. If a shape has no DF analogue, that's a flag that it's genuinely novel and deserves extra adversarial review (reviewers should query: is this shape representable at all in Vortex's expression IR?).
 
@@ -278,31 +278,26 @@ Numbered; each with probability / impact / mitigation.
 cd /Users/will/git/polars/.claude/worktrees/naughty-mccarthy-270d36
 
 # Fast feedback loop (any phase)
-GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false \
-  cargo check -p polars --features vortex,cloud,parquet,dtype-full
+cargo check -p polars --features vortex,cloud,parquet,dtype-full
 
 # Rust test suite (any phase)
-GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false \
-  cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal
+cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal
 
 # Default Polars build (must remain unaffected — Out of scope contract)
-GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false \
-  cargo check -p polars
+cargo check -p polars
 
 # Python smoke
 cd py-polars && pytest tests/unit/io/test_vortex.py -v
 
 # Workspace lints (catch convention violations early)
-GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false \
-  cargo clippy --features vortex,cloud,parquet,dtype-full --workspace -- -D warnings
+cargo clippy --features vortex,cloud,parquet,dtype-full --workspace -- -D warnings
 
 # CI status (Phase 1 exit criterion; revisited at Phase 4)
 gh pr view 1 --repo spiraldb/polars
 gh pr checks 1 --repo spiraldb/polars
 
 # Phase 4: benches
-GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false \
-  cargo bench --features vortex --bench io_vortex
+cargo bench --features vortex --bench io_vortex
 ```
 
 ### End-to-end smoke (Python; per phase end)
