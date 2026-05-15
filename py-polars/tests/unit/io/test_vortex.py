@@ -153,9 +153,30 @@ def test_cache_mode_rejects_invalid_inputs(tmp_path: Path) -> None:
     path = tmp_path / "cache_invalid.vortex"
     pl.DataFrame({"x": [1]}).write_vortex(path)
 
+    # Non-positive ints -> ValueError (the resolver's <= 0 guard).
     with pytest.raises(ValueError, match="positive byte count"):
         pl.scan_vortex(path, cache_mode=0)
     with pytest.raises(ValueError, match="positive byte count"):
         pl.scan_vortex(path, cache_mode=-5)
+
+    # Unknown strings -> TypeError.
     with pytest.raises(TypeError, match="cache_mode must be"):
         pl.scan_vortex(path, cache_mode="invalid")  # type: ignore[arg-type]
+
+    # bool inputs -> TypeError. `isinstance(True, int)` is True in Python, so
+    # the resolver's explicit `isinstance(cache_mode, bool)` guard is the
+    # only thing preventing True from being silently treated as a 1-byte
+    # dedicated cache (and False as 0-byte). Regression-test the guard.
+    with pytest.raises(TypeError, match="got bool"):
+        pl.scan_vortex(path, cache_mode=True)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="got bool"):
+        pl.scan_vortex(path, cache_mode=False)  # type: ignore[arg-type]
+
+    # Float inputs -> TypeError (rejected by the resolver's int-isinstance check).
+    with pytest.raises(TypeError, match="cache_mode must be"):
+        pl.scan_vortex(path, cache_mode=1.5)  # type: ignore[arg-type]
+
+    # Python int larger than u64::MAX -> OverflowError at the pyo3 boundary.
+    # (The resolver returns ('dedicated', 2**64); pyo3's u64 conversion raises.)
+    with pytest.raises(OverflowError):
+        pl.scan_vortex(path, cache_mode=2**64)

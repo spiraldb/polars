@@ -185,7 +185,7 @@ def scan_vortex(
 
 def _resolve_cache_mode(
     cache_mode: Literal["global", "off"] | int | None,
-) -> tuple[str, int | None]:
+) -> tuple[Literal["global", "off", "dedicated"], int | None]:
     """Map the user-facing ``cache_mode`` to the (kind, dedicated_bytes) pyo3 pair."""
     if cache_mode is None or cache_mode == "global":
         return "global", None
