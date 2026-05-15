@@ -7,6 +7,7 @@
     "textWrap": "always"
   },
   "excludes": [
+    ".big-plans/",
     ".venv/",
     "**/target/",
     "crates/polars-plan/dsl-schema-hashes.json",
