@@ -5,20 +5,20 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: phase-boundary
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: PR-1.2
-pr_index: 2
+current_pr: null
+pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 3
 last_user_touchpoint: 2026-05-15T15:01:18Z
-last_user_touchpoint_what: "PR-1.2 gauntlet cycle 2 accepted (0 must-fix, 0 should-fix, 3 nits); proceeding to Step 2.5 PR completion"
-subagent_invocations_this_pr: 2
+last_user_touchpoint_what: "PR-1.2 complete (confidence: high, deferred: 1); PR-1.3 reactive placeholder; advancing to Phase 3 end-of-phase 4-vote review"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 9
-review_cycles_this_pr: 2
+review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
@@ -327,6 +327,22 @@ df = pl.read_vortex("nested.vortex")  # List/Struct roundtrip
 ## Implementation status
 
 Living ledger — populated by inner-loop and phase-end reviews.
+
+### PR-1.2: Phase 1 polish + CI green-up (8 PR-work commits, ending at `b2aeb2b8b`)
+
+- **Scope shipped**:
+  - **VortexCacheMode Python surface**: `pl.scan_vortex(..., cache_mode=...)` and `pl.read_vortex(..., cache_mode=...)` accept `Literal["global", "off"] | int | None`. Python helper `_resolve_cache_mode` in `py-polars/src/polars/io/vortex/functions.py:186-217` dispatches to a 2-arg pyo3 pair (`cache_mode_kind: &str`, `cache_dedicated_bytes: Option<u64>`); pyo3 `new_from_vortex` at `crates/polars-python/src/lazyframe/general.rs:336-372` matches into the Rust `VortexCacheMode::{Global, Off, Dedicated(N)}` enum. Bool/float/u64-overflow input handling explicit. Resolver return type narrowed to `tuple[Literal["global", "off", "dedicated"], int | None]` post-review.
+  - **Visitor cfg-gating fix (root-cause)**: `serde_json` made non-optional in `crates/polars-python/Cargo.toml` (was `optional = true` and only enabled via the `json` feature). Latent bug: visitor `scan_type_to_pyobject` arms for `csv`/`parquet`/`vortex` use `serde_json::to_string` but the dep was only pulled in under `json`. Real fix at the dep layer; visitor source unchanged.
+  - **CI green-up absorbed (10+ items)**: ruff (4 lints — missing `_init_credential_provider_builder` import in `sink_vortex`, unused noqa, TC003 type-check import, TRY300 try/else); dprint (`.big-plans/` exclude in `dprint.json`, README `*sink*`→`_sink_` emphasis, README table alignment collapse); cargo fmt sweep across 19 polars-vortex `.rs` files (pre-existing formatting drift); mypy stubs added to `_plr.pyi` (`new_from_vortex`, `sink_vortex`, `set_vortex_cache_bytes`); mypy `redundant-expr` in `_resolve_cache_mode` (bool check restructured); clippy `approx_constant` (`predicate.rs:293` literal `3.14`→`2.5`); cargo deny `0BSD` license added to allow list (for transitive `enum-iterator 2.3.0` from Vortex); dsl-schema feature wiring (`polars-vortex?/dsl-schema` added to `polars-plan/Cargo.toml`) + 4 new hashes in `crates/polars-plan/dsl-schema-hashes.json` (VortexCacheMode/Compression/ScanOptions/WriteOptions).
+- **Tests added**: `test_cache_mode_accepts_all_valid_inputs` (4 valid inputs: None / "global" / "off" / positive int) and `test_cache_mode_rejects_invalid_inputs` (5 invalid: 0, -5, "invalid" string, bool True/False, float 1.5, u64 overflow 2**64) in `py-polars/tests/unit/io/test_vortex.py:135-181`. Rust-side new test count unchanged (66 Rust tests).
+- **Review**: 2-vote (gauntlet `preset=pr-2`, lenses=fresh+correctness) / **accepted at cycle 2** (cycles: 2). Cycle 1: 1 must-fix (bool coverage), 2 should-fix, 6 nits — disagreement on bool-coverage severity resolved to must-fix per HIGHEST-severity rule. Cycle 2: 0 must-fix, 0 should-fix, 3 nits (all test-quality observations; dismissed).
+- **Confidence**: high
+- **Deferred items**: 1 (PR-1.2 Rust dispatch tighten + Rust unit test for `new_from_vortex` match arms — cycle-1 should-fix #3, deferred to follow-up PR; defensive arms have no Rust test coverage and `('global'|'off', Some(_))` silently ignore `cache_dedicated_bytes`).
+- **Surprises during implementation**:
+  - PR-1.2's planned scope was ~3-4 specific polish items; actual scope grew to 10+ items because PR-1.1's crates.io transition unblocked CI which surfaced layered pre-existing failures (ruff, dprint, mypy, clippy, deny, dsl-schema). Each push to CI surfaced the next layer; chained ~5 pushes before all fixes landed. Defensible given Phase 1's stated goal ("Ratify + crates.io transition + cheap polish"), but a future big-plans run should split CI-greenup into its own dedicated PR rather than absorbing into a polish PR.
+  - The "visitor feature-gating fix" item in the plan was originally framed as a `visitor/nodes.rs` edit; the actual fix lived at the Cargo.toml level (making `serde_json` non-optional). Plan-vs-reality drift caught by gauntlet cycle 1 nit #8 and corrected in the plan PR-1.2 row.
+  - `cargo fmt --check` had to clean up 19 polars-vortex files of pre-existing formatting drift before clippy/clippy-nightly could pass (the fmt step runs first).
+  - The deferred should-fix #3 (Rust dispatch tighten) is mitigated by the fact that Python's `_resolve_cache_mode` is the sole caller — but a future Rust integration test or fuzz harness would expose the silent-ignore behavior.
 
 ### PR-1.1: crates.io transition (2 PR-work commits, ending at `018f2ce43`)
 
