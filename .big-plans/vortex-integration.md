@@ -10,12 +10,12 @@ branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: null
+current_pr: PR-1.2
 pr_index: 2
 outstanding_must_fix: 0
 deferred_items_total: 1
 last_user_touchpoint: 2026-05-15T15:01:18Z
-last_user_touchpoint_what: "PR-1.1 complete (confidence: high, deferred: 1); BETWEEN-PRs handoff to PR-1.2"
+last_user_touchpoint_what: "started PR-1.2 (Phase 1 polish): ruff errors + VortexCacheMode python surface + visitor feature-gating"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 7
 review_cycles_this_pr: 0
@@ -23,7 +23,7 @@ phase_entry_sha: 657c78c97
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
-last_commit: 04751d0d1
+last_commit: e176d1c98
 ```
 
 ## Context
