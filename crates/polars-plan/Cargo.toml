@@ -138,6 +138,7 @@ dsl-schema = [
   "polars-ops/dsl-schema",
   "polars-utils/dsl-schema",
   "polars-compute/dsl-schema",
+  "polars-vortex?/dsl-schema",
 ]
 
 # operations
