@@ -15,10 +15,10 @@ pr_index: 2
 outstanding_must_fix: 0
 deferred_items_total: 3
 last_user_touchpoint: 2026-05-15T15:01:18Z
-last_user_touchpoint_what: "deferred PR-1.2 cycle 1 should-fix #3 (Rust dispatch tighten) to follow-up; ready to re-invoke gauntlet for cycle 2"
-subagent_invocations_this_pr: 1
-subagent_invocations_total: 8
-review_cycles_this_pr: 1
+last_user_touchpoint_what: "PR-1.2 gauntlet cycle 2 accepted (0 must-fix, 0 should-fix, 3 nits); proceeding to Step 2.5 PR completion"
+subagent_invocations_this_pr: 2
+subagent_invocations_total: 9
+review_cycles_this_pr: 2
 phase_entry_sha: 657c78c97
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
