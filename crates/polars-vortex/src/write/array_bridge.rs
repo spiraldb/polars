@@ -113,7 +113,6 @@ pub fn polars_chunk_to_upstream_record_batch(
             && !md.is_empty()
         {
             let upstream_md: HashMap<String, String> = md
-
                 .iter()
                 .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
                 .collect();
