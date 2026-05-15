@@ -13,9 +13,9 @@ phase_index: 1
 current_pr: PR-1.2
 pr_index: 2
 outstanding_must_fix: 0
-deferred_items_total: 2
+deferred_items_total: 3
 last_user_touchpoint: 2026-05-15T15:01:18Z
-last_user_touchpoint_what: "PR-1.2 cycle 1 must-fix #1 (bool coverage) resolved at b2aeb2b8b; ready to re-invoke gauntlet for cycle 2"
+last_user_touchpoint_what: "deferred PR-1.2 cycle 1 should-fix #3 (Rust dispatch tighten) to follow-up; ready to re-invoke gauntlet for cycle 2"
 subagent_invocations_this_pr: 1
 subagent_invocations_total: 8
 review_cycles_this_pr: 1
@@ -354,6 +354,7 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
 - **Rust-level tests for the polars-stream Vortex source/sink** (currently only Python): deferred to Phase 3 or follow-up.
 - **Hard-cached segment-cache hit count test**: Moka's `Cache` doesn't expose hit/miss stats; would need wrapping in `InstrumentedSegmentCache` from upstream Vortex. Deferred.
 - **PR-1.1 Python local-verification** (criterion b "8 Python tests pass locally"): this worktree's env has no `maturin` / `pytest` / installed py-polars wheel. Subsumed by Phase 1 exit criterion (e) which runs `gh pr checks 1` (the spiraldb/polars CI runs the full `test-python.yml` matrix against the pushed PR). Resolution: CI verification IS the Python test execution; no further local work required. (Deferred from PR-1.1 gauntlet cycle 1 should-fix #2, 2026-05-15.)
+- **PR-1.2 Rust dispatch tighten + Rust unit test** (`crates/polars-python/src/lazyframe/general.rs:334-359`): pyo3 `new_from_vortex` match silently ignores `cache_dedicated_bytes` for `('global', _)` / `('off', _)` arms. Defensive `('dedicated', None)` and `(other, _)` arms are unreachable from Python's `_resolve_cache_mode` and have no Rust test coverage. Two paths: (a) tighten arms to require `None` for non-dedicated kinds with explicit error, (b) downgrade unreachable arms to `debug_assert!` / `unreachable!`. Plus add a Rust `#[test]` exercising all four arms via direct `PyLazyFrame::new_from_vortex` construction. Modest scope (~30 LoC + test infrastructure); deferred to a follow-up PR because PR-1.2 already grew significantly beyond planned scope absorbing CI-greenup. (Deferred from PR-1.2 gauntlet cycle 1 should-fix #3, 2026-05-15.)
 
 ## Accepted tradeoffs / r1 traps
 
