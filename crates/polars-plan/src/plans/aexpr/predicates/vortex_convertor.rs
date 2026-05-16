@@ -59,10 +59,12 @@
 //! a Vortex-specific side channel (parallel to how `FileScanIR::Vortex::metadata` and the
 //! new (PR-2.0) `segment_cache` already thread).
 
+use polars_core::prelude::DataType;
+use polars_core::schema::Schema;
 use polars_utils::arena::{Arena, Node};
 use polars_vortex::vortex::expr::{
-    Expression, and, eq, get_item, gt, gt_eq, is_not_null, is_null, lit, lt, lt_eq, not, not_eq,
-    or, root,
+    Expression, and, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null, lit, lt, lt_eq,
+    not, not_eq, or, root,
 };
 
 use crate::dsl::Operator;
@@ -112,6 +114,7 @@ use crate::plans::AExpr;
 pub fn aexpr_to_vortex_expression(
     root_node: Node,
     arena: &Arena<AExpr>,
+    schema: Option<&Schema>,
 ) -> Option<Expression> {
     match arena.get(root_node) {
         // --- leaves ---
@@ -120,8 +123,27 @@ pub fn aexpr_to_vortex_expression(
 
         // --- comparisons + boolean combinators (BinaryExpr) ---
         AExpr::BinaryExpr { left, op, right } => {
-            let lhs = aexpr_to_vortex_expression(*left, arena)?;
-            let rhs = aexpr_to_vortex_expression(*right, arena)?;
+            // Bitwise-vs-logical schema gate (cycle-1 should-fix from PR-2.1): Polars
+            // `And/Or` are bitwise-or-logical (boolean.rs:49 `// Also bitwise negate`
+            // and surrounding context). Vortex's `and`/`or` are boolean-only. When the
+            // schema is available and either operand is not boolean, refuse pushdown.
+            // For `LogicalAnd`/`LogicalOr` we don't gate — the IR-level "logical" form
+            // is by construction boolean-typed.
+            if matches!(op, Operator::And | Operator::Or) {
+                if let Some(s) = schema {
+                    if !operand_is_bool(*left, arena, s) || !operand_is_bool(*right, arena, s) {
+                        return None;
+                    }
+                }
+                // If schema is None (lower_ir's pre-typecheck path), conservatively
+                // refuse And/Or pushdown rather than risk bitwise-on-int → boolean-only
+                // dispatch on the Vortex side.
+                if schema.is_none() {
+                    return None;
+                }
+            }
+            let lhs = aexpr_to_vortex_expression(*left, arena, schema)?;
+            let rhs = aexpr_to_vortex_expression(*right, arena, schema)?;
             Some(match op {
                 Operator::Eq => eq(lhs, rhs),
                 Operator::NotEq => not_eq(lhs, rhs),
@@ -131,13 +153,19 @@ pub fn aexpr_to_vortex_expression(
                 Operator::GtEq => gt_eq(lhs, rhs),
                 Operator::And | Operator::LogicalAnd => and(lhs, rhs),
                 Operator::Or | Operator::LogicalOr => or(lhs, rhs),
+                // Plus → Vortex `checked_add` (PR-2.2 / PR-13.2). The only Vortex
+                // arithmetic builder publicly exposed in `vortex::expr::*` is
+                // `checked_add`; Sub/Mul/Div remain residual until upstream exposes
+                // the corresponding `checked_sub`/etc. helpers (or until polars-vortex
+                // adopts the raw `Binary.try_new_expr(Operator::Sub, ...)` form).
+                Operator::Plus => checked_add(lhs, rhs),
                 // EqValidity / NotEqValidity — null-aware equality variants Vortex doesn't
                 // have a direct equivalent for; fall through to residual.
                 Operator::EqValidity | Operator::NotEqValidity => return None,
-                // Arithmetic (Plus/Minus/Multiply/RustDivide/TrueDivide/FloorDivide/Modulus)
-                // → PR-2.2 / PR-13.2.
-                Operator::Plus
-                | Operator::Minus
+                // Other arithmetic (Minus/Multiply/RustDivide/TrueDivide/FloorDivide/
+                // Modulus) → still residual; PR-2.2 ships Plus only, per the plan's
+                // PR-13.2 acceptance test (`col + 1 == 5`).
+                Operator::Minus
                 | Operator::Multiply
                 | Operator::RustDivide
                 | Operator::TrueDivide
@@ -157,7 +185,21 @@ pub fn aexpr_to_vortex_expression(
             // All three of IsNull / IsNotNull / Not are unary — one Node input.
             // `input` is `Vec<ExprIR>`; we take the first and unwrap its node.
             let arg_node = input.first().map(|expr_ir| expr_ir.node())?;
-            let arg = aexpr_to_vortex_expression(arg_node, arena)?;
+            // Schema gate for `Not` — Polars `IRBooleanFunction::Not` is bitwise-or-
+            // logical (boolean.rs:49 `// Also bitwise negate`); Vortex `not` is
+            // boolean-only. Polars's own `column_expr.rs:245-247` performs the same
+            // `dtype.is_bool()` guard. IsNull/IsNotNull accept any dtype and produce
+            // boolean output, so no gate.
+            if matches!(boolean_fn, IRBooleanFunction::Not) {
+                if let Some(s) = schema {
+                    if !operand_is_bool(arg_node, arena, s) {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            let arg = aexpr_to_vortex_expression(arg_node, arena, schema)?;
             match boolean_fn {
                 IRBooleanFunction::IsNull => Some(is_null(arg)),
                 IRBooleanFunction::IsNotNull => Some(is_not_null(arg)),
@@ -173,6 +215,46 @@ pub fn aexpr_to_vortex_expression(
         // → PR-2.5. Sort/Gather/Filter/Agg/Ternary/AnonymousFunction/Over/Rolling etc. all
         // fall through to residual unconditionally.
         _ => None,
+    }
+}
+
+/// Schema-aware operand type check: determines whether `node`'s resolved dtype is
+/// `Boolean`. Used by the And/Or/Not schema gate to refuse bitwise-on-integer pushdown.
+///
+/// Conservatively returns `false` when the dtype can't be resolved (unknown column,
+/// nested expression we can't trivially type-check). The caller's None-fallback then
+/// drops the And/Or/Not arm to residual — always SOUND.
+fn operand_is_bool(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> bool {
+    match arena.get(node) {
+        AExpr::Column(name) => matches!(schema.get(name), Some(DataType::Boolean)),
+        AExpr::Literal(LiteralValue::Scalar(s)) => matches!(s.dtype(), DataType::Boolean),
+        AExpr::BinaryExpr { left, op, right } => match op {
+            // Comparisons unconditionally produce Boolean.
+            Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq
+            | Operator::EqValidity
+            | Operator::NotEqValidity
+            // LogicalAnd/LogicalOr are the IR-level "logical" form; by construction
+            // their inputs are boolean-typed.
+            | Operator::LogicalAnd
+            | Operator::LogicalOr => true,
+            // And/Or follow operand dtype: bool-input → bool-output (logical), int-input
+            // → int-output (bitwise). Recurse on inputs to determine.
+            Operator::And | Operator::Or => {
+                operand_is_bool(*left, arena, schema) && operand_is_bool(*right, arena, schema)
+            },
+            // Arithmetic and bitwise Xor produce non-bool output.
+            _ => false,
+        },
+        AExpr::Function {
+            function: IRFunctionExpr::Boolean(_),
+            ..
+        } => true,
+        _ => false,
     }
 }
 
@@ -253,14 +335,14 @@ mod tests {
     fn shape_column() {
         let mut arena = Arena::new();
         let n = col(&mut arena, "a");
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
     fn shape_literal_scalar() {
         let mut arena = Arena::new();
         let n = lit_i32(&mut arena, 42);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -269,7 +351,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::Eq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -278,7 +360,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::NotEq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -287,7 +369,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::Lt, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -296,7 +378,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::LtEq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -305,7 +387,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::Gt, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -314,7 +396,24 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::GtEq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// Helper: build a small schema with Int32 columns `a` and `b` for And/Or tests.
+    /// The And/Or schema gate refuses pushdown when an operand is non-bool, but
+    /// comparison-shape operands (eq/lt/etc.) produce Boolean output and pass the gate.
+    fn schema_a_b_int32() -> Schema {
+        let mut s = Schema::default();
+        s.with_column(PlSmallStr::from("a"), DataType::Int32);
+        s.with_column(PlSmallStr::from("b"), DataType::Int32);
+        s
+    }
+
+    /// Helper: schema with `a: Boolean` for the Not test.
+    fn schema_a_bool() -> Schema {
+        let mut s = Schema::default();
+        s.with_column(PlSmallStr::from("a"), DataType::Boolean);
+        s
     }
 
     #[test]
@@ -327,7 +426,8 @@ mod tests {
         let l2 = lit_i32(&mut arena, 7);
         let lt_node = binop(&mut arena, c2, Operator::Lt, l2);
         let n = binop(&mut arena, eq_node, Operator::And, lt_node);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -340,7 +440,35 @@ mod tests {
         let l2 = lit_i32(&mut arena, 7);
         let lt_node = binop(&mut arena, c2, Operator::Lt, l2);
         let n = binop(&mut arena, eq_node, Operator::Or, lt_node);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// And without a schema → conservative refuse (schema gate's None branch).
+    #[test]
+    fn shape_and_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 42);
+        let eq_node = binop(&mut arena, c, Operator::Eq, l);
+        let c2 = col(&mut arena, "b");
+        let l2 = lit_i32(&mut arena, 7);
+        let lt_node = binop(&mut arena, c2, Operator::Lt, l2);
+        let n = binop(&mut arena, eq_node, Operator::And, lt_node);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// And on integer-bitwise operands → schema gate refuses (PR-2.1 cycle-1 should-fix).
+    #[test]
+    fn shape_and_bitwise_int_returns_none() {
+        // `col_a & col_b` where both are Int32 — Polars `Operator::And` is bitwise here,
+        // not logical. The gate must refuse to avoid emitting a Vortex `and(int, int)`.
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let n = binop(&mut arena, a, Operator::And, b);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
     #[test]
@@ -355,7 +483,7 @@ mod tests {
         let l2 = lit_i32(&mut arena, 7);
         let right = binop(&mut arena, c2, Operator::Lt, l2);
         let n = binop(&mut arena, left, Operator::LogicalAnd, right);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -368,7 +496,7 @@ mod tests {
         let l2 = lit_i32(&mut arena, 7);
         let right = binop(&mut arena, c2, Operator::Lt, l2);
         let n = binop(&mut arena, left, Operator::LogicalOr, right);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -376,7 +504,7 @@ mod tests {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let n = boolean_fn(&mut arena, IRBooleanFunction::IsNull, c);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
@@ -384,29 +512,102 @@ mod tests {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let n = boolean_fn(&mut arena, IRBooleanFunction::IsNotNull, c);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]
     fn shape_not() {
+        // Wraps `eq(col_a, 42)` which is a Boolean comparison, so the schema gate passes
+        // (the comparison output is Boolean). No schema needed because the inner Eq
+        // doesn't fire the gate (only And/Or do).
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let eq_node = binop(&mut arena, c, Operator::Eq, l);
         let n = boolean_fn(&mut arena, IRBooleanFunction::Not, eq_node);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_some());
+        // Not needs a schema to gate; passing schema with no-op type info works because
+        // `operand_is_bool` sees the inner BinaryExpr is a comparison → Boolean output.
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Not without schema → conservative refuse.
+    #[test]
+    fn shape_not_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 42);
+        let eq_node = binop(&mut arena, c, Operator::Eq, l);
+        let n = boolean_fn(&mut arena, IRBooleanFunction::Not, eq_node);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// Not on an integer column → schema gate refuses (Polars `Not` is bitwise on ints).
+    #[test]
+    fn shape_not_bitwise_int_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let n = boolean_fn(&mut arena, IRBooleanFunction::Not, a);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Not on a Boolean column → schema gate passes.
+    #[test]
+    fn shape_not_bool_column_passes() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let n = boolean_fn(&mut arena, IRBooleanFunction::Not, a);
+        let schema = schema_a_bool();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Plus arithmetic — PR-2.2 ships this via `vortex::expr::checked_add`.
+    #[test]
+    fn shape_plus_arithmetic() {
+        // `(col_a + 1) == 5` — typical PR-13.2 acceptance shape per the plan.
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let a_plus_1 = binop(&mut arena, a, Operator::Plus, one);
+        let five = lit_i32(&mut arena, 5);
+        let n = binop(&mut arena, a_plus_1, Operator::Eq, five);
+        // No schema needed for Plus + Eq (neither fires the And/Or/Not gate).
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     // === Unsupported-shapes-return-None coverage ===
 
+    /// PR-2.2 ships Plus → checked_add. Pre-PR-2.2 this test asserted None; now it
+    /// must assert Some.
     #[test]
-    fn unsupported_arithmetic_returns_none() {
-        // `col + 1` is PR-2.2's scope, not PR-2.1. Foundation must return None.
+    fn shape_plus_ships_in_pr_2_2() {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 1);
         let n = binop(&mut arena, c, Operator::Plus, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// Minus / Multiply / Divide remain residual until upstream Vortex exposes
+    /// `checked_sub`/`checked_mul`/`checked_div` as public builders. (As of vortex
+    /// 0.70.0 only `checked_add` is exposed.)
+    #[test]
+    fn unsupported_minus_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 1);
+        let n = binop(&mut arena, c, Operator::Minus, l);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    #[test]
+    fn unsupported_multiply_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 2);
+        let n = binop(&mut arena, c, Operator::Multiply, l);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     #[test]
@@ -415,7 +616,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 1);
         let n = binop(&mut arena, c, Operator::Xor, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     #[test]
@@ -427,7 +628,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 1);
         let n = binop(&mut arena, c, Operator::EqValidity, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     #[test]
@@ -437,7 +638,7 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 1);
         let n = binop(&mut arena, c, Operator::NotEqValidity, l);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     #[test]
@@ -450,7 +651,7 @@ mod tests {
             dtype: DataType::Int64,
             options: CastOptions::Strict,
         });
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     #[test]
@@ -458,7 +659,7 @@ mod tests {
         // Dyn literals need a target dtype for materialization; foundation falls through.
         let mut arena = Arena::new();
         let n = arena.add(AExpr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(42))));
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     /// Sanity: a deeply nested predicate `(a == 1) AND ((b > 2) OR is_null(c))`
@@ -480,19 +681,25 @@ mod tests {
         let inner_or = binop(&mut arena, b_gt_2, Operator::Or, c_is_null);
         let root_node = binop(&mut arena, a_eq_1, Operator::And, inner_or);
 
-        assert!(aexpr_to_vortex_expression(root_node, &arena).is_some());
+        // Both Or and And fire the schema gate; provide schema with a/b/c Int32.
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("b"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("c"), DataType::Int32);
+        assert!(aexpr_to_vortex_expression(root_node, &arena, Some(&schema)).is_some());
     }
 
-    /// Sanity: any single unsupported sub-shape poisons the whole tree.
+    /// Sanity: a single still-unsupported sub-shape poisons the whole tree.
+    /// (Updated for PR-2.2: Plus is now supported, so use Minus to exercise the
+    /// poison path.)
     #[test]
     fn integration_unsupported_subexpr_returns_none() {
-        // `(a + 1) == 5` — arithmetic in predicates is PR-2.2; whole tree should be None.
         let mut arena = Arena::new();
         let a = col(&mut arena, "a");
         let one = lit_i32(&mut arena, 1);
-        let a_plus_1 = binop(&mut arena, a, Operator::Plus, one);
+        let a_minus_1 = binop(&mut arena, a, Operator::Minus, one);
         let five = lit_i32(&mut arena, 5);
-        let n = binop(&mut arena, a_plus_1, Operator::Eq, five);
-        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+        let n = binop(&mut arena, a_minus_1, Operator::Eq, five);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 }
