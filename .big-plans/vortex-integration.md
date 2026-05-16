@@ -12,7 +12,7 @@ current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: PR-1.4
 pr_index: 4
-outstanding_must_fix: 1
+outstanding_must_fix: 0
 deferred_items_total: 6
 last_user_touchpoint: 2026-05-16T00:15:00Z
 last_user_touchpoint_what: "PR-1.4 inner-loop cycle 1 rejected — 1 CI-blocker must-fix (clippy::clone_on_copy)"
