@@ -23,7 +23,8 @@
 //!
 //! ## What this module covers (PR-2.1 foundation + PR-2.2 extensions)
 //!
-//! The 15 shapes below — the "kernel" the rest of PR-13 extends.
+//! The 14 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
+//! foundation + 1 from PR-2.2: `addition (numeric)`.)
 //!
 //! | Shape | AExpr matcher | Vortex builder |
 //! |---|---|---|
@@ -123,9 +124,10 @@ use crate::plans::lit::LiteralValue;
 /// checked_add_defaults_to_fallible`): an integer overflow during scan errors out at
 /// scan-time rather than silently wrapping (Polars' `+` operator wraps). The convertor
 /// only emits `checked_add` when both operands are numeric (the `operand_is_numeric` gate);
-/// String/Bool/Date/Struct/List Plus operations refuse pushdown (without the gate, Vortex's
-/// `Binary::coerce_args` would `vortex_bail!` at scan-time, violating the
-/// always-SAFE-fallback contract). For numeric Plus near boundary values, the user observes
+/// String/Bool/Date/Datetime/Time/Duration/Struct/List Plus operations refuse pushdown
+/// (without the gate, Vortex's `Binary::coerce_args` would `vortex_bail!` at scan-time,
+/// violating the always-SAFE-fallback contract). For numeric Plus near boundary values,
+/// the user observes
 /// a scan-time error instead of Polars' wrapping behavior. This is a known semantic
 /// divergence; see Deferred work (`Vortex wrapping_add public API`).
 pub fn aexpr_to_vortex_expression(
@@ -321,18 +323,16 @@ fn operand_is_numeric(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> bool
 /// hasn't validated; refuse for safety.
 fn is_vortex_numeric_dtype(dt: &DataType) -> bool {
     use DataType::*;
+    // List mirrors Vortex's `PType` ceiling (I8/I16/I32/I64/F16/F32/F64 + unsigned)
+    // AND `polars_vortex::read::predicate::polars_scalar_to_vortex`'s supported literal
+    // arms. `Int128` and `UInt128` are intentionally excluded: both exist in polars-core
+    // (`DataType::Int128`/`UInt128`) but neither is a Vortex primitive AND
+    // `polars_scalar_to_vortex` has no Int128/UInt128 arms, so a literal-of-that-type
+    // would fall through `?`-propagation anyway. Listing them here would be misleading
+    // (suggesting support that isn't wired).
     matches!(
         dt,
-        Int8 | Int16
-            | Int32
-            | Int64
-            | Int128
-            | UInt8
-            | UInt16
-            | UInt32
-            | UInt64
-            | Float32
-            | Float64
+        Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64
     )
 }
 
@@ -355,11 +355,16 @@ fn convert_literal(lv: &LiteralValue) -> Option<Expression> {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for each of the 14 PR-2.1 / PR-13.1 shapes.
+    //! Unit tests for the PR-2.1 / PR-13.1 foundation shapes + PR-2.2 / PR-13.2 Plus +
+    //! the schema-gate refusal paths (And/Or/Not bitwise-on-int + Plus on non-numeric).
     //!
     //! Each test builds a small AExpr tree directly in an `Arena<AExpr>` (no DSL involved),
-    //! calls [`aexpr_to_vortex_expression`], and asserts the conversion returns `Some` (the
-    //! Vortex expression's structure is opaque to the test — we trust the builder helpers).
+    //! calls [`aexpr_to_vortex_expression`], and asserts the conversion returns `Some`. For
+    //! most shapes the Vortex expression's structure is opaque to the test — we trust the
+    //! builder helpers and assert `.is_some()` / `.is_none()` only. The cycle-1 must-fix
+    //! escalation around tautological tests is addressed for the load-bearing Plus shape
+    //! via `shape_plus_arithmetic_structural`, which inspects `Display::fmt`'s SQL-form
+    //! output — a paste-swap bug (`Plus → checked_mul`) would be caught there.
     //! Unsupported shapes additionally assert `None`.
     use polars_core::chunked_array::cast::CastOptions;
     use polars_core::prelude::{AnyValue, DataType};
@@ -400,7 +405,7 @@ mod tests {
         })
     }
 
-    // === Shape coverage tests (14 shapes) ===
+    // === Shape coverage tests (15 shapes: 14 foundation + Plus) ===
 
     #[test]
     fn shape_column() {
@@ -710,6 +715,44 @@ mod tests {
         schema.with_column(PlSmallStr::from("a"), DataType::Float64);
         schema.with_column(PlSmallStr::from("b"), DataType::Float64);
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Nested Plus `(a + b) + c` — `operand_is_numeric` recurses through the inner Plus
+    /// (lines 308-312 in vortex_convertor) so all three Int32 columns pass the gate.
+    #[test]
+    fn shape_plus_nested_numeric_passes() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let a_plus_b = binop(&mut arena, a, Operator::Plus, b);
+        let c = col(&mut arena, "c");
+        let n = binop(&mut arena, a_plus_b, Operator::Plus, c);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("b"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("c"), DataType::Int32);
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Plus with a non-Plus BinaryExpr operand `(a * b) + c` — the inner Multiply
+    /// is not yet supported by the convertor (returns None at the outer level via the
+    /// Plus arm's `?`-propagation on `lhs`), but the gate ALSO refuses because
+    /// `operand_is_numeric` only recurses on the inner `Plus` arm (lines 308-312); any
+    /// other BinaryExpr op returns false. Both layers refuse: the gate is the first
+    /// line of defense, the unsupported Multiply arm is the second.
+    #[test]
+    fn shape_plus_with_multiply_operand_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let a_times_b = binop(&mut arena, a, Operator::Multiply, b);
+        let c = col(&mut arena, "c");
+        let n = binop(&mut arena, a_times_b, Operator::Plus, c);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("b"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("c"), DataType::Int32);
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
     /// Structural assertion (cycle-1 must-fix from gauntlet — addresses the

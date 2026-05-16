@@ -135,6 +135,56 @@ def test_scan_with_arithmetic_filter(tmp_path: Path) -> None:
     assert out["b"].to_list() == ["4"]
 
 
+def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
+    """PR-2.2 cycle-1 must-fix M1 regression test (cycle-2 should-fix
+    F-SF-CYCLE2-006 / C2-003): hive-partitioned Vortex scans with a predicate
+    must not crash from the AExpr-direct convertor emitting
+    ``get_item(hive_col, root())`` references to columns that don't exist in
+    the per-file Vortex data.
+
+    The cycle-1 guard at ``lower_ir.rs:780-791`` refuses convertor pushdown
+    when ``hive_parts.is_some()``; the legacy ``polars_to_vortex_predicate``
+    fallback (which consumes the hive-stripped
+    ``ScanIOPredicate::column_predicates``) handles the predicate. A
+    regression where the guard is dropped would surface here as a
+    ``ComputeError`` from Vortex bailing on a missing column 'year'.
+    """
+    (tmp_path / "year=2024").mkdir()
+    (tmp_path / "year=2025").mkdir()
+    pl.DataFrame({"x": [1, 2, 3]}).write_vortex(tmp_path / "year=2024" / "data.vortex")
+    pl.DataFrame({"x": [4, 5, 6]}).write_vortex(tmp_path / "year=2025" / "data.vortex")
+
+    out = (
+        pl.scan_vortex(tmp_path / "**/*.vortex", hive_partitioning=True)
+        .filter(pl.col("year") == 2024)
+        .collect()
+    )
+    assert out.shape == (3, 2)
+    assert sorted(out["x"].to_list()) == [1, 2, 3]
+    assert out["year"].unique().to_list() == [2024]
+
+
+def test_scan_with_row_index_and_filter(tmp_path: Path) -> None:
+    """PR-2.2 cycle-2 should-fix C2-001 regression test: ``row_index_name``
+    is a virtual column not present in the Vortex file's data. The cycle-1
+    hive-only guard at ``lower_ir.rs`` was extended in cycle-2 to also refuse
+    convertor pushdown when ``unified_scan_args.row_index.is_some()`` (and
+    when ``include_file_paths.is_some()``), preventing the convertor from
+    emitting a Vortex ``get_item('ri', root())`` reference to a column
+    Vortex's data doesn't contain. A regression would surface as a
+    ``ComputeError`` from Vortex bailing on missing column 'ri'.
+    """
+    path = tmp_path / "ri.vortex"
+    pl.DataFrame({"x": list(range(20))}).write_vortex(path)
+
+    out = (
+        pl.scan_vortex(path, row_index_name="ri")
+        .filter(pl.col("ri") > 10)
+        .collect()
+    )
+    assert out["ri"].to_list() == list(range(11, 20))
+
+
 def test_scan_with_projection(tmp_path: Path) -> None:
     path = tmp_path / "proj.vortex"
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})
