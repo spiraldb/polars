@@ -10,12 +10,12 @@ branch: vortex-integration
 planning_sub_flow: null
 current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
 phase_index: 2
-current_pr: null
+current_pr: PR-2.2
 pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 7
-last_user_touchpoint: 2026-05-16T20:35:00Z
-last_user_touchpoint_what: "PR-2.1 complete (confidence: high, 1 review cycle, 3 PR-work commits, +1 deferred entry); ready for PR-2.2"
+last_user_touchpoint: 2026-05-16T20:40:00Z
+last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at to_graph.rs:843 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 23
 review_cycles_this_pr: 0
@@ -24,7 +24,7 @@ phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: db61a822c
+last_commit: 2751eb300
 ```
 
 ## Context
