@@ -14,11 +14,11 @@ current_pr: PR-1.4
 pr_index: 5
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T16:12:00Z
-last_user_touchpoint_what: "PR-1.4 reject-fixes complete; invoking inner-loop 2-vote gauntlet on c1aa9215b..HEAD"
-subagent_invocations_this_pr: 0
-subagent_invocations_total: 17
-review_cycles_this_pr: 0
+last_user_touchpoint: 2026-05-16T16:25:00Z
+last_user_touchpoint_what: "PR-1.4 reject-fix gauntlet cycle 1 accepted (0 must-fix, 0 should-fix, 0 nits — both reviewers high confidence)"
+subagent_invocations_this_pr: 1
+subagent_invocations_total: 18
+review_cycles_this_pr: 1
 phase_entry_sha: 657c78c97
 phase_end_cycle: 3
 phase_end_reject_cycles: 0
