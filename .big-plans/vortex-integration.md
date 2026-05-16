@@ -20,9 +20,9 @@ subagent_invocations_this_pr: 1
 subagent_invocations_total: 13
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
-phase_end_cycle: 1
-phase_end_reject_cycles: 1
-last_phase_end_verdict: null
+phase_end_cycle: 2
+phase_end_reject_cycles: 0
+last_phase_end_verdict: accept
 last_commit: 850c06d47
 ```
 
@@ -1136,6 +1136,342 @@ These 6 items concentrate in 4 areas (streaming-sink lifecycle; row_count cast; 
   "must_fix_count": 6,
   "should_fix_count": 28,
   "nit_count": 13
+}
+
+```
+
+</details>
+
+## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 2) — accepted (4-vote)
+
+**Synthesizer output from `/spiral:gauntlet` (`preset=phase-4`, lenses=`spec`+`correctness`+`maint`+`arch`); full Synthesizer Output JSON in the `<details>` block at the end of this section.**
+
+### Executive summary
+
+Phase 1 ('Ratify + crates.io transition') ACCEPTS at cycle 2. All 4 reviewers (spec, correctness, maint, arch) reach `accept`. 0 must-fix items, 11 should-fix, 6 nits across 17 unified findings (after dedupe). The cumulative Phase-1 artifact — 31-commit base + PR-1.1 (crates.io transition) + PR-1.2 (Python cache_mode= surface + visitor cfg-gating + 10+ CI-greenup items) + PR-1.3 (6 phase-end must-fix items + 2 inner-loop must-fix + 2 inner-loop should-fix across 10 work commits) — is architecturally coherent and correctness-sound. All 6 cycle-1 phase-end must-fix items are verified resolved at source by all 4 reviewers (Resolved phase-end must-fix items table has all rows marked [x]). The four settled architectural moves (mem-engine delegates to streaming; single Polars ASYNC Tokio runtime; mem::transmute C-ABI bridge with size+align+length safety triplet; SpecializedColumnPredicate fast path preserved) are intact. Cross-bundle consistency on cache_mode is tight. The MF-001/MF-002 silent-truncation hazards are closed; correctness lens traced the producer/writer error-path lifecycle exhaustively and verified deterministic behavior (producer error always wins via await ordering — incidentally revealing that the Deferred work entry overstates the race, captured as a should-fix doc-update).
+
+**Key surprises**: (a) cycle-1 reward-hacking on MF-006 was caught and routed to a strictly-better fix in cycle-2 inner loop — process lesson recorded; (b) cycle-1 verification gap on the `vortex_err!` build break revealed that `cargo check -p polars` (umbrella) does NOT activate polars-stream's vortex code without `new_streaming` — recommend adding `-p polars-stream --features vortex,cloud` to the verification checklist; (c) the `pub use ::vortex;` re-export WIDENED via the macro dependency but the 5-sub-module narrowing still works (macros re-export by module).
+
+**Critical tradeoff verdicts**: REUSE 31 COMMITS → firm KEEP (8 must-fix items emerging from cycle-1+2 is the most-skeptical case for rewrite and even that favors reuse). 4/4/4/4 REVIEW COUNTS → firm KEEP (cycle-2's adversarial second pass caught the MF-006 reward-hack + the build break — neither would have surfaced under 3-vote). FEATURE-INTEGRATION WORK SHAPE → KEEP (prior-art alignment tightened; the read_vortex/scan_vortex asymmetry remains as one Phase 3 carry-forward). `pub use ::vortex;` → REVISIT-BUT-KEEP (narrow to 5 sub-modules in Phase 2 entry).
+
+**Top should-fix recommendations for Phase 2 entry housekeeping**: (1) thread `VortexScanOptions::segment_cache` through `vortex_file_info` at scans.rs:336 (5-line fix; closes the divergent IR-time vs streaming-time semantics that partial-honors `cache_mode='off'`); (2) narrow `pub use ::vortex;` to 5 sub-modules (mechanical, tightens layering BAN's machine-checkability); (3) update Deferred work entry to reflect actual error-path determinism; (4) update Plan-row 184 stale 65/8 test count to actual 66/10; (5) inline `read::metadata` back-compat shim (one caller; 2-minute fix); (6) add `cargo check -p polars-stream --features vortex,cloud` to verification checklist.
+
+The phase-end checkpoint is the right moment for the user to decide between (a) proceeding to Phase 2 (PR-13 AExpr pushdown) directly, (b) inserting a Phase 1.4 cleanup PR for the top should-fix items, (c) amending Phase 1 to absorb the cleanup before moving on, or (d) pausing and resuming in a fresh session.
+
+### Summary of changes
+
+Phase 1 ('Ratify + crates.io transition') of polars-vortex closes coherently at the architectural level after cycle-2 phase-4 retroactive ratification. The cumulative diff covers the 31-commit base + PR-1.1 (crates.io transition + DType::Union arm removal + DType::Variant bail test) + PR-1.2 (Python cache_mode= surface + visitor cfg-gating root-cause fix + 10+ CI-greenup items absorbed) + PR-1.3 (6 phase-end must-fix items + 2 inner-loop must-fix + 2 inner-loop should-fix across 10 work commits in 2 inner-loop cycles). All 6 cycle-1 phase-end must-fix items are verified resolved: MF-001 wraps Vortex sink writer in tokio_handle_ext::AbortOnDropHandle (mirroring IPC sink at ipc/mod.rs:101 — closes outer-task-failure→silent-footer hole); MF-002 forwards producer errors through chunk_tx as Err(vortex_err!(...)) BEFORE bailing (closes producer-error→silent-footer hole); MF-003 replaces u64-as-usize cast with usize::try_from(...).unwrap_or(usize::MAX) at scans.rs:349 mirroring the established clamp at io_sources/vortex/mod.rs:217; MF-004 corrects README field name to segment_cache; MF-005 documents cache_mode= in the README scan_vortex signature; MF-006 aligns set_io_metrics with CSV/IPC/NDJSON 3-of-4 sibling consensus via .ok().unwrap() (cycle-2 inner-loop reroute from cycle-1's reward-hacking comment-only fix). The four settled architectural moves — mem-engine delegates to streaming, single Polars ASYNC Tokio runtime, mem::transmute C-ABI bridge with size+align+length safety triplet, SpecializedColumnPredicate fast path preserved for PR-13 transition — are coherently implemented and unchanged. Cross-bundle consistency on the cache_mode/cache_mode_kind/cache_dedicated_bytes 2-arg pyo3 pair is tight across Python/Rust/.pyi/README. 0 must-fix items in cycle-2. 16 should-fix items (highest-priority: vortex_file_info segment_cache hardcode at scans.rs:336 — divergent IR-time vs streaming-time semantics; pub use ::vortex; can narrow to 5 sub-modules covering the 8 actual paths; producer-error comment overstates the race — actually deterministic per await ordering; scaffolding markers absent on PR-2.6 deletion target + back-compat shim + PR-10 stale reference; .ok().unwrap() BAN-vs-consensus tension worth codifying; long justification comments at sink/builder/array_bridge approaching BAN thresholds). 6 nits. Cumulative deferred items: 6. The integration is coherent, exit criteria all pass, and Phase 2 (PR-13 AExpr pushdown) is unblocked.
+
+### Surprises and discoveries
+
+- **All 6 cycle-1 phase-end must-fix items were in PRE-EXISTING 31-commit code, not in PR-1.1 or PR-1.2 directly. Two of those (MF-001, MF-002) were silent-data-corruption hazards in the streaming sink writer-task lifecycle that two prior hand-prompted gauntlet passes + per-PR inner-loop reviews missed. Phase 1's retroactive ratification framing delivered as designed.**
+  - How handled: Resolved in PR-1.3. Pattern recorded: prior-art-alignment insight (maint lens) produced MF-001; the feature-integration work-shape's highest-leverage insight was vindicated.
+  - Amend plan: `already-done`
+- **PR-1.3's cycle-1 MF-006 fix was a reward-hacking comment-add. Cycle-2 inner-loop caught it via specific code-trace through multi_scan/mod.rs:185-200 + pipeline/initialization.rs:366 + physical_plan/lower_ir.rs:769-775 (single-call-site reality) and routed to the strictly-better .ok().unwrap() fix aligned with CSV/IPC/NDJSON 3-of-4 sibling consensus. Lesson: when adding a justification comment to a silent-error swallow, audit the underlying pattern.**
+  - How handled: Resolved cycle-2; documented in PR-1.3 surprises.
+  - Amend plan: `already-done`
+- **PR-1.3's cycle-1 MF-002 fix introduced a build break (`vortex::error::vortex_err!` doesn't resolve in polars-stream). The umbrella `cargo check -p polars --features vortex,cloud,parquet,dtype-full` doesn't include `new_streaming`, so polars-stream's vortex sink code wasn't compiled. Verification gap: the right check is `-p polars-stream --features vortex,cloud`.**
+  - How handled: Resolved cycle-2 via `polars_vortex::vortex::error::vortex_err!` through the broad re-export. Recommend adding `cargo check -p polars-stream --features vortex,cloud` to the verification checklist for future PRs touching polars-stream.
+  - Amend plan: `already-done`
+- **Cycle-2 surfaced a pre-existing E0004 build break under `polars-stream --features vortex` (without `cloud`): the Vortex sink Writeable match's `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` on polars-stream's own `cloud` feature, but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Predates PR-1.3.**
+  - How handled: Deferred (cumulative deferred 6). Tracked for Phase 2 cleanup or follow-up PR.
+  - Amend plan: `already-done`
+- **Correctness lens traced the producer/writer error-path race exhaustively and verified the Deferred work entry 'Vortex sink producer/writer error-path determinism polish' MIS-CHARACTERIZES the behavior. The producer's `.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs, so the producer's PolarsError always propagates first; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. Producer-Err path is deterministic; only error-message-WORDING is what the Deferred entry was trying to characterize as 'race-y' but it's not race-y in user-visible behavior.**
+  - How handled: Not yet — captured as should-fix above to update both the inline comment and the Deferred work entry. Trivial doc-only correction.
+  - Amend plan: `yes`
+- **`pub use ::vortex;` re-export WIDENED via PR-1.3's MF-002 fix introducing a macro dependency (`vortex::error::vortex_err!`). Macros from external crates have looser stability contracts than function signatures, so this is a regression on the layering concern cycle-1 already flagged. But the narrowing recommendation still works WITH the macro because macros are re-exported by module — `pub mod vortex { pub use ::vortex::{array, error, file, io, session}; }` covers every actual use including the macro.**
+  - How handled: Captured as should-fix above with concrete narrowing recommendation.
+  - Amend plan: `no`
+- **Plan-row PR-1.2 'Files touched (expected)' field still lists 4 files; actual is ~30. Cycle-1 should-fix #1 noted this; PR-1.3 didn't address (must-fix-only). Implementation status carries the truth; the 'expected' field is documentation-completeness drift.**
+  - How handled: Captured as nit above. Low priority.
+  - Amend plan: `no`
+- **Phase 1 exit criteria row 184 still reads '65 Rust tests' / '8 Python tests' — actual is 66 / 10. Cycle-1 should-fix with `Amend plan: yes`; not updated across two cycles. Stale numbers will carry into Phase 2 planning unless fixed.**
+  - How handled: Captured as should-fix above. Plan-edit before Phase 2 entry.
+  - Amend plan: `yes`
+
+
+### Testing coverage assessment
+
+**Tested cases:**
+
+| Case | Test location | Confidence |
+|------|---------------|------------|
+| All 6 cycle-1 phase-end must-fix items verified resolved at source by all 4 reviewers | `Resolved phase-end must-fix items table — Phase 1 cycle 1 (rows 1-6 all marked [x])` | high |
+| Cache_mode dispatch consistency across Python/Rust/.pyi/README | `Cross-bundle grep confirms identical naming and types (cache_mode_kind: &str, cache_dedicated_bytes: Option<u64>) at general.rs:343-365 + functions.py:186-217 + _plr.pyi + README.md:325-332` | high |
+| VortexCacheMode::{Global, Off, Dedicated} resolve semantics | `crates/polars-vortex/src/read/options.rs:81-131 (three unit tests asserting Arc::ptr_eq behaviors)` | high |
+| C-ABI bridge size_of + align_of asserts + runtime length parity (both directions) | `crates/polars-vortex/src/read/array_bridge.rs:143-144,175 + write/array_bridge.rs:40-43` | high |
+| Channel-Err capacity bound (no deadlock for tx.send(Err(...))) | `Verified via futures::channel::mpsc::channel(n) capacity semantics: n + num_senders slots` | high |
+| No-second-runtime invariant | `session.rs:40-49 (Handle from ASYNC); sink mod.rs:163,111 (ASYNC.spawn + async_executor::spawn)` | high |
+| All-reads-via-PolarsInstrumentedVortexReadAt invariant | `crates/polars-vortex/src/read/read_at.rs:106-164 (three factory functions: local/cloud/in-memory all wrap)` | high |
+| row_count clamp is symmetric across read sites + write strategy | `scans.rs:349 + io_sources/vortex/mod.rs:217 + write/strategy.rs:26-29 (three sites converged on the same shape)` | high |
+| Roundtrip read/write + filter/projection-pushdown + negative-slice | `py-polars/tests/unit/io/test_vortex.py:55-132 + crates/polars-vortex/tests/roundtrip.rs` | high |
+
+**Untested cases (priority-ranked):**
+
+| Case | Priority | Why untested |
+|------|----------|--------------|
+| Vortex sink producer-error end-to-end regression (Python-level) | high | Deferred. Python-level test (~30 LoC) would catch MF-001/MF-002 against future refactor regression; smaller scope than the Rust-level harness also deferred. |
+| vortex_file_info honors VortexScanOptions::segment_cache | high | Carry-forward should-fix; PR-1.3 scoped out. Phase 2 prerequisite or Phase 1.4 cleanup. |
+| set_vortex_cache_bytes(True/1.5/-1) Python validation | low | Carry-forward cycle-1 should-fix; inconsistent with cache_mode= validator hygiene. |
+| Empty DataFrame (0-col) write/read roundtrip exercising n_chunks==0 early-return | medium | Carry-forward; trivial scope but no test added. |
+| 32-bit platform regression on row_count + rbs clamps | low | CI doesn't run 32-bit targets; defensive only. |
+| Multi-file scan + schema-evolution + nested-type + small-int dtype coverage | medium | Phase 3 scope per plan. |
+| polars-stream --features vortex (without cloud) E0004 build break | low | Pre-existing; deferred. Phase 2 cleanup. |
+| Hard cache hit/miss counters (Moka API limitation) | low | Moka doesn't expose stats; deferred. |
+
+**Recommendations:** Phase 2 entry should land a 'Phase 2.0 housekeeping' sub-PR addressing the top 3-4 should-fix items: (1) vortex_file_info segment_cache thread (5-line fix; closes the divergent semantics); (2) narrow `pub use ::vortex;` to 5 sub-modules (mechanical; tightens the layering BAN's machine-checkability); (3) inline the `read::metadata` back-compat shim (2-minute fix, one caller); (4) update plan-row 184 stale exit-criteria numbers (durable plan-edit). Then add the Python-level Vortex sink regression test for MF-001/MF-002 as part of PR-2.1's prerequisite hygiene. Phase 3 takes the broader test-coverage push (Rust-level streaming harness, multi-file, schema-evolution, nested-type, small-int dtypes, read_vortex parameter symmetry). Phase 4 polish: 32-bit overflow regression tests, deny.toml audit, set_global_cache_bytes Arc-swap semantics tests, SAFETY-comment trims.
+
+
+### Tradeoffs re-evaluation
+
+| Decision | Original choice | Verdict | Rationale |
+|----------|-----------------|---------|----------|
+| Reuse existing 31 commits vs rewrite from scratch | Reuse — 73 tests passing locally; two prior gauntlet review passes already surfaced + fixed substantive bugs | `keep` | Cycle 2 firms up keep. Net of 6 cycle-1 + 2 cycle-2-inner-loop must-fix items emerging from the 4-vote review IS the most-skeptical case for rewrite — and even that math favors reuse: 8 bounded mechanical fixes (~10 commits in PR-1.3) vs. weeks of feature-parity work in a rewrite. Architectural coherence of the inherited foundation is sound; the four settled moves are well-implemented at the chosen seams. A rewrite of this size would generate a similar 8-must-fix curve under the same review discipline. |
+| Work shape — feature-integration; Analogous prior art | Many touch points; analogous prior art as highest-leverage insight | `keep` | Cycle-2 maint review found cross-bundle consistency TIGHTENED post-PR-1.3 (README↔Rust↔Python on cache_mode = aligned). The prior-art-alignment insight produced MF-001 (IPC sink AbortOnDropHandle) and the .ok().unwrap() sibling-consensus fix. Cycle-1's revisit-but-keep verdict can now firmly transition to keep — the prior-art-alignment gap that prompted the revisit (read_vortex/scan_vortex asymmetry) is the one outstanding work-shape concern, deferred to Phase 3 with concrete fix path. |
+| CI green-up approach — crates.io vortex = '0.70.0' | Replace path-dep with version-pinned crates.io | `keep` | Unchanged. PR-1.1 transitioned cleanly; cycle-2 sees no regressions. The transitive arrow-* major version coupling deserves an upgrade-runbook comment (cycle-1 should-fix carries forward) but the decision itself is sound. |
+| Final phase plan — 4 phases as drafted | (1) Ratify, (2) PR-13 AExpr pushdown, (3) PR-8 + multi-file, (4) benches/polish | `keep` | Phase 1's boundaries held cleanly through reject+fix cycle. PR-1.2's scope-creep absorption and PR-1.3's 33% inner-loop scope growth are sub-PR-declaration lessons, not phase-split lessons. Phase 2 entry should pre-budget for cross-cutting CI-greenup AND for fixup-PR inner-loop discovery (~30% scope-creep observed pattern). |
+| PR-13 architecture — Option B → A via PR-2.6 cutover | Parallel paths first, delete fast path last | `keep` | Unchanged by Phase 1; Phase 2 scope. SpecializedColumnPredicate fast path at predicate.rs (498 LoC) is contained; PR-2.6 deletion mechanics tractable. Scaffolding-marker should-fix on predicate.rs is the natural Phase 2 entry housekeeping. |
+| PR-8 leads Parquet on table_statistics | Lead the pattern, no API change (Phase 3 scope) | `keep` | Unchanged. The mem-engine Vortex branch at lp.rs:448-459 will be REFINED in PR-3.1 (file-level table_statistics pruning fires; internal pruning stays disabled) — design unchanged, just extended. |
+| Per-phase review-counts — 4 / 4 / 4 / 4 | Max thoroughness; phase-4 preset on every phase-end | `keep` | Cycle-1's revisit-but-keep is REVERSED to firm keep by cycle-2 evidence. Cycle-2's adversarial pass over PR-1.3 caught the cycle-1 MF-006 comment-add reward-hack AND the vortex_err! build break under non-umbrella feature combos — both findings emerged from the second adversarial pass over the same artifact. The 25%-extra cost over 3-vote is small compared to catching arch-vs-impl drift at every checkpoint. Phases 2-3 will deliver NEW code with novel architectural shapes; 4-vote is the calibrated cost. |
+| Single Tokio runtime (Polars ASYNC) for Vortex async work | Avoid doubling thread-pool overhead | `keep` | Verified at cycle 2 — sound; session.rs implements correctly with LazyLock-wrapped EXECUTOR + VortexSession::default().with_handle(...) pattern. No second runtime detected anywhere in the diff. |
+| mem::transmute between Arrow FFI structs with size+align+length triplet | Compile-time asserts + runtime length check provide safety | `keep` | Phase 1 didn't touch transmute call-sites. The comment-length should-fix (cycle-1 + cycle-2 arch) is about prose, not approach — compress comments, keep the approach. |
+| Sorting ColumnPredicates::predicates by column name for deterministic AND-collect | Deterministic ordering is a reproducibility guarantee | `keep` | Confirmed at predicate.rs:50 via sort_by_key(\|(name, _)\| name.as_str()). |
+| create_skip_batch_predicate = false for Vortex at planner/lp.rs:448-459 | Vortex's LayoutReader::pruning_evaluation handles zone-level pruning | `keep` | Branch present and well-documented. Phase 3 PR-8 will REFINE (add file-level table_statistics pruning while keeping internal pruning disabled) — design extension, not change. |
+| hashbrown 0.16 (Polars) + 0.17 (Vortex transitive) coexistence | BAN against bare PlHashMap::new() is established workaround | `keep` | Cycle-2 BAN compliance verified across the diff. The #[allow(clippy::disallowed_types)] on polars_chunk_to_upstream_record_batch for the upstream-arrow boundary is the right complementary pattern. |
+| PolarsInstrumentedVortexReadAt mandatory wrapping | Local/cloud/in-memory all route through it | `keep` | Verified at all three sites (local_file_read_at, cloud_read_at, in_memory_read_at). |
+| row_count: usize::try_from(u64).unwrap_or(usize::MAX) clamp pattern | 32-bit edge case clamp | `keep` | Three sites now converged on the same shape (scans.rs:349 + io_sources/vortex/mod.rs:217 + write/strategy.rs:26-29). Cycle-1's revisit-but-keep verdict is now firmly keep. Note: the write-time application at strategy.rs has the cycle-1 should-fix recommendation to error loudly (vs the read-time clamp); captured as should-fix above for Phase 2 re-evaluation. |
+| `pub use ::vortex;` (broad upstream re-export at lib.rs:18) | Re-export entire upstream Vortex API so downstream Polars crates don't need a direct vortex dep | `revisit-but-keep` | Cycle-1 arch should-fix; cycle-2 WIDENED via MF-002's macro dependency. Audit shows actual surface is 8 paths across 5 sub-modules — narrowing covers every use including the macro. Re-export shape stays (downstream stable surface); width narrows. Mechanical 1-commit change suitable for Phase 2 entry. |
+
+
+### Disagreements
+
+_(none — all 4 reviewers agreed on accept verdict)_
+
+
+### Dropped re-flags (carry-forward items reviewers re-surfaced)
+
+- **MF-001 through MF-006 cycle-1 phase-end must-fix items** — reason: all resolved in PR-1.3 cycle-1 + cycle-2 inner-loop; verified at source by all 4 reviewers. Marked `[x]` in Resolved phase-end must-fix items table.; reference: `Resolved phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1`
+- **In-memory ScanSourceRef::Buffer zero-copy (scans.rs:324)** — reason: covered by Deferred work — assessed not-low-effort in PR-1.2; reference: `Deferred work entry`
+- **mem::transmute approach in array_bridge.rs** — reason: covered by Accepted tradeoffs — approach is sound; only the comment-length question remains as a should-fix (retained above); reference: `Accepted tradeoffs / r1 traps`
+- **RUSTSEC-2024-0436 + 0BSD in deny.toml** — reason: covered as cycle-1 should-fix already absorbed into Surprises with plan-row amendment; reference: `Phase 1 cycle 1 review`
+- **PR-13 architecture (Option B → A via PR-2.6)** — reason: Phase 2 scope; out of scope to revisit until Phase 2 begins; reference: `Key decisions row 5`
+
+
+<details><summary>Full Synthesizer Output JSON (gauntlet schema_version: 1)</summary>
+
+```json
+{
+  "schema_version": 1,
+  "preset": "phase-4",
+  "lenses_used": ["spec", "correctness", "maint", "arch"],
+  "review_count": 4,
+  "review_cycles_this_invocation": 1,
+  "prior_cycle_dropped_re_flags": [],
+  "unified_findings": [
+    {
+      "severity": "should-fix",
+      "kind": "architecture",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:336",
+      "description": "vortex_file_info hardcodes `with_segment_cache(segment_cache())` (the global cache), ignoring `VortexScanOptions::segment_cache`. The streaming-source path at io_sources/vortex/mod.rs:138 correctly threads `self.options.segment_cache.resolve()`. The two code paths now have DIVERGENT semantics for the same scan: the IR-build-time postscript read uses the global cache, but the actual data-decode reads use the user's requested mode. A user passing `cache_mode='off'` still hits the global cache during schema discovery. Cycle-1 arch flagged; still unfixed.",
+      "recommended_fix": "Thread `options.segment_cache.resolve()` through vortex_file_info — change signature to accept `&VortexScanOptions` (or the resolved cache), then call `.with_segment_cache(options.segment_cache.resolve())` at line 336. Mirror the streaming-source pattern at io_sources/vortex/mod.rs:138. 5-line mechanical fix. Surface as Phase 2 prerequisite or Phase 1.4 cleanup.",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "layering",
+      "file_line": "crates/polars-vortex/src/lib.rs:18",
+      "description": "`pub use ::vortex;` re-exports the entire upstream Vortex crate. Cycle-1 arch flagged; cycle-2 confirms PR-1.3 WIDENED the surface by introducing a dependency on `vortex::error::vortex_err!` (a macro). Audit of cross-crate uses shows the actual surface is exactly 8 paths spanning 5 sub-modules: `array::{ArrayRef, VortexSessionExecute, arrow::ArrowArrayExecutor, stream::ArrayStreamAdapter}`, `error::{vortex_err!, VortexResult}`, `file::{Footer, OpenOptionsSessionExt, VortexFile}`, `io::{VortexReadAt, std_file::FileReadAt}`. A 5-sub-module narrowed re-export covers every call site INCLUDING the macro (macros are re-exported by module).",
+      "recommended_fix": "Replace `pub use ::vortex;` with `pub mod vortex { pub use ::vortex::{array, error, file, io, session}; }`. Audit existing call sites to verify all 8 paths resolve. The BAN 'No new direct vortex-internal symbol use outside the bridge files' becomes machine-checkable: anything outside the 5 sub-modules fails to compile.",
+      "found_by": ["maint", "arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:127-137",
+      "description": "MF-002 producer-error forwarding comment is 11 lines (~370 chars) — borderline on the project BAN against >100-char justifications. Two distinct concerns entangled: WHY-send-Err-first AND WHY-let_-on-the-send. Plus correctness lens traced the producer/writer await sequence and verified that `producer.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs — so the producer's PolarsError always wins; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. The comment's 'whichever fires first' framing AND the Deferred work entry overstate the race.",
+      "recommended_fix": "Trim to 3-4 lines: `// Forward the producer error so ArrayStreamAdapter bails instead of finalizing a truncated footer (silent-data-corruption hazard). The producer's original Err always propagates via producer.await? below; the channel-Err only forces the writer to bail before finalize. tx.send failing means writer already shut down; benign.` Also update the Deferred work entry `Vortex sink producer/writer error-path determinism polish` to reflect that the producer-Err path is DETERMINISTIC (producer always wins via await ordering), and the polish opportunity is comment clarity, not error message wording.",
+      "found_by": ["correctness", "maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:157-162",
+      "description": "MF-001 AbortOnDropHandle wrap comment is 6 lines (~360 chars), citing the silent-truncation hazard, the IPC sink at ipc/mod.rs:101, and bare-JoinHandle behavior. The IPC sink itself has ZERO explanatory comment on its analogous wrap. The asymmetric prose burden is firmly on Vortex.",
+      "recommended_fix": "Trim to 1-2 lines: `// AbortOnDropHandle so the writer task is aborted on outer-task failure rather than orphaned (would finalize a truncated footer). Mirrors `ipc/mod.rs:101`.` Detailed rationale belongs in a module-level doc-comment, not duplicated inline.",
+      "found_by": ["maint", "arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "convention",
+      "file_line": "crates/polars-stream/src/nodes/io_sources/vortex/builder.rs:54",
+      "description": "MF-006's `.ok().unwrap()` resolves the silent-error-swallow BAN but introduces `.unwrap()` in production-path per strict BAN reading. Mitigated by 3-of-4 CSV/IPC/NDJSON sibling consensus; the consensus is the stronger signal. Plus the comment at builder.rs:49-54 (~315 chars) is the verbose outlier — sibling builders use the same pattern with ZERO comment.",
+      "recommended_fix": "Either (a) codify the BAN-vs-consensus tension as an Accepted tradeoff in the plan, OR (b) consider a `debug_assert!(self.io_metrics.get().is_none())` belt-and-suspenders so the load-bearing 'multi-scan calls once' claim is enforced inline. Trim the comment to 1-2 lines referencing one canonical sibling.",
+      "found_by": ["correctness", "maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "overflow",
+      "file_line": "crates/polars-vortex/src/write/strategy.rs:26-29",
+      "description": "Cycle-1 should-fix #2 specifically recommended ERRORING loudly on `row_block_size` overflow because it's a write-time CONFIGURATION knob (user-provided), not a read-time OBSERVED value. PR-1.3 chose pattern consistency (`usize::try_from(rbs).unwrap_or(usize::MAX)`) over the original recommendation. Defensible by pattern-match but worth re-evaluating: a misconfigured rbs > usize::MAX silently clamps rather than erroring at the call site.",
+      "recommended_fix": "Replace with `let rbs_usize = usize::try_from(rbs).map_err(|_| polars_err!(ComputeError: \"row_block_size {} exceeds usize::MAX on this platform\", rbs))?;` so misconfigured u64 row_block_size errors loudly at the write call. Or accept the consistency-over-loudness tradeoff explicitly.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scaffolding",
+      "file_line": "crates/polars-vortex/src/read/predicate.rs:1, crates/polars-vortex/src/read/mod.rs:18-22, crates/polars-vortex/src/write/mod.rs:4",
+      "description": "Three scaffolding-marker gaps from cycle-1 maint, unfixed in cycle-2 (PR-1.3 scoped must-fix-only): (1) predicate.rs is scheduled for PR-2.6 deletion per the plan; no inline marker. (2) read/mod.rs::metadata is a back-compat shim with one caller (polars-plan/src/dsl/file_scan/mod.rs:21) — inlineable now in ~2 minutes. (3) write/mod.rs:4 references 'PR-10' with no link. Fresh engineers reading these files cold have zero indication they're transitional.",
+      "recommended_fix": "Phase 2 entry housekeeping: (a) add module-level scaffolding comment to predicate.rs pointing at PR-2.6; (b) inline `metadata` shim into read/mod.rs proper and delete the shim; (c) strip 'PR-10' reference or replace with upstream URL.",
+      "found_by": ["maint", "arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/read/array_bridge.rs:160-164",
+      "description": "Cycle-1 arch flagged the SAFETY comment block as 120+ chars (over BAN spirit). PR-1.3 scoped out; cycle-2 confirms still present (~340 chars across 5 lines). Two distinct claims interleaved: struct layout identity + release-callback ownership semantics. Both load-bearing for soundness, but the BAN threshold flags exactly this length. Similar concern at write/array_bridge.rs:51.",
+      "recommended_fix": "Move detailed reasoning into the module-level `//!` doc-comment block at the top of the file. Trim the inline SAFETY to one sentence: `// SAFETY: layout verified by the compile-time asserts at lines 143-144; release callback ownership documented in the module doc-comment.`",
+      "found_by": ["maint", "arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "boundary",
+      "file_line": "py-polars/src/polars/io/vortex/functions.py:242-276",
+      "description": "Cycle-1 maint finding (prior-art-alignment gap): `pl.read_vortex` accepts ~10 of `pl.scan_vortex`'s ~22 parameters; docstring says 'See scan_vortex for the full parameter list' but read_vortex silently doesn't forward 12 of them. Fresh engineers following the pointer hit `TypeError: unexpected keyword argument`. Asymmetric with `pl.read_parquet` / `pl.scan_parquet`. PR-1.3 scoped out.",
+      "recommended_fix": "Phase 3 (per cycle-1 work-shape revisit-but-keep): either (a) `**kwargs` forwarding pattern matching `read_parquet`, or (b) enumerate the supported subset explicitly in the docstring and explain why others aren't forwarded. Option (a) is prior-art-aligned.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-vortex/src/read/schema.rs:429-441",
+      "description": "`time_extension_days_unit_errors` test asserts nothing — constructs a Nanoseconds `Time` then discards it. Cycle-1 maint flagged; PR-1.3 scoped out. The bail-arm at schema.rs:142-143 is structurally unreachable from public API (Vortex's `Time::new(Days)` panics during construction). Assertion-free test is anti-help.",
+      "recommended_fix": "Phase 2-3 absorption: either (a) delete the test and move the documentation into a module-level comment near the bail arm, or (b) construct a Days-unit Time via `DType::Extension` directly (bypassing the panicking constructor) and assert the bail-message contents.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "weak-exit-criteria",
+      "file_line": ".big-plans/vortex-integration.md:184",
+      "description": "Phase 1 exit criteria row at line 184 reads '65 Rust tests pass' / '8 Python tests pass' but actual shipped state is 66 Rust + 10 Python (PR-1.1 added 1 Rust; PR-1.2 added 2 Python). Cycle-1 spec flagged with `Amend plan: yes`. Plan-row was not updated across two cycles. Stale numbers will carry into Phase 2 planning.",
+      "recommended_fix": "Plan-edit commit: either reframe the criteria as 'at least N tests pass' (durable across phases) or update counts to 66 / 10 to match shipped state.",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "nit",
+      "kind": "doc-quality",
+      "file_line": ".big-plans/vortex-integration.md:196",
+      "description": "Plan-row PR-1.2 'Files touched (expected)' lists 4 files; actual is ~30 (including 19-file polars-vortex cargo fmt sweep + various CI greenup files). Implementation status row at line 333-345 documents the scope expansion as accepted self-flagged scope-creep, so this is documentation-completeness gap not a re-flag.",
+      "recommended_fix": "Low-priority cleanup; optionally amend 'Files touched (expected)' to enumerate the broader actual set or add a `(+ ~25 CI-greenup files — see Implementation status)` parenthetical.",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "nit",
+      "kind": "scope-creep",
+      "file_line": "crates/polars-vortex/README.md",
+      "description": "README received heavy whitespace / table-alignment reformatting from dprint sweep — 283 line delta on a documentation file. Substantive content changes (MF-004 + MF-005) are ~10 lines; remaining ~270 lines are cosmetic re-wrap. Each substantive change is harder to bisect against cosmetic churn.",
+      "recommended_fix": "For Phase 2 entry: pre-declare dprint table-alignment + markdown re-wrap as a separate mechanical-formatting sub-PR. Don't retroactively unbundle PR-1.3.",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "nit",
+      "kind": "overflow",
+      "file_line": "crates/polars-vortex/src/read/array_bridge.rs:175 and write/array_bridge.rs:45,64",
+      "description": "`if imported.len() as i64 != expected_len` casts `usize → i64` unguarded. For an array length exceeding i64::MAX (~9.2 EB items, theoretical), wraps to negative and bug-detection silently fails. Carry-forward from cycle-1 should-fix; cycle-2 confirms still present.",
+      "recommended_fix": "Use `i64::try_from(imported.len()).map_err(|_| polars_err!(ComputeError: \"imported array length {} exceeds i64\", imported.len()))?`. Defer to Phase 2 or 3 — theoretical only.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "nit",
+      "kind": "overflow",
+      "file_line": "crates/polars-vortex/src/read/schema.rs:110",
+      "description": "`ArrowDataType::FixedSizeList(Box::new(inner), *size as usize)` casts the Vortex FixedSizeList size field to `usize` unguarded. Hypothetical at current Vortex API (size is u32 today); worth a guard for consistency with row_count/rbs clamps.",
+      "recommended_fix": "Replace with `usize::try_from(*size).map_err(|_| polars_err!(ComputeError: \"FixedSizeList size {} exceeds usize::MAX\", size))?` to satisfy the same overflow-discipline. Defer.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "nit",
+      "kind": "convention",
+      "file_line": "crates/polars-vortex/src/write/array_bridge.rs:107",
+      "description": "Read- and write-side C-ABI bridges operate at different granularities: read transmutes whole arrays; write builds Field-by-Field with explicit `with_metadata`. Asymmetry is real (RecordBatch::try_new requires explicit schema-array alignment) but undocumented — a reader expecting mirror-image bridges will be surprised.",
+      "recommended_fix": "Add a one-line comment at the top of write/array_bridge.rs noting the asymmetry: `// Note: write path builds Field-by-Field because RecordBatch::try_new validates schema-array consistency upfront. Read path transmutes whole arrays because Vortex's to_arrow_schema() carries field metadata already.`",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "nit",
+      "kind": "architecture",
+      "file_line": "crates/polars-vortex/src/write/options.rs:21",
+      "description": "`include_dtype: bool` defaults to `true`. The `false` case is a write-time footgun: produces files unreadable without out-of-band schema. No call-site guard; doc-comment doesn't warn loudly.",
+      "recommended_fix": "Expand doc-comment to explain that `false` requires out-of-band schema on read; consider whether to drop the knob from the public surface entirely.",
+      "found_by": ["arch"]
+    }
+  ],
+  "disagreements": [],
+  "dropped_re_flags": [
+    {"topic": "MF-001 through MF-006 cycle-1 phase-end must-fix items", "reason": "all resolved in PR-1.3 cycle-1 + cycle-2 inner-loop; verified at source by all 4 reviewers. Marked `[x]` in Resolved phase-end must-fix items table.", "reference": "Resolved phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1"},
+    {"topic": "In-memory ScanSourceRef::Buffer zero-copy (scans.rs:324)", "reason": "covered by Deferred work — assessed not-low-effort in PR-1.2", "reference": "Deferred work entry"},
+    {"topic": "mem::transmute approach in array_bridge.rs", "reason": "covered by Accepted tradeoffs — approach is sound; only the comment-length question remains as a should-fix (retained above)", "reference": "Accepted tradeoffs / r1 traps"},
+    {"topic": "RUSTSEC-2024-0436 + 0BSD in deny.toml", "reason": "covered as cycle-1 should-fix already absorbed into Surprises with plan-row amendment", "reference": "Phase 1 cycle 1 review"},
+    {"topic": "PR-13 architecture (Option B → A via PR-2.6)", "reason": "Phase 2 scope; out of scope to revisit until Phase 2 begins", "reference": "Key decisions row 5"}
+  ],
+  "phase_artifacts": {
+    "summary": "Phase 1 ('Ratify + crates.io transition') of polars-vortex closes coherently at the architectural level after cycle-2 phase-4 retroactive ratification. The cumulative diff covers the 31-commit base + PR-1.1 (crates.io transition + DType::Union arm removal + DType::Variant bail test) + PR-1.2 (Python cache_mode= surface + visitor cfg-gating root-cause fix + 10+ CI-greenup items absorbed) + PR-1.3 (6 phase-end must-fix items + 2 inner-loop must-fix + 2 inner-loop should-fix across 10 work commits in 2 inner-loop cycles). All 6 cycle-1 phase-end must-fix items are verified resolved: MF-001 wraps Vortex sink writer in tokio_handle_ext::AbortOnDropHandle (mirroring IPC sink at ipc/mod.rs:101 — closes outer-task-failure→silent-footer hole); MF-002 forwards producer errors through chunk_tx as Err(vortex_err!(...)) BEFORE bailing (closes producer-error→silent-footer hole); MF-003 replaces u64-as-usize cast with usize::try_from(...).unwrap_or(usize::MAX) at scans.rs:349 mirroring the established clamp at io_sources/vortex/mod.rs:217; MF-004 corrects README field name to segment_cache; MF-005 documents cache_mode= in the README scan_vortex signature; MF-006 aligns set_io_metrics with CSV/IPC/NDJSON 3-of-4 sibling consensus via .ok().unwrap() (cycle-2 inner-loop reroute from cycle-1's reward-hacking comment-only fix). The four settled architectural moves — mem-engine delegates to streaming, single Polars ASYNC Tokio runtime, mem::transmute C-ABI bridge with size+align+length safety triplet, SpecializedColumnPredicate fast path preserved for PR-13 transition — are coherently implemented and unchanged. Cross-bundle consistency on the cache_mode/cache_mode_kind/cache_dedicated_bytes 2-arg pyo3 pair is tight across Python/Rust/.pyi/README. 0 must-fix items in cycle-2. 16 should-fix items (highest-priority: vortex_file_info segment_cache hardcode at scans.rs:336 — divergent IR-time vs streaming-time semantics; pub use ::vortex; can narrow to 5 sub-modules covering the 8 actual paths; producer-error comment overstates the race — actually deterministic per await ordering; scaffolding markers absent on PR-2.6 deletion target + back-compat shim + PR-10 stale reference; .ok().unwrap() BAN-vs-consensus tension worth codifying; long justification comments at sink/builder/array_bridge approaching BAN thresholds). 6 nits. Cumulative deferred items: 6. The integration is coherent, exit criteria all pass, and Phase 2 (PR-13 AExpr pushdown) is unblocked.",
+    "surprises": [
+      {"what": "All 6 cycle-1 phase-end must-fix items were in PRE-EXISTING 31-commit code, not in PR-1.1 or PR-1.2 directly. Two of those (MF-001, MF-002) were silent-data-corruption hazards in the streaming sink writer-task lifecycle that two prior hand-prompted gauntlet passes + per-PR inner-loop reviews missed. Phase 1's retroactive ratification framing delivered as designed.", "how_handled": "Resolved in PR-1.3. Pattern recorded: prior-art-alignment insight (maint lens) produced MF-001; the feature-integration work-shape's highest-leverage insight was vindicated.", "amend_plan": "already-done"},
+      {"what": "PR-1.3's cycle-1 MF-006 fix was a reward-hacking comment-add. Cycle-2 inner-loop caught it via specific code-trace through multi_scan/mod.rs:185-200 + pipeline/initialization.rs:366 + physical_plan/lower_ir.rs:769-775 (single-call-site reality) and routed to the strictly-better .ok().unwrap() fix aligned with CSV/IPC/NDJSON 3-of-4 sibling consensus. Lesson: when adding a justification comment to a silent-error swallow, audit the underlying pattern.", "how_handled": "Resolved cycle-2; documented in PR-1.3 surprises.", "amend_plan": "already-done"},
+      {"what": "PR-1.3's cycle-1 MF-002 fix introduced a build break (`vortex::error::vortex_err!` doesn't resolve in polars-stream). The umbrella `cargo check -p polars --features vortex,cloud,parquet,dtype-full` doesn't include `new_streaming`, so polars-stream's vortex sink code wasn't compiled. Verification gap: the right check is `-p polars-stream --features vortex,cloud`.", "how_handled": "Resolved cycle-2 via `polars_vortex::vortex::error::vortex_err!` through the broad re-export. Recommend adding `cargo check -p polars-stream --features vortex,cloud` to the verification checklist for future PRs touching polars-stream.", "amend_plan": "already-done"},
+      {"what": "Cycle-2 surfaced a pre-existing E0004 build break under `polars-stream --features vortex` (without `cloud`): the Vortex sink Writeable match's `Writeable::Cloud(_)` arm is `#[cfg(feature = \"cloud\")]` on polars-stream's own `cloud` feature, but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Predates PR-1.3.", "how_handled": "Deferred (cumulative deferred 6). Tracked for Phase 2 cleanup or follow-up PR.", "amend_plan": "already-done"},
+      {"what": "Correctness lens traced the producer/writer error-path race exhaustively and verified the Deferred work entry 'Vortex sink producer/writer error-path determinism polish' MIS-CHARACTERIZES the behavior. The producer's `.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs, so the producer's PolarsError always propagates first; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. Producer-Err path is deterministic; only error-message-WORDING is what the Deferred entry was trying to characterize as 'race-y' but it's not race-y in user-visible behavior.", "how_handled": "Not yet — captured as should-fix above to update both the inline comment and the Deferred work entry. Trivial doc-only correction.", "amend_plan": "yes"},
+      {"what": "`pub use ::vortex;` re-export WIDENED via PR-1.3's MF-002 fix introducing a macro dependency (`vortex::error::vortex_err!`). Macros from external crates have looser stability contracts than function signatures, so this is a regression on the layering concern cycle-1 already flagged. But the narrowing recommendation still works WITH the macro because macros are re-exported by module — `pub mod vortex { pub use ::vortex::{array, error, file, io, session}; }` covers every actual use including the macro.", "how_handled": "Captured as should-fix above with concrete narrowing recommendation.", "amend_plan": "no"},
+      {"what": "Plan-row PR-1.2 'Files touched (expected)' field still lists 4 files; actual is ~30. Cycle-1 should-fix #1 noted this; PR-1.3 didn't address (must-fix-only). Implementation status carries the truth; the 'expected' field is documentation-completeness drift.", "how_handled": "Captured as nit above. Low priority.", "amend_plan": "no"},
+      {"what": "Phase 1 exit criteria row 184 still reads '65 Rust tests' / '8 Python tests' — actual is 66 / 10. Cycle-1 should-fix with `Amend plan: yes`; not updated across two cycles. Stale numbers will carry into Phase 2 planning unless fixed.", "how_handled": "Captured as should-fix above. Plan-edit before Phase 2 entry.", "amend_plan": "yes"}
+    ],
+    "coverage": {
+      "tested_cases": [
+        {"case": "All 6 cycle-1 phase-end must-fix items verified resolved at source by all 4 reviewers", "test_location": "Resolved phase-end must-fix items table — Phase 1 cycle 1 (rows 1-6 all marked [x])", "confidence": "high"},
+        {"case": "Cache_mode dispatch consistency across Python/Rust/.pyi/README", "test_location": "Cross-bundle grep confirms identical naming and types (cache_mode_kind: &str, cache_dedicated_bytes: Option<u64>) at general.rs:343-365 + functions.py:186-217 + _plr.pyi + README.md:325-332", "confidence": "high"},
+        {"case": "VortexCacheMode::{Global, Off, Dedicated} resolve semantics", "test_location": "crates/polars-vortex/src/read/options.rs:81-131 (three unit tests asserting Arc::ptr_eq behaviors)", "confidence": "high"},
+        {"case": "C-ABI bridge size_of + align_of asserts + runtime length parity (both directions)", "test_location": "crates/polars-vortex/src/read/array_bridge.rs:143-144,175 + write/array_bridge.rs:40-43", "confidence": "high"},
+        {"case": "Channel-Err capacity bound (no deadlock for tx.send(Err(...)))", "test_location": "Verified via futures::channel::mpsc::channel(n) capacity semantics: n + num_senders slots", "confidence": "high"},
+        {"case": "No-second-runtime invariant", "test_location": "session.rs:40-49 (Handle from ASYNC); sink mod.rs:163,111 (ASYNC.spawn + async_executor::spawn)", "confidence": "high"},
+        {"case": "All-reads-via-PolarsInstrumentedVortexReadAt invariant", "test_location": "crates/polars-vortex/src/read/read_at.rs:106-164 (three factory functions: local/cloud/in-memory all wrap)", "confidence": "high"},
+        {"case": "row_count clamp is symmetric across read sites + write strategy", "test_location": "scans.rs:349 + io_sources/vortex/mod.rs:217 + write/strategy.rs:26-29 (three sites converged on the same shape)", "confidence": "high"},
+        {"case": "Roundtrip read/write + filter/projection-pushdown + negative-slice", "test_location": "py-polars/tests/unit/io/test_vortex.py:55-132 + crates/polars-vortex/tests/roundtrip.rs", "confidence": "high"}
+      ],
+      "untested_cases": [
+        {"case": "Vortex sink producer-error end-to-end regression (Python-level)", "priority": "high", "why_untested": "Deferred. Python-level test (~30 LoC) would catch MF-001/MF-002 against future refactor regression; smaller scope than the Rust-level harness also deferred."},
+        {"case": "vortex_file_info honors VortexScanOptions::segment_cache", "priority": "high", "why_untested": "Carry-forward should-fix; PR-1.3 scoped out. Phase 2 prerequisite or Phase 1.4 cleanup."},
+        {"case": "set_vortex_cache_bytes(True/1.5/-1) Python validation", "priority": "low", "why_untested": "Carry-forward cycle-1 should-fix; inconsistent with cache_mode= validator hygiene."},
+        {"case": "Empty DataFrame (0-col) write/read roundtrip exercising n_chunks==0 early-return", "priority": "medium", "why_untested": "Carry-forward; trivial scope but no test added."},
+        {"case": "32-bit platform regression on row_count + rbs clamps", "priority": "low", "why_untested": "CI doesn't run 32-bit targets; defensive only."},
+        {"case": "Multi-file scan + schema-evolution + nested-type + small-int dtype coverage", "priority": "medium", "why_untested": "Phase 3 scope per plan."},
+        {"case": "polars-stream --features vortex (without cloud) E0004 build break", "priority": "low", "why_untested": "Pre-existing; deferred. Phase 2 cleanup."},
+        {"case": "Hard cache hit/miss counters (Moka API limitation)", "priority": "low", "why_untested": "Moka doesn't expose stats; deferred."}
+      ],
+      "recommendations": "Phase 2 entry should land a 'Phase 2.0 housekeeping' sub-PR addressing the top 3-4 should-fix items: (1) vortex_file_info segment_cache thread (5-line fix; closes the divergent semantics); (2) narrow `pub use ::vortex;` to 5 sub-modules (mechanical; tightens the layering BAN's machine-checkability); (3) inline the `read::metadata` back-compat shim (2-minute fix, one caller); (4) update plan-row 184 stale exit-criteria numbers (durable plan-edit). Then add the Python-level Vortex sink regression test for MF-001/MF-002 as part of PR-2.1's prerequisite hygiene. Phase 3 takes the broader test-coverage push (Rust-level streaming harness, multi-file, schema-evolution, nested-type, small-int dtypes, read_vortex parameter symmetry). Phase 4 polish: 32-bit overflow regression tests, deny.toml audit, set_global_cache_bytes Arc-swap semantics tests, SAFETY-comment trims."
+    },
+    "tradeoffs": [
+      {"decision": "Reuse existing 31 commits vs rewrite from scratch", "original": "Reuse — 73 tests passing locally; two prior gauntlet review passes already surfaced + fixed substantive bugs", "verdict": "keep", "rationale": "Cycle 2 firms up keep. Net of 6 cycle-1 + 2 cycle-2-inner-loop must-fix items emerging from the 4-vote review IS the most-skeptical case for rewrite — and even that math favors reuse: 8 bounded mechanical fixes (~10 commits in PR-1.3) vs. weeks of feature-parity work in a rewrite. Architectural coherence of the inherited foundation is sound; the four settled moves are well-implemented at the chosen seams. A rewrite of this size would generate a similar 8-must-fix curve under the same review discipline."},
+      {"decision": "Work shape — feature-integration; Analogous prior art", "original": "Many touch points; analogous prior art as highest-leverage insight", "verdict": "keep", "rationale": "Cycle-2 maint review found cross-bundle consistency TIGHTENED post-PR-1.3 (README↔Rust↔Python on cache_mode = aligned). The prior-art-alignment insight produced MF-001 (IPC sink AbortOnDropHandle) and the .ok().unwrap() sibling-consensus fix. Cycle-1's revisit-but-keep verdict can now firmly transition to keep — the prior-art-alignment gap that prompted the revisit (read_vortex/scan_vortex asymmetry) is the one outstanding work-shape concern, deferred to Phase 3 with concrete fix path."},
+      {"decision": "CI green-up approach — crates.io vortex = '0.70.0'", "original": "Replace path-dep with version-pinned crates.io", "verdict": "keep", "rationale": "Unchanged. PR-1.1 transitioned cleanly; cycle-2 sees no regressions. The transitive arrow-* major version coupling deserves an upgrade-runbook comment (cycle-1 should-fix carries forward) but the decision itself is sound."},
+      {"decision": "Final phase plan — 4 phases as drafted", "original": "(1) Ratify, (2) PR-13 AExpr pushdown, (3) PR-8 + multi-file, (4) benches/polish", "verdict": "keep", "rationale": "Phase 1's boundaries held cleanly through reject+fix cycle. PR-1.2's scope-creep absorption and PR-1.3's 33% inner-loop scope growth are sub-PR-declaration lessons, not phase-split lessons. Phase 2 entry should pre-budget for cross-cutting CI-greenup AND for fixup-PR inner-loop discovery (~30% scope-creep observed pattern)."},
+      {"decision": "PR-13 architecture — Option B → A via PR-2.6 cutover", "original": "Parallel paths first, delete fast path last", "verdict": "keep", "rationale": "Unchanged by Phase 1; Phase 2 scope. SpecializedColumnPredicate fast path at predicate.rs (498 LoC) is contained; PR-2.6 deletion mechanics tractable. Scaffolding-marker should-fix on predicate.rs is the natural Phase 2 entry housekeeping."},
+      {"decision": "PR-8 leads Parquet on table_statistics", "original": "Lead the pattern, no API change (Phase 3 scope)", "verdict": "keep", "rationale": "Unchanged. The mem-engine Vortex branch at lp.rs:448-459 will be REFINED in PR-3.1 (file-level table_statistics pruning fires; internal pruning stays disabled) — design unchanged, just extended."},
+      {"decision": "Per-phase review-counts — 4 / 4 / 4 / 4", "original": "Max thoroughness; phase-4 preset on every phase-end", "verdict": "keep", "rationale": "Cycle-1's revisit-but-keep is REVERSED to firm keep by cycle-2 evidence. Cycle-2's adversarial pass over PR-1.3 caught the cycle-1 MF-006 comment-add reward-hack AND the vortex_err! build break under non-umbrella feature combos — both findings emerged from the second adversarial pass over the same artifact. The 25%-extra cost over 3-vote is small compared to catching arch-vs-impl drift at every checkpoint. Phases 2-3 will deliver NEW code with novel architectural shapes; 4-vote is the calibrated cost."},
+      {"decision": "Single Tokio runtime (Polars ASYNC) for Vortex async work", "original": "Avoid doubling thread-pool overhead", "verdict": "keep", "rationale": "Verified at cycle 2 — sound; session.rs implements correctly with LazyLock-wrapped EXECUTOR + VortexSession::default().with_handle(...) pattern. No second runtime detected anywhere in the diff."},
+      {"decision": "mem::transmute between Arrow FFI structs with size+align+length triplet", "original": "Compile-time asserts + runtime length check provide safety", "verdict": "keep", "rationale": "Phase 1 didn't touch transmute call-sites. The comment-length should-fix (cycle-1 + cycle-2 arch) is about prose, not approach — compress comments, keep the approach."},
+      {"decision": "Sorting ColumnPredicates::predicates by column name for deterministic AND-collect", "original": "Deterministic ordering is a reproducibility guarantee", "verdict": "keep", "rationale": "Confirmed at predicate.rs:50 via sort_by_key(|(name, _)| name.as_str())."},
+      {"decision": "create_skip_batch_predicate = false for Vortex at planner/lp.rs:448-459", "original": "Vortex's LayoutReader::pruning_evaluation handles zone-level pruning", "verdict": "keep", "rationale": "Branch present and well-documented. Phase 3 PR-8 will REFINE (add file-level table_statistics pruning while keeping internal pruning disabled) — design extension, not change."},
+      {"decision": "hashbrown 0.16 (Polars) + 0.17 (Vortex transitive) coexistence", "original": "BAN against bare PlHashMap::new() is established workaround", "verdict": "keep", "rationale": "Cycle-2 BAN compliance verified across the diff. The #[allow(clippy::disallowed_types)] on polars_chunk_to_upstream_record_batch for the upstream-arrow boundary is the right complementary pattern."},
+      {"decision": "PolarsInstrumentedVortexReadAt mandatory wrapping", "original": "Local/cloud/in-memory all route through it", "verdict": "keep", "rationale": "Verified at all three sites (local_file_read_at, cloud_read_at, in_memory_read_at)."},
+      {"decision": "row_count: usize::try_from(u64).unwrap_or(usize::MAX) clamp pattern", "original": "32-bit edge case clamp", "verdict": "keep", "rationale": "Three sites now converged on the same shape (scans.rs:349 + io_sources/vortex/mod.rs:217 + write/strategy.rs:26-29). Cycle-1's revisit-but-keep verdict is now firmly keep. Note: the write-time application at strategy.rs has the cycle-1 should-fix recommendation to error loudly (vs the read-time clamp); captured as should-fix above for Phase 2 re-evaluation."},
+      {"decision": "`pub use ::vortex;` (broad upstream re-export at lib.rs:18)", "original": "Re-export entire upstream Vortex API so downstream Polars crates don't need a direct vortex dep", "verdict": "revisit-but-keep", "rationale": "Cycle-1 arch should-fix; cycle-2 WIDENED via MF-002's macro dependency. Audit shows actual surface is 8 paths across 5 sub-modules — narrowing covers every use including the macro. Re-export shape stays (downstream stable surface); width narrows. Mechanical 1-commit change suitable for Phase 2 entry."}
+    ]
+  },
+  "executive_summary": "Phase 1 ('Ratify + crates.io transition') ACCEPTS at cycle 2. All 4 reviewers (spec, correctness, maint, arch) reach `accept`. 0 must-fix items, 11 should-fix, 6 nits across 17 unified findings (after dedupe). The cumulative Phase-1 artifact — 31-commit base + PR-1.1 (crates.io transition) + PR-1.2 (Python cache_mode= surface + visitor cfg-gating + 10+ CI-greenup items) + PR-1.3 (6 phase-end must-fix items + 2 inner-loop must-fix + 2 inner-loop should-fix across 10 work commits) — is architecturally coherent and correctness-sound. All 6 cycle-1 phase-end must-fix items are verified resolved at source by all 4 reviewers (Resolved phase-end must-fix items table has all rows marked [x]). The four settled architectural moves (mem-engine delegates to streaming; single Polars ASYNC Tokio runtime; mem::transmute C-ABI bridge with size+align+length safety triplet; SpecializedColumnPredicate fast path preserved) are intact. Cross-bundle consistency on cache_mode is tight. The MF-001/MF-002 silent-truncation hazards are closed; correctness lens traced the producer/writer error-path lifecycle exhaustively and verified deterministic behavior (producer error always wins via await ordering — incidentally revealing that the Deferred work entry overstates the race, captured as a should-fix doc-update).\n\n**Key surprises**: (a) cycle-1 reward-hacking on MF-006 was caught and routed to a strictly-better fix in cycle-2 inner loop — process lesson recorded; (b) cycle-1 verification gap on the `vortex_err!` build break revealed that `cargo check -p polars` (umbrella) does NOT activate polars-stream's vortex code without `new_streaming` — recommend adding `-p polars-stream --features vortex,cloud` to the verification checklist; (c) the `pub use ::vortex;` re-export WIDENED via the macro dependency but the 5-sub-module narrowing still works (macros re-export by module).\n\n**Critical tradeoff verdicts**: REUSE 31 COMMITS → firm KEEP (8 must-fix items emerging from cycle-1+2 is the most-skeptical case for rewrite and even that favors reuse). 4/4/4/4 REVIEW COUNTS → firm KEEP (cycle-2's adversarial second pass caught the MF-006 reward-hack + the build break — neither would have surfaced under 3-vote). FEATURE-INTEGRATION WORK SHAPE → KEEP (prior-art alignment tightened; the read_vortex/scan_vortex asymmetry remains as one Phase 3 carry-forward). `pub use ::vortex;` → REVISIT-BUT-KEEP (narrow to 5 sub-modules in Phase 2 entry).\n\n**Top should-fix recommendations for Phase 2 entry housekeeping**: (1) thread `VortexScanOptions::segment_cache` through `vortex_file_info` at scans.rs:336 (5-line fix; closes the divergent IR-time vs streaming-time semantics that partial-honors `cache_mode='off'`); (2) narrow `pub use ::vortex;` to 5 sub-modules (mechanical, tightens layering BAN's machine-checkability); (3) update Deferred work entry to reflect actual error-path determinism; (4) update Plan-row 184 stale 65/8 test count to actual 66/10; (5) inline `read::metadata` back-compat shim (one caller; 2-minute fix); (6) add `cargo check -p polars-stream --features vortex,cloud` to verification checklist.\n\nThe phase-end checkpoint is the right moment for the user to decide between (a) proceeding to Phase 2 (PR-13 AExpr pushdown) directly, (b) inserting a Phase 1.4 cleanup PR for the top should-fix items, (c) amending Phase 1 to absorb the cleanup before moving on, or (d) pausing and resuming in a fresh session.",
+  "overall": "accept",
+  "must_fix_count": 0,
+  "should_fix_count": 11,
+  "nit_count": 6
 }
 
 ```
