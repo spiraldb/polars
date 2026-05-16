@@ -5,7 +5,7 @@
 ## Current State
 
 ```yaml
-status: executing
+status: awaiting-review
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
@@ -23,7 +23,7 @@ phase_entry_sha: 657c78c97
 phase_end_cycle: 1
 phase_end_reject_cycles: 0
 last_phase_end_verdict: reject
-last_commit: 530c963b0
+last_commit: 850c06d47
 ```
 
 ## Context
