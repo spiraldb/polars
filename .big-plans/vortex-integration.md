@@ -5,17 +5,17 @@
 ## Current State
 
 ```yaml
-status: executing
+status: awaiting-review
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: PR-1.4
 pr_index: 5
-outstanding_must_fix: 2
+outstanding_must_fix: 0
 deferred_items_total: 6
 last_user_touchpoint: 2026-05-16T15:00:00Z
-last_user_touchpoint_what: "re-open PR-1.4 for CI fix (rustfmt + typos detected at phase-boundary before cycle-3 gauntlet)"
+last_user_touchpoint_what: "PR-1.4 CI-reopen fixes committed (rustfmt + typos); invoking gauntlet preset=pr-2"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 15
 review_cycles_this_pr: 0
@@ -24,7 +24,7 @@ phase_end_cycle: 2
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: true
-last_commit: 7eaf4e2fe
+last_commit: 0a71bc2f4
 ```
 
 ## Context
