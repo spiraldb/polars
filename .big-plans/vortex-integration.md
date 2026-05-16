@@ -20,9 +20,9 @@ subagent_invocations_this_pr: 1
 subagent_invocations_total: 10
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
-phase_end_cycle: 0
+phase_end_cycle: 1
 phase_end_reject_cycles: 0
-last_phase_end_verdict: null
+last_phase_end_verdict: reject
 last_commit: 530c963b0
 ```
 
@@ -354,6 +354,767 @@ Living ledger — populated by inner-loop and phase-end reviews.
 - **Surprises during implementation**:
   - vortex 0.70.0 doesn't expose `DType::Union` (the local Vortex workspace's `0.1.0` did); fix was a single-arm removal in `schema.rs`. `DType::Variant` is in 0.70.0 — the original PR-1.1 fix incorrectly removed both arms; rolled back to keep `Variant`.
   - The `GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false` env-shim is no longer required (user notified 2026-05-15 mid-cycle). Memory `polars_build_tips.md` + plan BAN updated. Plan-commit `79a9ecdbf` strikethrough'd the BAN.
+
+## Pending phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1
+
+| Severity | File:line | Description | Implicated PR | Resolved |
+|----------|-----------|-------------|---------------|----------|
+| must-fix | `crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:135-146` | Vortex sink's `write_handle = ASYNC.spawn(...)` returns a bare tokio::task::JoinHandle, not wrapped in `tokio_handle_ext::AbortOnDropHandle`. Divergent from the IPC sink (ipc/mod.rs:101-112) which DOES wrap. If the ou... | <blank> | [ ] |
+| must-fix | `crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:113-128` | Silent data corruption: when `dataframe_to_vortex_chunks(&df)?` returns Err inside the producer task, `?` propagates the error and drops `tx` (the chunk channel). The writer task's `ArrayStreamAdapter` sees channel cl... | <blank> | [ ] |
+| must-fix | `crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:345` | `let row_count = vxf.row_count() as usize;` violates the explicit project BAN: 'No `as`-cast `u64 → usize` on row counts. Use `usize::try_from(row_count).unwrap_or(usize::MAX)`'. On 32-bit platforms with Vortex files ... | <blank> | [ ] |
+| must-fix | `crates/polars-vortex/README.md:297` | README documents the Rust struct field as `pub cache: VortexCacheMode` but the actual field is `pub segment_cache: VortexCacheMode` (read/options.rs:28). The rename was intentional (read/options.rs:26-27 comment expla... | <blank> | [ ] |
+| must-fix | `crates/polars-vortex/README.md:325-332` | The documented `pl.scan_vortex(...)` signature in the README is missing the `cache_mode=` parameter that PR-1.2 shipped — the headline new public-API surface of this phase. README is the canonical reference doc and is... | <blank> | [ ] |
+| must-fix | `crates/polars-stream/src/nodes/io_sources/vortex/builder.rs:49` | `let _ = self.io_metrics.set(io_metrics);` silently swallows the `Err(io_metrics)` returned by `OnceLock::set` when called twice. Violates the project BAN: 'Silent error swallowing: `let _ = fallible_op()` ... without... | <blank> | [ ] |
+
+## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 1) — rejected (4-vote)
+
+**Synthesizer output from `/spiral:gauntlet` (`preset=phase-4`, lenses=`spec`+`correctness`+`maint`+`arch`); full Synthesizer Output JSON in the `<details>` block at the end of this section.**
+
+### Executive summary
+
+Phase 1 ('Ratify + crates.io transition') of the polars-vortex integration is the cumulative 31-commit base plus PR-1.1 (path-dep → crates.io `vortex = "0.70.0"`), PR-1.2 (Python `cache_mode=` surface + visitor cfg-gating root-cause fix + CI greenup absorption — 10+ items including ruff/dprint/mypy stubs/cargo fmt sweep across 19 files/cargo deny 0BSD + RUSTSEC-2024-0436/dsl-schema hashes), and the implicit ratification of the four settled architectural moves (mem-engine delegates to streaming; single Tokio runtime via Polars' global ASYNC; C-ABI bridge via mem::transmute with size+align asserts + runtime length check; SpecializedColumnPredicate fast path preserved). Reviewed by 4 lenses (spec, correctness, maint, arch) per the phase-4 preset.
+
+The review surfaces 6 must-fix items concentrated in 4 areas:
+(a) silent data-corruption hazards in the PRE-EXISTING streaming sink writer-task lifecycle: `write_handle = ASYNC.spawn(...)` is not wrapped in `AbortOnDropHandle` (divergent from IPC sink which does wrap), and the producer task drops `tx` on error rather than forwarding the Err — both paths produce valid-looking-but-truncated Vortex files on disk;
+(b) a `u64 as usize` BAN violation at `dsl_to_ir/scans.rs:345` inconsistent with the BAN-compliant clamp at the matching streaming-source site `io_sources/vortex/mod.rs:217`;
+(c) README documentation drift: documented field name `cache` vs actual `segment_cache`, and the documented `scan_vortex` signature missing the new `cache_mode=` parameter (the headline new API surface of this phase);
+(d) one silent error swallow `let _ = self.io_metrics.set(...)` at `builder.rs:49` without rationale comment.
+
+Notable surprises also include: `vortex_file_info` at `scans.rs:336` hardcodes the global segment cache for schema discovery (user's `cache_mode='off'` is silently ignored at that read — captured as should-fix); write-side has zero direct unit tests; `time_extension_days_unit_errors` asserts nothing; `set_global_cache_bytes` (public Python API via `set_vortex_cache_bytes`) has zero functional tests and undocumented mid-scan transient-memory semantics.
+
+Key tradeoffs revisited: (1) per-phase review-counts (4/4/4/4) revisit-but-keep — this 4-vote Phase-1 review's bug-find rate justifies the cost retrospectively, but arch's case that Phases 2-3 (focused new work) could use 3-vote is worth re-evaluating at Phase 4 entry. (2) Work shape (feature-integration) revisit-but-keep — the prior-art-alignment insight directly produced correctness finding 1 (AbortOnDropHandle missing because IPC sink does wrap), vindicating the shape; but `pl.read_vortex` vs `pl.scan_vortex` surface is asymmetric vs the `read_parquet`/`scan_parquet` template. (3) Final phase plan (4-phase) revisit-but-keep — boundaries hold; future phases should pre-declare any CI-greenup as a separate sub-PR rather than absorbing.
+
+Verdict split: spec and arch ACCEPT on their own lens scope (no must-fix from their lenses); correctness and maint REJECT (3 + 4 must-fix from their lenses, with 1 overlap). Conservative-union synthesis is REJECT with 6 must-fix items going into PR-1.3, plus 28 should-fix items and 13 nits captured for Phase 2-4 absorption.
+
+### Summary of changes
+
+Phase 1 ratifies the cumulative 31-commit vortex-integration branch and ships two new PRs (PR-1.1 + PR-1.2) plus an absorbed CI-greenup. Organized by concept:
+
+(1) CRATES.IO TRANSITION (PR-1.1, 2 commits, ending `018f2ce43`): workspace Cargo.toml switched from path-dep `vortex = { path = "../../../../vortex/vortex", ... }` to `vortex = { version = "0.70.0", default-features = false, features = ["files", "tokio"] }`. Cargo.lock refreshed. Single API-drift fix in `crates/polars-vortex/src/read/schema.rs`: the `DType::Union(_)` arm was removed (Vortex 0.70.0 doesn't expose it; the local-workspace 0.1.0 did). `DType::Variant(_)` was retained with a clear bail-with-message and a new test `variant_dtype_errors_with_clear_message`. The `GIT_CONFIG_GLOBAL=...` env-shim is no longer required after the path-dep removal. Clean, single-arm transition.
+
+(2) PYTHON CACHE-MODE SURFACE (PR-1.2): `pl.scan_vortex(..., cache_mode=...)` and `pl.read_vortex(..., cache_mode=...)` accept `Literal['global', 'off'] | int | None`. Python helper `_resolve_cache_mode` at `py-polars/src/polars/io/vortex/functions.py:186-217` dispatches to a 2-arg pyo3 pair `(cache_mode_kind: &str, cache_dedicated_bytes: Option<u64>)`; pyo3 `new_from_vortex` at `crates/polars-python/src/lazyframe/general.rs:336-372` matches into the Rust `VortexCacheMode::{Global, Off, Dedicated(N)}` enum. Bool/float/u64-overflow rejection paths are tested. Dispatch mirrors the `parse_parquet_compression` precedent — strong prior-art alignment. The Python resolver's return type was narrowed to `tuple[Literal['global', 'off', 'dedicated'], int | None]` post-review.
+
+(3) VISITOR CFG-GATING ROOT-CAUSE FIX (PR-1.2): `crates/polars-python/Cargo.toml:53` moved `serde_json` from `optional = true` (gated on the `json` feature) to non-optional. The visitor `scan_type_to_pyobject` arms for csv/parquet/vortex use `serde_json::to_string` regardless of the `json` feature. Fix at the dep-declaration layer rather than at the source-edit layer originally planned.
+
+(4) CI GREEN-UP ABSORBED (10+ items in PR-1.2): ruff (4 lints), dprint (.big-plans/ exclude + README emphasis + README table alignment), cargo fmt sweep across 19 polars-vortex files, mypy stubs added to `_plr.pyi`, mypy redundant-expr in `_resolve_cache_mode`, clippy `approx_constant` (predicate.rs:293 literal 3.14 → 2.5), cargo deny `0BSD` license + `RUSTSEC-2024-0436` (paste unmaintained — transitive via Vortex), dsl-schema feature wiring + 4 new hashes in `crates/polars-plan/dsl-schema-hashes.json`. Tests added: `test_cache_mode_accepts_all_valid_inputs` (4 valid inputs) and `test_cache_mode_rejects_invalid_inputs` (5 invalid inputs).
+
+What's at risk (6 must-fix items):
+- Two silent-data-corruption hazards in the PRE-EXISTING streaming sink writer-task lifecycle (AbortOnDropHandle missing; producer error not forwarded).
+- A `u64 as usize` BAN violation at `dsl_to_ir/scans.rs:345` inconsistent with the matching streaming-source pattern at `io_sources/vortex/mod.rs:217`.
+- README documentation drift: field name `cache` vs actual `segment_cache`; documented `scan_vortex` signature missing the new `cache_mode=` parameter.
+- One silent error swallow `let _ = self.io_metrics.set(...)` in pre-existing streaming-source builder code.
+
+These 6 items concentrate in 4 areas (streaming-sink lifecycle; row_count cast; README docs; silent error swallow) and are all fixable in a focused PR-1.3.
+
+### Surprises and discoveries
+
+- **Vortex streaming sink's `write_handle = ASYNC.spawn(...)` is NOT wrapped in `tokio_handle_ext::AbortOnDropHandle`, divergent from the IPC sink (ipc/mod.rs:101-112) which DOES wrap. On outer-task failure, the writer task continues, sees the closed chunk channel as clean EOS, and produces a truncated-but-valid-looking Vortex file.**
+  - How handled: Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.
+  - Amend plan: `yes`
+- **Producer task at `vortex/mod.rs:113-128` uses `?` to propagate errors from `dataframe_to_vortex_chunks(&df)`. On Err, `tx` is dropped without sending an Err item; the writer task sees the channel close as clean EOS and writes the Vortex footer on truncated data. The channel type `VortexResult<VortexArrayRef>` CAN carry errors but the producer never uses the Err path.**
+  - How handled: Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.
+  - Amend plan: `yes`
+- **`crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:345` uses `vxf.row_count() as usize` while the matching site at `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:217` correctly uses the BAN-compliant `usize::try_from(...).unwrap_or(usize::MAX)`. Inconsistent treatment of the row-count clamp across the two sites that read `vxf.row_count()`.**
+  - How handled: Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.
+  - Amend plan: `yes`
+- **README documents `pub cache: VortexCacheMode` but the actual field is `pub segment_cache: VortexCacheMode`. Rename was intentional (collision avoidance with `ScanArgsVortex::cache: bool`) but the canonical reference doc lags.**
+  - How handled: Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.
+  - Amend plan: `yes`
+- **README's documented Python `scan_vortex(...)` signature is missing the new `cache_mode=` parameter that is the headline new public-API surface of PR-1.2.**
+  - How handled: Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.
+  - Amend plan: `yes`
+- **`crates/polars-stream/src/nodes/io_sources/vortex/builder.rs:49` does `let _ = self.io_metrics.set(io_metrics);` — silently swallows the `Err(io_metrics)` returned by `OnceLock::set` on double-init, with no comment.**
+  - How handled: Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.
+  - Amend plan: `yes`
+- **`vortex_file_info` at `dsl_to_ir/scans.rs:336` hardcodes `session::segment_cache()` for schema discovery, ignoring `VortexScanOptions::segment_cache`. Users passing `cache_mode='off'` still hit the global cache during the postscript read. Streaming-source path correctly threads the option through.**
+  - How handled: Not yet — surfaced in this Phase-1 review.
+  - Amend plan: `yes`
+- **Write-side (`crates/polars-vortex/src/write/{array_bridge,df_to_stream,strategy,sink_writer,writer}.rs`) has zero direct unit tests — only the roundtrip integration catches regressions.**
+  - How handled: Not yet — surfaced in this review.
+  - Amend plan: `no`
+- **Test `time_extension_days_unit_errors` in `schema.rs:429-441` asserts nothing — constructs a Nanoseconds Time, discards it, exits. Anti-help test.**
+  - How handled: Not yet — surfaced in this review.
+  - Amend plan: `no`
+- **PR-1.2's planned scope was ~3-4 polish items; actual scope grew to 10+ items because PR-1.1's crates.io transition unblocked CI which surfaced layered pre-existing failures.**
+  - How handled: Absorbed into PR-1.2; impl-status self-flags. Plan-row PR-1.2 retroactively amended.
+  - Amend plan: `already-done`
+- **The 'visitor feature-gating fix' was originally framed as a `visitor/nodes.rs` source edit; actual fix lives at the Cargo.toml level (`serde_json` non-optional).**
+  - How handled: Plan-row corrected at commit `c42274a6a`.
+  - Amend plan: `already-done`
+- **Vortex 0.70.0 has `DType::Variant` (retained with bail-arm) but lacks `DType::Union` (which the local-workspace 0.1.0 had).**
+  - How handled: Single-arm removal; new test for Variant bail.
+  - Amend plan: `already-done`
+- **Phase 1 exit criteria say '65 Rust tests' / '8 Python tests' but actual is 66 / 10 (PR-1.1 added 1 Rust test; PR-1.2 added 2 Python tests).**
+  - How handled: Impl-status records the correct counts; phase-row text wasn't updated.
+  - Amend plan: `yes`
+- **Deny.toml gained an undocumented `RUSTSEC-2024-0436` (paste) ignore alongside the planned 0BSD addition.**
+  - How handled: Commit `9dbb23c62` added the ignore; plan PR-1.2 row didn't enumerate.
+  - Amend plan: `yes`
+- **In-memory `ScanSourceRef::Buffer` zero-copy assessed and properly deferred (not-low-effort).**
+  - How handled: Plan-commit `2c9abdf4e`.
+  - Amend plan: `already-done`
+- **`set_global_cache_bytes` is a public Python API (via `set_vortex_cache_bytes`) with zero functional tests. Concurrent invocation against in-flight scans has undocumented transient-memory semantics.**
+  - How handled: Not yet — surfaced in this review.
+  - Amend plan: `no`
+- **`pl.read_vortex` is missing parameters that `pl.scan_vortex` exposes. Prior-art-alignment with `pl.read_parquet` / `pl.scan_parquet` is partial.**
+  - How handled: Not yet — surfaced in this review.
+  - Amend plan: `no`
+- **Scaffolding markers are largely absent (predicate.rs is scheduled for PR-2.6 deletion but no inline marker; read/mod.rs back-compat shim has no deletion date; write/mod.rs:4 references PR-10 with no link).**
+  - How handled: Not yet — surfaced in this review.
+  - Amend plan: `no`
+
+
+### Testing coverage assessment
+
+**Tested cases:**
+
+| Case | Test location | Confidence |
+|------|---------------|------------|
+| `DType::Variant` produces clear bail error | `crates/polars-vortex/src/read/schema.rs:243-258` | high |
+| `cache_mode=None`/'global'/'off'/positive int accepted | `py-polars/tests/unit/io/test_vortex.py:135-148` | high |
+| `cache_mode=0`/`-5` raise ValueError | `py-polars/tests/unit/io/test_vortex.py:157-160` | high |
+| `cache_mode='invalid'` raises TypeError | `py-polars/tests/unit/io/test_vortex.py:163-164` | high |
+| `cache_mode=True/False` raise TypeError (bool guard) | `py-polars/tests/unit/io/test_vortex.py:170-173` | high |
+| `cache_mode=1.5` raises TypeError | `py-polars/tests/unit/io/test_vortex.py:176-177` | high |
+| `cache_mode=2**64` raises OverflowError | `py-polars/tests/unit/io/test_vortex.py:181-182` | high |
+| VortexCacheMode::Global/Off/Dedicated resolve semantics | `crates/polars-vortex/src/read/options.rs:81-131` | high |
+| C-ABI bridge size_of + align_of asserts (both directions) + runtime length parity | `crates/polars-vortex/src/read/array_bridge.rs:143-144,175 + write/array_bridge.rs:40-43` | high |
+| Predicate convertor for Equal/Between/EqualOneOf/StartsWith/EndsWith/RegexMatch and primitives/temporal/decimal | `crates/polars-vortex/src/read/predicate.rs:286-500` | high |
+| Decimal precision/scale overflow + negative-scale rejection | `crates/polars-vortex/src/read/predicate.rs:391-398 + schema.rs:311-323` | high |
+| DType→ArrowDataType mapping for all supported dtypes | `crates/polars-vortex/src/read/schema.rs:178-505` | high |
+| Roundtrip read/write for primitives, nullable, utf8, binary, datetime+tz, decimal, lists, structs | `crates/polars-vortex/tests/roundtrip.rs` | high |
+| Python read/write roundtrip + filter / projection-pushdown / negative-slice | `py-polars/tests/unit/io/test_vortex.py:55-132` | high |
+| `PolarsInstrumentedVortexReadAt` forwards reads + records IOMetrics | `crates/polars-vortex/src/read/read_at.rs:221-280` | medium |
+
+**Untested cases (priority-ranked):**
+
+| Case | Priority | Why untested |
+|------|----------|--------------|
+| Vortex streaming sink producer-error silent-truncation (the must-fix bug at mod.rs:113-128) | high | No Rust-level streaming-sink tests; no Python test asserts file completeness or non-existence on producer-error paths. The two must-fix concurrency bugs would not be caught by any existing test. |
+| Vortex sink writer-task abort propagation when outer task fails (must-fix at mod.rs:135-146) | high | Same Rust-test gap. |
+| Vortex sink with non-bridgeable column type | high | Natural integration test to catch the must-fix silent-truncation bug — none exists. |
+| `set_global_cache_bytes` functional behavior (Arc-swap semantics + transient-memory) | high | Public Python API with zero test scaffolding. |
+| Concurrent `set_global_cache_bytes` + in-flight scan (old-cache lifetime) | high | No race-test scaffolding; semantics undocumented. |
+| `vortex_file_info` honors `VortexScanOptions::segment_cache` (currently doesn't — should-fix arch finding) | high | Discovered during this review. |
+| `as usize` cast at scans.rs:345 on a >2^32-row file (32-bit truncation) | medium | 32-bit platform tests not run in CI. |
+| Rust-level `new_from_vortex` dispatch arms (`('global', None)`, `('off', None)`, `('dedicated', Some(N))`, defensive `('dedicated', None)` + `(other, _)`) | medium | Deferred per plan; pyo3 dispatch is sole entry-point from Python. |
+| Visitor cfg-gating regression test (vortex built without `json` feature) | medium | No feature-matrix CI step added. |
+| Empty DataFrame (0-row, 0-column) write/read round-trip | medium | `dataframe_to_vortex_chunks` has a 0-chunk early-return path that is uncovered. |
+| Categorical/Enum → UTF-8 write fallback (README claim at line 374-375) | medium | README documents the behavior but no test verifies it. |
+| Write-side `polars_chunk_to_upstream_record_batch` field-metadata preservation in isolation | medium | Write-side unit tests entirely missing. |
+| Multi-file scan with mixed local + cloud sources + shared cache | medium | Deferred to Phase 3. |
+| Rust-level streaming source/sink integration tests (general) | medium | Deferred to Phase 3. |
+| set_vortex_cache_bytes(True), (1.5), (-1) Python-side rejection (inconsistent with cache_mode validator) | low | No validation exists in Python at this site. |
+| Hard cache hit/miss counters | low | Moka's Cache doesn't expose stats. Deferred. |
+| In-memory Buffer zero-copy semantics (scans.rs:324, io_sources/vortex/mod.rs:95) | low | Deferred per 'if low-effort' clause; not-low-effort assessment recorded. |
+
+**Recommendations:** Highest-leverage additions for PR-1.3 (Phase 1 must-fix fixup PR): (1) a Rust integration test for the streaming Vortex sink simulating producer error — this single test would catch both must-fix concurrency bugs once they're fixed; (2) a unit test for `vortex_file_info` honoring the user's `segment_cache` choice (covers the should-fix arch finding); (3) a unit test for `set_global_cache_bytes` Arc-swap semantics; (4) replace the assertion-free `time_extension_days_unit_errors` test; (5) empty-DataFrame round-trip. Defer to Phase 3: multi-file scan, broader Rust streaming-sink coverage, Categorical/Enum fallback. Defer to Phase 4: 32-bit platform regression tests, deny.toml audit at merge prep.
+
+
+### Tradeoffs re-evaluation
+
+| Decision | Original choice | Verdict | Rationale |
+|----------|-----------------|---------|----------|
+| Reuse existing 31 commits vs rewrite from scratch | Reuse — 73 tests passing locally; two prior gauntlet review passes already surfaced + fixed substantive bugs | `keep` | All 4 reviewers agree. The 4-vote Phase 1 review IS the verification gate for the reused base, and it surfaced 6 must-fix items concentrated in pre-existing code — exactly the value the gate is meant to deliver. A rewrite would have burned weeks; the must-fix list is bounded and fixable in PR-1.3. |
+| Work shape — feature-integration | feature-integration; Adding Vortex into existing Polars systems with many touch points. Highest-leverage insight: Analogous prior art. | `revisit-but-keep` | Most-pessimistic across lenses. Spec/correctness/arch say keep; maint flags partial prior-art-alignment realization. The cache_mode dispatch IS aligned with `parse_parquet_compression`; the `read_vortex` / `scan_vortex` surface is NOT aligned with `read_parquet` / `scan_parquet` (asymmetric parameter list). Correctness's first finding (AbortOnDropHandle missing because IPC sink does wrap) is ALSO produced by the analogous-prior-art insight — vindicating the work shape. Keep, but close the read/scan-surface asymmetry in Phase 3. |
+| CI green-up approach — crates.io `vortex = "0.70.0"` | Replace workspace path-dep with version = '0.70.0'. Strictly better than git-rev/CI-clone/feature-gating: cleanest dep, no release blocker, version-pinned. | `keep` | All 4 reviewers agree. PR-1.1 transitioned cleanly with a single API-drift fix (DType::Union removal). The transitive arrow-* major version coupling (polars-vortex pinned to `arrow-* = "58"` to match Vortex's transitive) deserves an upgrade-runbook comment (captured as should-fix), but the decision itself is sound. |
+| Final phase plan — 4 phases as drafted | (1) Ratify + crates.io transition, (2) PR-13 AExpr pushdown, (3) PR-8 file-stats + PR-6 multi-file/nested, (4) PR-14 benches + final polish. | `revisit-but-keep` | Most-pessimistic across lenses. Spec/arch want a scoping lesson captured; correctness/maint say keep. The 4-phase structure should hold; Phase 2 entry should pre-declare any CI-greenup as a separate sub-PR rather than absorbing it into a polish PR mid-phase. Phase 1's actual scope grew 3x but the boundary is clean — the lesson is about sub-PR pre-declaration, not about the phase split. |
+| PR-13 architecture — Option B → A via PR-2.6 cutover | Parallel paths in PR-2.2/.3/.4/.5; PR-2.6 deletes the SpecializedColumnPredicate fast path. | `keep` | All 4 reviewers agree. Strategy is mechanically tractable; SpecializedColumnPredicate extraction is contained to a single file (predicate.rs). Captured a should-fix scaffolding-marker finding (predicate.rs needs an inline 'scheduled for PR-2.6 deletion' marker) but the decision itself stands. |
+| PR-8 leads Parquet on `table_statistics` | Lead the pattern, no API change (Phase 3 scope) | `keep` | 3 of 4 reviewers say keep; maint says `no-longer-applicable` (out of scope to evaluate from this phase). Per most-pessimistic enum ordering, `no-longer-applicable` is treated as a non-verdict (lens can't evaluate) and falls behind `keep` from the other 3, so the synthesized verdict is `keep`. No architectural blocker for Phase 3 to populate `UnifiedScanArgs::table_statistics` from the Vortex footer. |
+| Per-phase review-counts — 4 / 4 / 4 / 4 | All four phase-end reviews use the 4-vote phase-4 preset. Max thoroughness. | `revisit-but-keep` | Most-pessimistic across lenses. Spec/correctness/maint say keep (citing this 4-vote review's bug-find rate as direct validation); arch says revisit-but-keep (4-vote may be over-thorough for Phases 2 and 3, which are focused new work rather than cumulative artifacts). The current 4-vote Phase 1 review found 6 must-fix items that prior 2-vote per-PR reviews did not surface — that's the empirical case for keeping the cost. But arch's framing has merit: revisit at Phase 4 entry whether Phases 2 and 3 actually need 4-vote or whether 3-vote would have caught the same items. |
+| Single Tokio runtime (Polars' global `ASYNC`) for Vortex async work | Avoid doubling thread-pool overhead | `keep` | Unchanged by Phase 1. Sound; session.rs implements correctly via Handle::new(Arc::downgrade(Arc::new(ASYNC.handle()) as Arc<dyn Executor>)). |
+| `mem::transmute` between Arrow FFI structs with size+align asserts + runtime length check | Compile-time asserts + runtime length check provide safety; the clean alternative (from_ffi_parts upstream API) is a separate polars contribution | `keep` | Phase 1 didn't touch the transmute call-sites. SAFETY comments are well-written; the should-fix arch finding on read/array_bridge.rs:126 is about the comment LENGTH violating the BAN spirit, not the underlying approach. Compress the comment but keep the approach. |
+| `SpecializedColumnPredicate` fast path preserved during PR-13 transitional phases (Option B) | Option B trajectory: parallel path first, delete fast path last | `keep` | Phase 2 scope; unchanged. |
+| `create_skip_batch_predicate = false` for Vortex | Vortex's pruning_evaluation handles it; explicit branch at polars-mem-engine/src/planner/lp.rs:448-459 | `keep` | Branch is present and well-documented at lp.rs:448-459. Phase 1 didn't touch this. |
+| `hashbrown 0.16` (Polars) + `0.17` (Vortex transitive) coexistence | BAN against bare PlHashMap::new() is the established workaround | `keep` | Phase 1 BAN compliance verified across the diff. |
+| `PolarsInstrumentedVortexReadAt` mandatory wrapping | Local/cloud/in-memory all route through it | `keep` | Verified at all three sites; Phase 1 didn't change the wrapping. |
+| `row_count: usize::try_from(u64).unwrap_or(usize::MAX)` clamp | Accepted: 32-bit edge case clamp at nodes/io_sources/vortex/mod.rs:221 | `revisit-but-keep` | The clamp DECISION is correct at the streaming-source site. Application is INCONSISTENT: the matching IR-build-time site at dsl_to_ir/scans.rs:345 uses `as usize` directly — a BAN violation captured as must-fix in the unified findings. Keep the decision (clamp pattern); revise by applying it consistently to both row-count read sites in PR-1.3. |
+| Sorting `ColumnPredicates::predicates` by column name before AND-collect | Deterministic ordering is a reproducibility guarantee | `keep` | Confirmed at predicate.rs:50. Phase 1 didn't change this. |
+
+
+### Disagreements
+
+- **Topic:** Overall verdict (accept vs reject)
+  - `spec`: accept — zero must-fix from the spec lens; PR-1.1 + PR-1.2 ship declared scope plus documented CI-greenup absorption.
+  - `correctness`: reject — 3 must-fix (2 silent-data-corruption hazards in pre-existing streaming sink writer-task lifecycle; 1 BAN violation on row_count cast).
+  - `maint`: reject — 4 must-fix (1 BAN violation overlapping with correctness; 2 README doc-drift; 1 silent OnceLock::set error).
+  - `arch`: accept — architectural moves are coherent; the issues found are all should-fix quality concerns at the arch lens, not blocking.
+  - **Synthesizer call:** reject — conservative-union semantics. Two of four reviewers reject on their own lens scope; the unified must-fix set is 6 items after dedupe, which is well above any 'accept with caveats' threshold. The two accept lenses (spec, arch) both surface 4+ should-fix items each, so the gap between their verdict and the synthesized reject is narrow — they accept because the issues they personally found are not blockers, not because the issues correctness+maint found are wrong. The phase-1-retroactive-ratification framing is: 4-vote phase-end review is the verification gate, it surfaced 6 must-fix items, those items now go into PR-1.3.
+- **Topic:** Per-phase review-counts tradeoff (4/4/4/4 vs reducing to 3-vote for Phases 2-3)
+  - `spec`: keep — current 4-vote Phase 1 gauntlet is canonical validation.
+  - `correctness`: keep — cost justified by bug-find rate (this 4-vote review found 3 must-fix items that prior 2-vote per-PR reviews did not surface, including 2 silent-data-corruption bugs).
+  - `maint`: keep — this maintainability review found 4 must-fix items earlier 2-vote per-PR reviews missed.
+  - `arch`: revisit-but-keep — 4-vote appropriate for Phases 1 and 4 (cumulative architecture); for Phases 2 and 3 (focused new work) 4-vote may be over-thorough. Consider 3-vote; not a strong recommendation.
+  - **Synthesizer call:** revisit-but-keep — most-pessimistic enum ordering wins, and arch's framing has merit: the 4-vote at Phase 1 paid off precisely because the artifact was the cumulative 31-commit base + 2 new PRs, where many lenses' coverage compounds. Phases 2 and 3 will deliver narrower, more-bounded artifacts (PR-13 AExpr convertor; PR-8 table_statistics + multi-file). 3-vote for those phases is defensible. But this is a Phase 4 decision — for now the plan stays 4/4/4/4.
+- **Topic:** Work shape tradeoff (feature-integration prior-art alignment)
+  - `spec`: keep — cache_mode dispatch mirrors `parse_parquet_compression` precedent.
+  - `correctness`: keep — analogous prior art insight directly produced finding 1 (AbortOnDropHandle missing because IPC sink does wrap).
+  - `maint`: revisit-but-keep — prior-art alignment isn't fully realized: `pl.read_vortex` is missing parameters present in `pl.read_parquet`; README's Python API surface needs updating; `segment_cache` field naming choice needs cross-referenced docs.
+  - `arch`: keep — touch points are minimal; each is a discrete branch or single-file insertion.
+  - **Synthesizer call:** revisit-but-keep — most-pessimistic enum ordering wins. Maint's framing is sharp: the work shape is correct, but the prior-art alignment is partial. The cache_mode dispatch IS aligned with `parse_parquet_compression`; the read_vortex / scan_vortex surface is NOT aligned with read_parquet / scan_parquet. Phase 1.3 or Phase 3 should close the read/scan surface asymmetry.
+- **Topic:** Final phase plan tradeoff (4-phase split)
+  - `spec`: revisit-but-keep — Phase 1 expanded substantially; subsequent phases should pre-budget for cross-cutting CI-greenup.
+  - `correctness`: keep — phase boundaries remain coherent.
+  - `maint`: keep — Phase 1's actual scope grew but the boundary is clean.
+  - `arch`: revisit-but-keep — Phase 1's scope crept; one-off due to crates.io unblocking pre-existing CI failures. Keep 4-phase split, note scoping lesson.
+  - **Synthesizer call:** revisit-but-keep — half the reviewers want a scoping lesson captured even though all four agree the 4-phase structure should hold. Phase 2 PR-13 entry should pre-declare any CI-greenup as a separate sub-PR (sub-1.2 sibling) rather than absorbing it.
+
+
+### Dropped re-flags (carry-forward items reviewers re-surfaced)
+
+- **In-memory ScanSourceRef::Buffer zero-copy at scans.rs:324 (`buf.as_slice().to_vec()`)** — reason: covered by Deferred work; reference: `Deferred work:147 — `In-memory ScanSourceRef::Buffer zero-copy (dsl_to_ir/scans.rs:323 does buf.as_slice().to_vec()): considered in PR-1.2, deferred as not-low-effort.``
+- **Rust dispatch tighten for new_from_vortex match arms (correctness's recommendation that includes the 'tighten the arms' ask)** — reason: covered by Deferred work (tighten part); the coverage half is kept as a unified should-fix; reference: `Deferred work:151 — `PR-1.2 Rust dispatch tighten + Rust unit test (crates/polars-python/src/lazyframe/general.rs:334-359): pyo3 new_from_vortex match silently ignores cache_dedicated_bytes for ('global', _) / ('off', _) arms. Defensive ('dedicated', None) and (other, _) arms are unreachable from Python's _resolve_cache_mode and have no Rust test coverage. Deferred to a follow-up PR.``
+- **No Rust-level streaming source/sink tests at all (the 'general framing' re-flag — distinct from the producer-error specific test that the unified should-fix retains)** — reason: covered by Deferred work; reference: `Deferred work:148 — `Rust-level tests for the polars-stream Vortex source/sink (currently only Python): deferred to Phase 3.``
+- **mem::transmute SAFETY comment length at write/array_bridge.rs (maint nit on lines 160-164, framed as 'well-written but borderline')** — reason: covered by Accepted tradeoffs; reference: `Accepted tradeoffs:132 — `mem::transmute in read/array_bridge.rs + write/array_bridge.rs + write/df_to_stream.rs: accepted ... Compile-time size_of + align_of asserts + runtime length check provide safety.` Note: the arch finding at read/array_bridge.rs:126 is RETAINED as a should-fix because it's a different concern (the SAFETY-comment-length BAN, not the underlying mem::transmute approach).`
+- **Hard cache hit/miss counters (Moka doesn't expose stats)** — reason: covered by Deferred work; reference: `Deferred work:149 — `Hard-cached segment-cache hit count test: Moka's Cache doesn't expose hit/miss stats. Deferred.``
+
+
+<details><summary>Full Synthesizer Output JSON (gauntlet schema_version: 1, 69KB)</summary>
+
+```json
+{
+  "schema_version": 1,
+  "preset": "phase-4",
+  "lenses_used": ["spec", "correctness", "maint", "arch"],
+  "review_count": 4,
+  "review_cycles_this_invocation": 1,
+  "prior_cycle_dropped_re_flags": [],
+  "unified_findings": [
+    {
+      "severity": "must-fix",
+      "kind": "concurrency",
+      "file_line": "crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:135-146",
+      "description": "Vortex sink's `write_handle = ASYNC.spawn(...)` returns a bare tokio::task::JoinHandle, not wrapped in `tokio_handle_ext::AbortOnDropHandle`. Divergent from the IPC sink (ipc/mod.rs:101-112) which DOES wrap. If the outer task fails or is dropped before `write_handle.await`, the writer task is NOT cancelled — it continues, sees the closed chunk channel as EOS, finalizes the Vortex footer, and produces a valid-but-truncated file on disk.",
+      "recommended_fix": "Wrap with `polars_utils::async_utils::tokio_handle_ext::AbortOnDropHandle(ASYNC.spawn(...))` matching the IPC sink pattern; unwrap accordingly at the await site so the underlying task is aborted on outer-task failure.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "must-fix",
+      "kind": "bug",
+      "file_line": "crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:113-128",
+      "description": "Silent data corruption: when `dataframe_to_vortex_chunks(&df)?` returns Err inside the producer task, `?` propagates the error and drops `tx` (the chunk channel). The writer task's `ArrayStreamAdapter` sees channel close as clean end-of-stream, writes the Vortex footer, and produces a valid-looking but truncated file. The channel type is `VortexResult<VortexArrayRef>` so errors CAN be forwarded — the producer just never uses the Err path.",
+      "recommended_fix": "Before returning Err from the producer task, send `tx.send(Err(vortex_err)).await` so the writer task observes the error item, aborts mid-stream, and does NOT finalize the footer. Combined with the AbortOnDropHandle fix, this closes the silent-truncation hole on both producer-error and outer-task-failure paths.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "must-fix",
+      "kind": "overflow",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:345",
+      "description": "`let row_count = vxf.row_count() as usize;` violates the explicit project BAN: 'No `as`-cast `u64 → usize` on row counts. Use `usize::try_from(row_count).unwrap_or(usize::MAX)`'. On 32-bit platforms with Vortex files >2^32 rows, this silently truncates, propagating into `FileInfo::row_estimation` (line 358) and breaking downstream negative-slice / known-size logic. The matching streaming-source site at `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:217` already uses the BAN-compliant `try_from(...).unwrap_or(usize::MAX)` pattern; the IR-build-time path here is inconsistent.",
+      "recommended_fix": "Replace with `let row_count = usize::try_from(vxf.row_count()).unwrap_or(usize::MAX);` to match the established pattern at `nodes/io_sources/vortex/mod.rs:217` and satisfy the documented Accepted-tradeoff invariant. Both row-count read sites must use the same clamp pattern.",
+      "found_by": ["correctness", "maint", "arch"]
+    },
+    {
+      "severity": "must-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/README.md:297",
+      "description": "README documents the Rust struct field as `pub cache: VortexCacheMode` but the actual field is `pub segment_cache: VortexCacheMode` (read/options.rs:28). The rename was intentional (read/options.rs:26-27 comment explains it's to avoid collision with `ScanArgsVortex::cache: bool`), but the canonical reference README still shows the old name. Public-API doc drift; fresh engineers reading the README will be misled.",
+      "recommended_fix": "Change README line 297 to `pub segment_cache: VortexCacheMode,`. Optionally add the cross-reference from options.rs:26-27 explaining why the field is named `segment_cache` and not `cache` (collision avoidance with `ScanArgsVortex::cache: bool`).",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "must-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/README.md:325-332",
+      "description": "The documented `pl.scan_vortex(...)` signature in the README is missing the `cache_mode=` parameter that PR-1.2 shipped — the headline new public-API surface of this phase. README is the canonical reference doc and is now factually wrong about Phase-1's user-facing scope.",
+      "recommended_fix": "Add `cache_mode=None` (typed `Literal['global', 'off'] | int | None`) to the documented signature with a brief description, and add a pointer to `_resolve_cache_mode` for the dispatch contract. Verify the documented signature matches `py-polars/src/polars/io/vortex/functions.py:80-99`.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "must-fix",
+      "kind": "error-path",
+      "file_line": "crates/polars-stream/src/nodes/io_sources/vortex/builder.rs:49",
+      "description": "`let _ = self.io_metrics.set(io_metrics);` silently swallows the `Err(io_metrics)` returned by `OnceLock::set` when called twice. Violates the project BAN: 'Silent error swallowing: `let _ = fallible_op()` ... without an explicit comment explaining why the error is acceptable.'",
+      "recommended_fix": "Either (a) add a comment explaining why double-init is acceptable (e.g., `// set_io_metrics may be called once per builder lifecycle; subsequent calls are no-op by design`), or (b) replace with `debug_assert!(self.io_metrics.set(io_metrics).is_ok(), \"io_metrics initialized twice\");` to surface duplicate initialization in debug builds.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "architecture",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:336",
+      "description": "`vortex_file_info` hardcodes `session::segment_cache()` for the postscript schema-discovery read, ignoring `VortexScanOptions::segment_cache`. User passing `cache_mode='off'` still hits the global cache during schema discovery — the cache opt-out is partial. The matching streaming source path at `io_sources/vortex/mod.rs:138` correctly threads `options.segment_cache.resolve()` through.",
+      "recommended_fix": "Thread the resolved segment cache through `vortex_file_info` — change the signature to accept the cache mode (or `&VortexScanOptions`) and call `.with_segment_cache(options.segment_cache.resolve())` at line 336. Mirror the streaming-source pattern.",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "overflow",
+      "file_line": "crates/polars-vortex/src/write/strategy.rs:26",
+      "description": "`strategy_builder.with_row_block_size(rbs as usize)` casts `u64 → usize` unguarded. On 32-bit platforms with `row_block_size > usize::MAX` (>4 GiB block size), this silently truncates — same BAN principle as the row_count cast, applied to a write-time configuration knob.",
+      "recommended_fix": "Use `usize::try_from(rbs).map_err(|_| polars_err!(ComputeError: \"row_block_size {} exceeds usize::MAX on this platform\", rbs))?` so misconfiguration errors loudly. Unlike the row_count case (where clamping is the accepted tradeoff because the value is observed from a file), a misconfigured row_block_size should error.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "layering",
+      "file_line": "crates/polars-vortex/src/lib.rs:18",
+      "description": "`pub use ::vortex;` re-exports the entire Vortex API surface through `polars_vortex::vortex`. The documented justification covers a narrow use case but the re-export is total — exposes the full upstream Vortex namespace to any downstream consumer of polars-vortex, blurring the layering boundary that the BAN against 'arrow-array/arrow-schema pub types leaking out' is meant to enforce.",
+      "recommended_fix": "Replace with a narrowed module that re-exports only what downstream actually needs (e.g., `pub mod vortex { pub use ::vortex::file::Footer; pub use ::vortex::io::VortexReadAt; ... }`). Audit current call sites to enumerate the actual usage surface before narrowing.",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/read/array_bridge.rs:126",
+      "description": "The SAFETY comment for the release-callback handoff is 120+ chars and reasons about cross-crate drop behavior; precisely the shape the project BAN against 'justification-comment reward-hacking: any `// SAFETY:` >100 chars explaining why a hack is OK' flags. While the underlying `mem::transmute` approach is an Accepted Tradeoff, the comment length itself violates the spirit of the BAN.",
+      "recommended_fix": "Compress to 1-2 lines pointing at the Arrow C ABI spec section that governs release-callback ownership; move the detailed cross-crate reasoning into the module-level doc-comment where it's natural prose, not a SAFETY justification.",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scope-creep",
+      "file_line": ".big-plans/vortex-integration.md:215",
+      "description": "PR-1.2 scope grew from ~3-4 declared polish items to 10+ items (ruff, dprint, mypy stubs, clippy approx_constant, cargo deny 0BSD + paste/RUSTSEC-2024-0436, dsl-schema wiring + 4 new hashes, cargo fmt sweep across 19 files, lazyframe F821 fix). Plan-row was retroactively amended; impl-status self-flags 'a future big-plans run should split CI-greenup into its own dedicated PR'.",
+      "recommended_fix": "Accept the absorbed expansion (already documented), but capture as a process lesson — future Phase 1 polish PRs should pre-declare 'CI-greenup' as a separate sub-PR with its own bounded scope, especially when transitioning from path-dep to crates.io (which is exactly the kind of move that surfaces latent CI failures).",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scope-creep",
+      "file_line": "deny.toml:24",
+      "description": "`RUSTSEC-2024-0436` (paste unmaintained, transitive via vortex 0.70.0) was added to the deny.toml ignore list but NOT enumerated in plan PR-1.2 row's 'CI greenup absorbed' bullet list (which listed `0BSD` license only). Defensible as CI-greenup but the plan-row record is incomplete.",
+      "recommended_fix": "Update the plan's PR-1.2 row to enumerate `RUSTSEC-2024-0436 (paste unmaintained)` alongside `cargo deny 0BSD` so future readers see the full set of deny.toml mutations introduced by this phase. Phase 4 polish step should audit the cumulative deny.toml additions before merge prep.",
+      "found_by": ["spec", "arch"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "weak-exit-criteria",
+      "file_line": ".big-plans/vortex-integration.md:184",
+      "description": "Phase 1 exit criterion (c) reads '→ 65 Rust tests pass' but actual is 66 (PR-1.1 added `variant_dtype_errors_with_clear_message`). Criterion (d) reads '8 Python tests pass' but actual is 10 (PR-1.2 added 2 `cache_mode` tests). Strict reading makes the criterion over-met / stale.",
+      "recommended_fix": "Either (1) reframe criteria as 'at least N tests pass' (more durable across phases) or (2) update the numeric counts to 66 / 10 to match shipped state. The plan-row counts currently diverge from the impl-status counts noted at line 337.",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-python/src/lazyframe/general.rs:336-372",
+      "description": "Pyo3 `new_from_vortex` dispatch defensive arms `('dedicated', None)` and `(other, _)` are unreachable from Python's `_resolve_cache_mode` and have no Rust test coverage. Additionally, `('global', _)` and `('off', _)` arms silently ignore `cache_dedicated_bytes` rather than erroring on a stray non-None value — a future non-Python Rust caller could pass `('global', Some(N))` and the N would be discarded silently.",
+      "recommended_fix": "Add a Rust `#[test]` exercising all four arms directly. Optionally tighten the silent-ignore arms — e.g., `('global', None) | ('off', None) => ...` and explicit `('global'|'off', Some(_)) => bail!(...)`. Both the tighten and the test are on the existing deferred-work list; this finding is the coverage half.",
+      "found_by": ["spec", "correctness", "maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "py-polars/tests/unit/io/test_vortex.py:135-181",
+      "description": "Cache_mode rejection-path coverage gaps: missing tests for `cache_mode=b'global'` (bytes), `cache_mode='Global'` (case-sensitivity), `cache_mode=[]` / dict (container types), `cache_mode=2**64 - 1` (max u64 boundary that should succeed), `cache_mode=2**63` (i64 boundary).",
+      "recommended_fix": "Add bytes-literal, case-sensitivity, and non-int-container rejection cases to `test_cache_mode_rejects_invalid_inputs`. Add `cache_mode=2**64 - 1` to `test_cache_mode_accepts_all_valid_inputs` to nail the boundary.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-vortex/src/session.rs:62",
+      "description": "Public Python API `set_vortex_cache_bytes` / `set_global_cache_bytes` has zero functional tests. The Arc-clone + RwLock swap semantics are public contract but uncovered. Concurrent `set_global_cache_bytes(bytes)` against an in-flight scan that holds an `Arc` to the OLD cache leaves both old and new caches in memory until the in-flight scan completes — unbounded transient memory during frequent reconfiguration is undocumented.",
+      "recommended_fix": "Add a unit test in `session.rs` confirming swap semantics, Arc-clone safety, and (if practical) the old-cache lifetime. Also document the transient-memory consideration in the `set_global_cache_bytes` doc-comment.",
+      "found_by": ["correctness", "maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/session.rs:62-72",
+      "description": "`set_global_cache_bytes` doc-comment fails to document thread-safety, mid-scan safety, the transient-memory implication of the swap (old cache lives until in-flight scans drop their Arc), and the `POLARS_VORTEX_CACHE_BYTES` env-var interaction (parse failure silently falls back to 512 MiB).",
+      "recommended_fix": "Expand the doc-comment to cover: thread-safety guarantees, mid-scan safety (or lack thereof), old-cache lifetime/memory, env-var default precedence, and behavior on env-var parse failure (currently silent fallback to default — consider logging a warning).",
+      "found_by": ["correctness", "maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "boundary",
+      "file_line": "py-polars/src/polars/io/vortex/functions.py:217-239",
+      "description": "`set_vortex_cache_bytes(byte_budget: int)` does no Python-side validation. `set_vortex_cache_bytes(True)` silently sets cache to 1 byte (`int(True) == 1`), `set_vortex_cache_bytes(1.5)` raises TypeError at pyo3 boundary, `set_vortex_cache_bytes(-1)` raises OverflowError. `_resolve_cache_mode` applies bool/float/negative hygiene; `set_vortex_cache_bytes` doesn't — inconsistent surface.",
+      "recommended_fix": "Apply the same bool/float/negative rejection as `_resolve_cache_mode`: raise TypeError for bool and float, ValueError for negative ints, before calling the pyo3 entry point. Mirror the resolver's normalization pattern.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "py-polars/src/polars/io/vortex/functions.py:86-99",
+      "description": "`cache_mode=0` raises ValueError, but `set_vortex_cache_bytes(0)` disables the global cache. Two distinct meanings for `0` is a documentation footgun.",
+      "recommended_fix": "Add to the `cache_mode` docstring: 'Note: unlike `set_vortex_cache_bytes(0)` which disables the global cache, `cache_mode=0` is rejected — pass `cache_mode=\"off\"` to disable caching for this scan.'",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "convention",
+      "file_line": "crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:173",
+      "description": "Production-path code uses `.expect(\"initialized\")` four times (lines 173, 183, 191, 204), violating project BAN: 'No `.unwrap()` / `.expect(...)` in production paths. Test code only.' These are gated by a separately-required `initialize()` call but the BAN is strict.",
+      "recommended_fix": "Either (a) refactor to a type-state pattern (separate Uninitialized/Initialized types so the method only exists post-init), or (b) replace each `.expect(...)` with `polars_err!(InvalidOperation: \"VortexFileReader method called before initialize()\")?`. (a) is the more durable fix.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "encapsulation",
+      "file_line": "crates/polars-python/src/lazyframe/general.rs:351-365",
+      "description": "The match arms `(\"global\", _)` and `(\"off\", _)` silently discard `cache_dedicated_bytes` if a non-Python Rust caller passes a non-None value. No inline comment documents the invariant that Python's `_resolve_cache_mode` is the only caller and always passes None when kind != 'dedicated'.",
+      "recommended_fix": "Add an inline comment: `// Invariant: Python's _resolve_cache_mode is the only caller; it always passes None for cache_dedicated_bytes when kind != 'dedicated'.` Or use `debug_assert!(cache_dedicated_bytes.is_none(), \"...\")` to make the invariant load-bearing in debug builds.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scaffolding",
+      "file_line": "crates/polars-vortex/src/read/predicate.rs:1",
+      "description": "Per the plan, the entire `SpecializedColumnPredicate` fast path in this file is scheduled for deletion in PR-2.6 (after PR-13's AExpr-direct convertor lands). No scaffolding marker in the file; a future engineer reading it cold has no idea this is intentional dead-code-in-waiting.",
+      "recommended_fix": "Add a module-level comment: `// SCAFFOLDING: this entire file is the PR-13 transitional fast path; scheduled for deletion in PR-2.6 once aexpr_predicate.rs replaces it. See .big-plans/vortex-integration.md PR-2.6.`",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scaffolding",
+      "file_line": "crates/polars-vortex/src/read/mod.rs:18-22",
+      "description": "`pub mod metadata { pub use super::VortexFooterRef; }` is a back-compat shim with no deletion date or enumeration of downstream consumers. Scaffolding-marker convention used elsewhere in Polars is to name the call sites that hold the shim alive.",
+      "recommended_fix": "Either inline the shim (if call sites are now empty) or annotate: `// SCAFFOLDING: pre-PR-X reference path; remove once <list specific call sites that still import metadata::VortexFooterRef>`.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-vortex/src/write/array_bridge.rs:1",
+      "description": "Write-side C-ABI bridge (`polars_array_to_upstream`, `polars_chunk_to_upstream_record_batch`) has zero unit tests. If the metadata-preservation or field-by-field schema construction regresses in isolation, only the full roundtrip catches it — and there's no Rust streaming-sink integration test either.",
+      "recommended_fix": "Add a `#[cfg(test)] mod tests` in `write/array_bridge.rs` covering: (1) round-trip a single column with field metadata, (2) column count mismatch error path, (3) field-name preservation across the bridge.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-vortex/README.md:374-375",
+      "description": "README claims '`Categorical` / `Enum` doesn't have a direct Vortex representation; writes fall back to UTF-8.' No test verifies this fallback — the documented behavior is untested.",
+      "recommended_fix": "Add a Python or Rust test that writes a DataFrame with a Categorical column and asserts the read-back column is Utf8 (with the original string values preserved). Mirror for Enum.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-vortex/src/read/schema.rs:429-441",
+      "description": "Test `time_extension_days_unit_errors` asserts nothing — it constructs a Nanoseconds Time, discards it, and exits. A test that doesn't test anything is anti-help: it inflates coverage metrics, gives false confidence, and obscures what the original author meant to verify.",
+      "recommended_fix": "Either (a) remove the test and move the explanation into a module-level comment, or (b) rewrite it to construct the unreachable arm via a manual `DType::Extension` build and assert the bail message. Don't leave assertion-free tests.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs",
+      "description": "No Rust-level integration test for the streaming Vortex sink simulating producer error. The two must-fix concurrency bugs (AbortOnDropHandle missing + producer error not forwarded) would not be caught by any existing test — Python-level tests only cover happy paths, and there is no Rust streaming-sink test at all.",
+      "recommended_fix": "Add at least one integration test that simulates producer error (e.g., a DataFrame column that fails C-ABI bridging or a deliberate Err from `dataframe_to_vortex_chunks`) and asserts the resulting file does NOT exist or is detectably invalid. This test should fail before the must-fix fixes land and pass after.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "coverage",
+      "file_line": "py-polars/tests/unit/io/test_vortex.py",
+      "description": "Python coverage gaps: (1) empty DataFrame (0-row, 0-column) write/read round-trip (the `dataframe_to_vortex_chunks` has a 0-chunk early-return path), (2) multi-file scan, (3) explicit `cache_mode='off'` after 'global' for cache isolation, (4) Vortex sink with producer-error simulation (would catch the silent-truncation must-fix), (5) `n_rows=0` boundary, (6) glob path resolution.",
+      "recommended_fix": "Prioritize (1) empty-DF and (4) producer-error simulation in PR-1.3 (the Phase 1 must-fix fixup PR). (2) and (3) can land in Phase 3 per the plan.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "error-path",
+      "file_line": "crates/polars-vortex/src/read/array_bridge.rs:175",
+      "description": "`if imported.len() as i64 != expected_len` casts `usize → i64` unguarded. For an array length exceeding i64::MAX (~9.2 EB items, theoretical), this wraps to negative and the comparison silently masks the bug-detection signal. Same concern at `write/array_bridge.rs:45,64`.",
+      "recommended_fix": "Use `i64::try_from(imported.len()).map_err(|_| polars_err!(ComputeError: \"imported array length {} exceeds i64\", imported.len()))?` so the parity check fails loudly on the (extreme) overflow case rather than wrapping.",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/read/array_bridge.rs:62-77",
+      "description": "The debug-only field-name parity check uses `.unwrap()` on `polars_schema.get_at_index(col_idx)` at line 67. Release builds skip the check entirely — there's no comment explaining the debug-only choice or the tradeoff.",
+      "recommended_fix": "Document the tradeoff explicitly (`// Debug-only: per-batch cost not justified for release builds.`) or promote to a release check if the per-batch cost is acceptable. Either way, the unwrap-in-debug-only-path warrants a one-line comment.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/write/mod.rs:4",
+      "description": "Comment `FileWriteFormat::Vortex variant — landed in PR-10.` references a PR number with no link to upstream or repo. Future readers won't know which PR-10 (this branch's or upstream Polars's).",
+      "recommended_fix": "Remove the PR reference, or link to the upstream PR URL (e.g., `landed in PR-10 of the vortex-integration branch: https://github.com/spiraldb/polars/pull/N`).",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "convention",
+      "file_line": "crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:152",
+      "description": "`vxf.dtype().to_arrow_schema()` is called here without an inline comment justifying its use, while the project BAN forbids `to_arrow_schema()` for polars-arrow consumption: 'No `vortex::dtype::DType::to_arrow_schema()` — returns upstream `arrow_schema::Schema`, not polars-arrow's `ArrowSchema`. Use `polars_vortex::read::schema::vortex_dtype_to_schema`.' At this call site `to_arrow_schema()` IS correct (the consumer wants upstream arrow_schema for a Vortex API boundary) but it's not obvious from the code.",
+      "recommended_fix": "Add comment: `// NOTE: to_arrow_schema() returns upstream arrow_schema::Schema; we want that here because <reason>. For polars-arrow consumption use vortex_dtype_to_schema — BAN: do not mix these.`",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/Cargo.toml:33-35",
+      "description": "Direct deps `arrow-array = \"58\"`, `arrow-data = \"58\"`, `arrow-schema = \"58\"` are pinned to a major version that must match Vortex's transitive arrow-* major version. No upgrade-runbook comment; a Vortex bump that changes its arrow-* major could silently introduce a duplicate-crate compile failure or layout divergence.",
+      "recommended_fix": "Add a comment: `# When upgrading Vortex: verify these match Vortex's arrow-* dep in the next-version's Cargo.lock. The mem::transmute size+align asserts catch layout divergence at compile time, but a major-version mismatch may duplicate crates and break the bridge.`",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "should-fix",
+      "kind": "boundary",
+      "file_line": "py-polars/src/polars/io/vortex/functions.py:242-276",
+      "description": "`pl.read_vortex` is missing many parameters that `pl.scan_vortex` exposes. The docstring 'See scan_vortex for the full parameter list' is misleading — the surface area is asymmetric, breaking the prior-art alignment with `pl.read_parquet` / `pl.scan_parquet`.",
+      "recommended_fix": "Either (a) accept `**kwargs` and forward to `scan_vortex` (with collect()), or (b) explicitly list the supported subset in the docstring with a note about which scan_vortex args are not supported and why. (a) is the prior-art-aligned choice.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "nit",
+      "kind": "convention",
+      "file_line": "crates/polars-vortex/src/write/array_bridge.rs:107",
+      "description": "Write path's `polars_chunk_to_upstream_record_batch` builds Field-by-Field; read path's `record_batch_to_dataframe` transmutes whole arrays. Two 'mirror' bridges operate at different granularities.",
+      "recommended_fix": "Add a one-line comment explaining the asymmetry: upstream's `RecordBatch::try_new` validates schema-array consistency so the write path must hand-build schemas, whereas the read path can transmute the whole record batch in one shot.",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "nit",
+      "kind": "convention",
+      "file_line": "crates/polars-vortex/src/read/predicate.rs:25",
+      "description": "Vortex symbol-path inconsistency: `vortex::array::scalar::Scalar` vs `vortex::scalar::DecimalValue`. Both work; readability suffers from the inconsistent path style.",
+      "recommended_fix": "Pick one path style and use consistently — preferred is `vortex::scalar::*` (shorter and more canonical).",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "nit",
+      "kind": "architecture",
+      "file_line": "crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:130",
+      "description": "`Arc::unwrap_or_clone(footer)` to pass an owned `Footer` to `with_footer`. Idiomatic but slightly noisy; a `with_footer_arc` variant upstream would be cleaner.",
+      "recommended_fix": "Consider `with_footer(footer.as_ref().clone())` for symmetry, or leave as-is and open a Vortex issue requesting `with_footer_arc`. Low-priority polish.",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "nit",
+      "kind": "architecture",
+      "file_line": "crates/polars-vortex/src/write/options.rs:21",
+      "description": "`include_dtype: false` is a write-time footgun: produces files unreadable without out-of-band schema. No safety net or warning at the call site.",
+      "recommended_fix": "Either document the footgun more clearly in the doc-comment, or rename to `embed_dtype` and require explicit opt-in for the dtype-less mode (rather than opt-out for the dtype-included mode).",
+      "found_by": ["arch"]
+    },
+    {
+      "severity": "nit",
+      "kind": "perf",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:324",
+      "description": "In-memory `ScanSourceRef::Buffer` case allocates via `buf.as_slice().to_vec()` and the parallel allocation at `io_sources/vortex/mod.rs:95`. The plan's Deferred-work entry explicitly acknowledges this but the call site has no `// PERF:` marker.",
+      "recommended_fix": "Add inline `// PERF: in-memory ScanSourceRef::Buffer zero-copy is deferred — see .big-plans/vortex-integration.md Deferred work. Modest ROI: cloud/local paths are already zero-copy.` at both call sites.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "nit",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/read/options.rs:43-59",
+      "description": "`VortexCacheMode::Global` is `#[default]` but the doc-comment doesn't note the multi-tenant implication: cached segments are shared across queries in the same process — fine for single-tenant workloads, possibly surprising for multi-tenant servers.",
+      "recommended_fix": "Add a sentence to the `VortexCacheMode` doc-comment noting that `Global` is the default and explaining the multi-tenant consideration (e.g., 'Set `cache_mode=\"off\"` for multi-tenant workloads where you do not want cross-query segment cache sharing').",
+      "found_by": ["correctness"]
+    },
+    {
+      "severity": "nit",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/read/options.rs:26-28",
+      "description": "The doc-comment on `segment_cache` correctly explains the naming choice but doesn't reference the `cache: bool` field on `ScanArgsVortex` that prompted the rename.",
+      "recommended_fix": "Add pointer in the doc-comment: `Named 'segment_cache' (not 'cache') to avoid collision with the LazyFrame query cache (see ScanArgsVortex::cache: bool).` Closes the loop between the two related fields.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "nit",
+      "kind": "doc-quality",
+      "file_line": "py-polars/tests/unit/io/test_vortex.py:138-141",
+      "description": "Test docstring buries the test intent ('the cache_mode dispatch is a perf knob — all four modes must return identical data') in parens after a 'Moka doesn't expose hit/miss stats' note.",
+      "recommended_fix": "Lead the docstring with intent: `The cache_mode dispatch is a perf knob — all four modes must return identical data. (Note: Moka doesn't expose hit/miss stats, so we test value equality rather than cache behavior.)`",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "nit",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/session.rs:11",
+      "description": "`POLARS_VORTEX_CACHE_BYTES` env var has no documentation on what happens if it's set to a non-numeric value (`parse::<u64>().ok()` silently falls back to 512 MiB).",
+      "recommended_fix": "Either log a warning on parse failure (preferable — users debugging cache sizing will notice the fallback) or document explicitly: `// If POLARS_VORTEX_CACHE_BYTES is set but not a valid u64, falls back to 512 MiB silently.`",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "nit",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/read/predicate.rs:48",
+      "description": "The tuple destructure uses `_` for the unused `PhysicalIoExpr` parameter. When PR-13 lands, this `_` becomes the canonical AExpr-direct convertor input — the inline name would document the type.",
+      "recommended_fix": "Replace `_` with `_physical_expr` so the parameter type is documented inline. Reads better in the PR-13 transition window.",
+      "found_by": ["maint"]
+    },
+    {
+      "severity": "nit",
+      "kind": "cross-cutting",
+      "file_line": "crates/polars-plan/src/dsl/builder_dsl.rs:12",
+      "description": "The cargo fmt sweep across 19 polars-vortex files + 4 polars-plan/polars-stream files in commit `69dad1e1c` is mechanically benign but materially expands the file-touched count (33 in PR-1.2 vs. 4 declared). Each formatting-only file is hard to distinguish from semantic changes during review.",
+      "recommended_fix": "For future big-plans phase boundaries: run `cargo fmt --check` as part of phase-entry validation so style drift accumulates in one place (or in a dedicated mechanical-formatting PR) rather than being absorbed into a polish PR mid-phase.",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "nit",
+      "kind": "convention",
+      "file_line": "crates/polars-vortex/src/write/array_bridge.rs:80",
+      "description": "`#[allow(clippy::disallowed_types)]` on `polars_chunk_to_upstream_record_batch` is justified by upstream `arrow_schema::Field::with_metadata` requiring `std::collections::HashMap`. The allow-with-comment is sound; flagged only for review-completeness as the canonical pattern.",
+      "recommended_fix": "No fix — well-handled. Worth tracking as the canonical boundary pattern for future upstream-API friction.",
+      "found_by": ["spec"]
+    },
+    {
+      "severity": "nit",
+      "kind": "scope-creep",
+      "file_line": "deny.toml:23",
+      "description": "Phase 1 added `RUSTSEC-2024-0436` (paste unmaintained) and `0BSD` license to the deny.toml ignore set, both introduced by transitive Vortex 0.70.0 deps. Per-phase, the deny.toml grows — a trend worth tracking before merge.",
+      "recommended_fix": "Track in Phase 4 polish: audit deny.toml additions at merge prep, file upstream Vortex issues to dlete the dependencies (paste is unmaintained per RUSTSEC-2024-0436; 0BSD license is a permissive but uncommon license requiring per-org policy approval).",
+      "found_by": ["arch"]
+    }
+  ],
+  "disagreements": [
+    {
+      "topic": "Overall verdict (accept vs reject)",
+      "positions": [
+        {"lens": "spec", "position": "accept — zero must-fix from the spec lens; PR-1.1 + PR-1.2 ship declared scope plus documented CI-greenup absorption."},
+        {"lens": "correctness", "position": "reject — 3 must-fix (2 silent-data-corruption hazards in pre-existing streaming sink writer-task lifecycle; 1 BAN violation on row_count cast)."},
+        {"lens": "maint", "position": "reject — 4 must-fix (1 BAN violation overlapping with correctness; 2 README doc-drift; 1 silent OnceLock::set error)."},
+        {"lens": "arch", "position": "accept — architectural moves are coherent; the issues found are all should-fix quality concerns at the arch lens, not blocking."}
+      ],
+      "synthesizer_call": "reject — conservative-union semantics. Two of four reviewers reject on their own lens scope; the unified must-fix set is 6 items after dedupe, which is well above any 'accept with caveats' threshold. The two accept lenses (spec, arch) both surface 4+ should-fix items each, so the gap between their verdict and the synthesized reject is narrow — they accept because the issues they personally found are not blockers, not because the issues correctness+maint found are wrong. The phase-1-retroactive-ratification framing is: 4-vote phase-end review is the verification gate, it surfaced 6 must-fix items, those items now go into PR-1.3."
+    },
+    {
+      "topic": "Per-phase review-counts tradeoff (4/4/4/4 vs reducing to 3-vote for Phases 2-3)",
+      "positions": [
+        {"lens": "spec", "position": "keep — current 4-vote Phase 1 gauntlet is canonical validation."},
+        {"lens": "correctness", "position": "keep — cost justified by bug-find rate (this 4-vote review found 3 must-fix items that prior 2-vote per-PR reviews did not surface, including 2 silent-data-corruption bugs)."},
+        {"lens": "maint", "position": "keep — this maintainability review found 4 must-fix items earlier 2-vote per-PR reviews missed."},
+        {"lens": "arch", "position": "revisit-but-keep — 4-vote appropriate for Phases 1 and 4 (cumulative architecture); for Phases 2 and 3 (focused new work) 4-vote may be over-thorough. Consider 3-vote; not a strong recommendation."}
+      ],
+      "synthesizer_call": "revisit-but-keep — most-pessimistic enum ordering wins, and arch's framing has merit: the 4-vote at Phase 1 paid off precisely because the artifact was the cumulative 31-commit base + 2 new PRs, where many lenses' coverage compounds. Phases 2 and 3 will deliver narrower, more-bounded artifacts (PR-13 AExpr convertor; PR-8 table_statistics + multi-file). 3-vote for those phases is defensible. But this is a Phase 4 decision — for now the plan stays 4/4/4/4."
+    },
+    {
+      "topic": "Work shape tradeoff (feature-integration prior-art alignment)",
+      "positions": [
+        {"lens": "spec", "position": "keep — cache_mode dispatch mirrors `parse_parquet_compression` precedent."},
+        {"lens": "correctness", "position": "keep — analogous prior art insight directly produced finding 1 (AbortOnDropHandle missing because IPC sink does wrap)."},
+        {"lens": "maint", "position": "revisit-but-keep — prior-art alignment isn't fully realized: `pl.read_vortex` is missing parameters present in `pl.read_parquet`; README's Python API surface needs updating; `segment_cache` field naming choice needs cross-referenced docs."},
+        {"lens": "arch", "position": "keep — touch points are minimal; each is a discrete branch or single-file insertion."}
+      ],
+      "synthesizer_call": "revisit-but-keep — most-pessimistic enum ordering wins. Maint's framing is sharp: the work shape is correct, but the prior-art alignment is partial. The cache_mode dispatch IS aligned with `parse_parquet_compression`; the read_vortex / scan_vortex surface is NOT aligned with read_parquet / scan_parquet. Phase 1.3 or Phase 3 should close the read/scan surface asymmetry."
+    },
+    {
+      "topic": "Final phase plan tradeoff (4-phase split)",
+      "positions": [
+        {"lens": "spec", "position": "revisit-but-keep — Phase 1 expanded substantially; subsequent phases should pre-budget for cross-cutting CI-greenup."},
+        {"lens": "correctness", "position": "keep — phase boundaries remain coherent."},
+        {"lens": "maint", "position": "keep — Phase 1's actual scope grew but the boundary is clean."},
+        {"lens": "arch", "position": "revisit-but-keep — Phase 1's scope crept; one-off due to crates.io unblocking pre-existing CI failures. Keep 4-phase split, note scoping lesson."}
+      ],
+      "synthesizer_call": "revisit-but-keep — half the reviewers want a scoping lesson captured even though all four agree the 4-phase structure should hold. Phase 2 PR-13 entry should pre-declare any CI-greenup as a separate sub-PR (sub-1.2 sibling) rather than absorbing it."
+    }
+  ],
+  "dropped_re_flags": [
+    {
+      "topic": "In-memory ScanSourceRef::Buffer zero-copy at scans.rs:324 (`buf.as_slice().to_vec()`)",
+      "reason": "covered by Deferred work",
+      "reference": "Deferred work:147 — `In-memory ScanSourceRef::Buffer zero-copy (dsl_to_ir/scans.rs:323 does buf.as_slice().to_vec()): considered in PR-1.2, deferred as not-low-effort.`"
+    },
+    {
+      "topic": "Rust dispatch tighten for new_from_vortex match arms (correctness's recommendation that includes the 'tighten the arms' ask)",
+      "reason": "covered by Deferred work (tighten part); the coverage half is kept as a unified should-fix",
+      "reference": "Deferred work:151 — `PR-1.2 Rust dispatch tighten + Rust unit test (crates/polars-python/src/lazyframe/general.rs:334-359): pyo3 new_from_vortex match silently ignores cache_dedicated_bytes for ('global', _) / ('off', _) arms. Defensive ('dedicated', None) and (other, _) arms are unreachable from Python's _resolve_cache_mode and have no Rust test coverage. Deferred to a follow-up PR.`"
+    },
+    {
+      "topic": "No Rust-level streaming source/sink tests at all (the 'general framing' re-flag — distinct from the producer-error specific test that the unified should-fix retains)",
+      "reason": "covered by Deferred work",
+      "reference": "Deferred work:148 — `Rust-level tests for the polars-stream Vortex source/sink (currently only Python): deferred to Phase 3.`"
+    },
+    {
+      "topic": "mem::transmute SAFETY comment length at write/array_bridge.rs (maint nit on lines 160-164, framed as 'well-written but borderline')",
+      "reason": "covered by Accepted tradeoffs",
+      "reference": "Accepted tradeoffs:132 — `mem::transmute in read/array_bridge.rs + write/array_bridge.rs + write/df_to_stream.rs: accepted ... Compile-time size_of + align_of asserts + runtime length check provide safety.` Note: the arch finding at read/array_bridge.rs:126 is RETAINED as a should-fix because it's a different concern (the SAFETY-comment-length BAN, not the underlying mem::transmute approach)."
+    },
+    {
+      "topic": "Hard cache hit/miss counters (Moka doesn't expose stats)",
+      "reason": "covered by Deferred work",
+      "reference": "Deferred work:149 — `Hard-cached segment-cache hit count test: Moka's Cache doesn't expose hit/miss stats. Deferred.`"
+    }
+  ],
+  "phase_artifacts": {
+    "summary": "Phase 1 ratifies the cumulative 31-commit vortex-integration branch and ships two new PRs (PR-1.1 + PR-1.2) plus an absorbed CI-greenup. Organized by concept:\n\n(1) CRATES.IO TRANSITION (PR-1.1, 2 commits, ending `018f2ce43`): workspace Cargo.toml switched from path-dep `vortex = { path = \"../../../../vortex/vortex\", ... }` to `vortex = { version = \"0.70.0\", default-features = false, features = [\"files\", \"tokio\"] }`. Cargo.lock refreshed. Single API-drift fix in `crates/polars-vortex/src/read/schema.rs`: the `DType::Union(_)` arm was removed (Vortex 0.70.0 doesn't expose it; the local-workspace 0.1.0 did). `DType::Variant(_)` was retained with a clear bail-with-message and a new test `variant_dtype_errors_with_clear_message`. The `GIT_CONFIG_GLOBAL=...` env-shim is no longer required after the path-dep removal. Clean, single-arm transition.\n\n(2) PYTHON CACHE-MODE SURFACE (PR-1.2): `pl.scan_vortex(..., cache_mode=...)` and `pl.read_vortex(..., cache_mode=...)` accept `Literal['global', 'off'] | int | None`. Python helper `_resolve_cache_mode` at `py-polars/src/polars/io/vortex/functions.py:186-217` dispatches to a 2-arg pyo3 pair `(cache_mode_kind: &str, cache_dedicated_bytes: Option<u64>)`; pyo3 `new_from_vortex` at `crates/polars-python/src/lazyframe/general.rs:336-372` matches into the Rust `VortexCacheMode::{Global, Off, Dedicated(N)}` enum. Bool/float/u64-overflow rejection paths are tested. Dispatch mirrors the `parse_parquet_compression` precedent — strong prior-art alignment. The Python resolver's return type was narrowed to `tuple[Literal['global', 'off', 'dedicated'], int | None]` post-review.\n\n(3) VISITOR CFG-GATING ROOT-CAUSE FIX (PR-1.2): `crates/polars-python/Cargo.toml:53` moved `serde_json` from `optional = true` (gated on the `json` feature) to non-optional. The visitor `scan_type_to_pyobject` arms for csv/parquet/vortex use `serde_json::to_string` regardless of the `json` feature. Fix at the dep-declaration layer rather than at the source-edit layer originally planned.\n\n(4) CI GREEN-UP ABSORBED (10+ items in PR-1.2): ruff (4 lints), dprint (.big-plans/ exclude + README emphasis + README table alignment), cargo fmt sweep across 19 polars-vortex files, mypy stubs added to `_plr.pyi`, mypy redundant-expr in `_resolve_cache_mode`, clippy `approx_constant` (predicate.rs:293 literal 3.14 → 2.5), cargo deny `0BSD` license + `RUSTSEC-2024-0436` (paste unmaintained — transitive via Vortex), dsl-schema feature wiring + 4 new hashes in `crates/polars-plan/dsl-schema-hashes.json`. Tests added: `test_cache_mode_accepts_all_valid_inputs` (4 valid inputs) and `test_cache_mode_rejects_invalid_inputs` (5 invalid inputs).\n\nWhat's at risk (6 must-fix items):\n- Two silent-data-corruption hazards in the PRE-EXISTING streaming sink writer-task lifecycle (AbortOnDropHandle missing; producer error not forwarded).\n- A `u64 as usize` BAN violation at `dsl_to_ir/scans.rs:345` inconsistent with the matching streaming-source pattern at `io_sources/vortex/mod.rs:217`.\n- README documentation drift: field name `cache` vs actual `segment_cache`; documented `scan_vortex` signature missing the new `cache_mode=` parameter.\n- One silent error swallow `let _ = self.io_metrics.set(...)` in pre-existing streaming-source builder code.\n\nThese 6 items concentrate in 4 areas (streaming-sink lifecycle; row_count cast; README docs; silent error swallow) and are all fixable in a focused PR-1.3.",
+    "surprises": [
+      {"what": "Vortex streaming sink's `write_handle = ASYNC.spawn(...)` is NOT wrapped in `tokio_handle_ext::AbortOnDropHandle`, divergent from the IPC sink (ipc/mod.rs:101-112) which DOES wrap. On outer-task failure, the writer task continues, sees the closed chunk channel as clean EOS, and produces a truncated-but-valid-looking Vortex file.", "how_handled": "Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.", "amend_plan": "yes"},
+      {"what": "Producer task at `vortex/mod.rs:113-128` uses `?` to propagate errors from `dataframe_to_vortex_chunks(&df)`. On Err, `tx` is dropped without sending an Err item; the writer task sees the channel close as clean EOS and writes the Vortex footer on truncated data. The channel type `VortexResult<VortexArrayRef>` CAN carry errors but the producer never uses the Err path.", "how_handled": "Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.", "amend_plan": "yes"},
+      {"what": "`crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:345` uses `vxf.row_count() as usize` while the matching site at `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:217` correctly uses the BAN-compliant `usize::try_from(...).unwrap_or(usize::MAX)`. Inconsistent treatment of the row-count clamp across the two sites that read `vxf.row_count()`.", "how_handled": "Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.", "amend_plan": "yes"},
+      {"what": "README documents `pub cache: VortexCacheMode` but the actual field is `pub segment_cache: VortexCacheMode`. Rename was intentional (collision avoidance with `ScanArgsVortex::cache: bool`) but the canonical reference doc lags.", "how_handled": "Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.", "amend_plan": "yes"},
+      {"what": "README's documented Python `scan_vortex(...)` signature is missing the new `cache_mode=` parameter that is the headline new public-API surface of PR-1.2.", "how_handled": "Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.", "amend_plan": "yes"},
+      {"what": "`crates/polars-stream/src/nodes/io_sources/vortex/builder.rs:49` does `let _ = self.io_metrics.set(io_metrics);` — silently swallows the `Err(io_metrics)` returned by `OnceLock::set` on double-init, with no comment.", "how_handled": "Not yet — surfaced in this Phase-1 review. Goes into PR-1.3.", "amend_plan": "yes"},
+      {"what": "`vortex_file_info` at `dsl_to_ir/scans.rs:336` hardcodes `session::segment_cache()` for schema discovery, ignoring `VortexScanOptions::segment_cache`. Users passing `cache_mode='off'` still hit the global cache during the postscript read. Streaming-source path correctly threads the option through.", "how_handled": "Not yet — surfaced in this Phase-1 review.", "amend_plan": "yes"},
+      {"what": "Write-side (`crates/polars-vortex/src/write/{array_bridge,df_to_stream,strategy,sink_writer,writer}.rs`) has zero direct unit tests — only the roundtrip integration catches regressions.", "how_handled": "Not yet — surfaced in this review.", "amend_plan": "no"},
+      {"what": "Test `time_extension_days_unit_errors` in `schema.rs:429-441` asserts nothing — constructs a Nanoseconds Time, discards it, exits. Anti-help test.", "how_handled": "Not yet — surfaced in this review.", "amend_plan": "no"},
+      {"what": "PR-1.2's planned scope was ~3-4 polish items; actual scope grew to 10+ items because PR-1.1's crates.io transition unblocked CI which surfaced layered pre-existing failures.", "how_handled": "Absorbed into PR-1.2; impl-status self-flags. Plan-row PR-1.2 retroactively amended.", "amend_plan": "already-done"},
+      {"what": "The 'visitor feature-gating fix' was originally framed as a `visitor/nodes.rs` source edit; actual fix lives at the Cargo.toml level (`serde_json` non-optional).", "how_handled": "Plan-row corrected at commit `c42274a6a`.", "amend_plan": "already-done"},
+      {"what": "Vortex 0.70.0 has `DType::Variant` (retained with bail-arm) but lacks `DType::Union` (which the local-workspace 0.1.0 had).", "how_handled": "Single-arm removal; new test for Variant bail.", "amend_plan": "already-done"},
+      {"what": "Phase 1 exit criteria say '65 Rust tests' / '8 Python tests' but actual is 66 / 10 (PR-1.1 added 1 Rust test; PR-1.2 added 2 Python tests).", "how_handled": "Impl-status records the correct counts; phase-row text wasn't updated.", "amend_plan": "yes"},
+      {"what": "Deny.toml gained an undocumented `RUSTSEC-2024-0436` (paste) ignore alongside the planned 0BSD addition.", "how_handled": "Commit `9dbb23c62` added the ignore; plan PR-1.2 row didn't enumerate.", "amend_plan": "yes"},
+      {"what": "In-memory `ScanSourceRef::Buffer` zero-copy assessed and properly deferred (not-low-effort).", "how_handled": "Plan-commit `2c9abdf4e`.", "amend_plan": "already-done"},
+      {"what": "`set_global_cache_bytes` is a public Python API (via `set_vortex_cache_bytes`) with zero functional tests. Concurrent invocation against in-flight scans has undocumented transient-memory semantics.", "how_handled": "Not yet — surfaced in this review.", "amend_plan": "no"},
+      {"what": "`pl.read_vortex` is missing parameters that `pl.scan_vortex` exposes. Prior-art-alignment with `pl.read_parquet` / `pl.scan_parquet` is partial.", "how_handled": "Not yet — surfaced in this review.", "amend_plan": "no"},
+      {"what": "Scaffolding markers are largely absent (predicate.rs is scheduled for PR-2.6 deletion but no inline marker; read/mod.rs back-compat shim has no deletion date; write/mod.rs:4 references PR-10 with no link).", "how_handled": "Not yet — surfaced in this review.", "amend_plan": "no"}
+    ],
+    "coverage": {
+      "tested_cases": [
+        {"case": "`DType::Variant` produces clear bail error", "test_location": "crates/polars-vortex/src/read/schema.rs:243-258", "confidence": "high"},
+        {"case": "`cache_mode=None`/'global'/'off'/positive int accepted", "test_location": "py-polars/tests/unit/io/test_vortex.py:135-148", "confidence": "high"},
+        {"case": "`cache_mode=0`/`-5` raise ValueError", "test_location": "py-polars/tests/unit/io/test_vortex.py:157-160", "confidence": "high"},
+        {"case": "`cache_mode='invalid'` raises TypeError", "test_location": "py-polars/tests/unit/io/test_vortex.py:163-164", "confidence": "high"},
+        {"case": "`cache_mode=True/False` raise TypeError (bool guard)", "test_location": "py-polars/tests/unit/io/test_vortex.py:170-173", "confidence": "high"},
+        {"case": "`cache_mode=1.5` raises TypeError", "test_location": "py-polars/tests/unit/io/test_vortex.py:176-177", "confidence": "high"},
+        {"case": "`cache_mode=2**64` raises OverflowError", "test_location": "py-polars/tests/unit/io/test_vortex.py:181-182", "confidence": "high"},
+        {"case": "VortexCacheMode::Global/Off/Dedicated resolve semantics", "test_location": "crates/polars-vortex/src/read/options.rs:81-131", "confidence": "high"},
+        {"case": "C-ABI bridge size_of + align_of asserts (both directions) + runtime length parity", "test_location": "crates/polars-vortex/src/read/array_bridge.rs:143-144,175 + write/array_bridge.rs:40-43", "confidence": "high"},
+        {"case": "Predicate convertor for Equal/Between/EqualOneOf/StartsWith/EndsWith/RegexMatch and primitives/temporal/decimal", "test_location": "crates/polars-vortex/src/read/predicate.rs:286-500", "confidence": "high"},
+        {"case": "Decimal precision/scale overflow + negative-scale rejection", "test_location": "crates/polars-vortex/src/read/predicate.rs:391-398 + schema.rs:311-323", "confidence": "high"},
+        {"case": "DType→ArrowDataType mapping for all supported dtypes", "test_location": "crates/polars-vortex/src/read/schema.rs:178-505", "confidence": "high"},
+        {"case": "Roundtrip read/write for primitives, nullable, utf8, binary, datetime+tz, decimal, lists, structs", "test_location": "crates/polars-vortex/tests/roundtrip.rs", "confidence": "high"},
+        {"case": "Python read/write roundtrip + filter / projection-pushdown / negative-slice", "test_location": "py-polars/tests/unit/io/test_vortex.py:55-132", "confidence": "high"},
+        {"case": "`PolarsInstrumentedVortexReadAt` forwards reads + records IOMetrics", "test_location": "crates/polars-vortex/src/read/read_at.rs:221-280", "confidence": "medium"}
+      ],
+      "untested_cases": [
+        {"case": "Vortex streaming sink producer-error silent-truncation (the must-fix bug at mod.rs:113-128)", "priority": "high", "why_untested": "No Rust-level streaming-sink tests; no Python test asserts file completeness or non-existence on producer-error paths. The two must-fix concurrency bugs would not be caught by any existing test."},
+        {"case": "Vortex sink writer-task abort propagation when outer task fails (must-fix at mod.rs:135-146)", "priority": "high", "why_untested": "Same Rust-test gap."},
+        {"case": "Vortex sink with non-bridgeable column type", "priority": "high", "why_untested": "Natural integration test to catch the must-fix silent-truncation bug — none exists."},
+        {"case": "`set_global_cache_bytes` functional behavior (Arc-swap semantics + transient-memory)", "priority": "high", "why_untested": "Public Python API with zero test scaffolding."},
+        {"case": "Concurrent `set_global_cache_bytes` + in-flight scan (old-cache lifetime)", "priority": "high", "why_untested": "No race-test scaffolding; semantics undocumented."},
+        {"case": "`vortex_file_info` honors `VortexScanOptions::segment_cache` (currently doesn't — should-fix arch finding)", "priority": "high", "why_untested": "Discovered during this review."},
+        {"case": "`as usize` cast at scans.rs:345 on a >2^32-row file (32-bit truncation)", "priority": "medium", "why_untested": "32-bit platform tests not run in CI."},
+        {"case": "Rust-level `new_from_vortex` dispatch arms (`('global', None)`, `('off', None)`, `('dedicated', Some(N))`, defensive `('dedicated', None)` + `(other, _)`)", "priority": "medium", "why_untested": "Deferred per plan; pyo3 dispatch is sole entry-point from Python."},
+        {"case": "Visitor cfg-gating regression test (vortex built without `json` feature)", "priority": "medium", "why_untested": "No feature-matrix CI step added."},
+        {"case": "Empty DataFrame (0-row, 0-column) write/read round-trip", "priority": "medium", "why_untested": "`dataframe_to_vortex_chunks` has a 0-chunk early-return path that is uncovered."},
+        {"case": "Categorical/Enum → UTF-8 write fallback (README claim at line 374-375)", "priority": "medium", "why_untested": "README documents the behavior but no test verifies it."},
+        {"case": "Write-side `polars_chunk_to_upstream_record_batch` field-metadata preservation in isolation", "priority": "medium", "why_untested": "Write-side unit tests entirely missing."},
+        {"case": "Multi-file scan with mixed local + cloud sources + shared cache", "priority": "medium", "why_untested": "Deferred to Phase 3."},
+        {"case": "Rust-level streaming source/sink integration tests (general)", "priority": "medium", "why_untested": "Deferred to Phase 3."},
+        {"case": "set_vortex_cache_bytes(True), (1.5), (-1) Python-side rejection (inconsistent with cache_mode validator)", "priority": "low", "why_untested": "No validation exists in Python at this site."},
+        {"case": "Hard cache hit/miss counters", "priority": "low", "why_untested": "Moka's Cache doesn't expose stats. Deferred."},
+        {"case": "In-memory Buffer zero-copy semantics (scans.rs:324, io_sources/vortex/mod.rs:95)", "priority": "low", "why_untested": "Deferred per 'if low-effort' clause; not-low-effort assessment recorded."}
+      ],
+      "recommendations": "Highest-leverage additions for PR-1.3 (Phase 1 must-fix fixup PR): (1) a Rust integration test for the streaming Vortex sink simulating producer error — this single test would catch both must-fix concurrency bugs once they're fixed; (2) a unit test for `vortex_file_info` honoring the user's `segment_cache` choice (covers the should-fix arch finding); (3) a unit test for `set_global_cache_bytes` Arc-swap semantics; (4) replace the assertion-free `time_extension_days_unit_errors` test; (5) empty-DataFrame round-trip. Defer to Phase 3: multi-file scan, broader Rust streaming-sink coverage, Categorical/Enum fallback. Defer to Phase 4: 32-bit platform regression tests, deny.toml audit at merge prep."
+    },
+    "tradeoffs": [
+      {"decision": "Reuse existing 31 commits vs rewrite from scratch", "original": "Reuse — 73 tests passing locally; two prior gauntlet review passes already surfaced + fixed substantive bugs", "verdict": "keep", "rationale": "All 4 reviewers agree. The 4-vote Phase 1 review IS the verification gate for the reused base, and it surfaced 6 must-fix items concentrated in pre-existing code — exactly the value the gate is meant to deliver. A rewrite would have burned weeks; the must-fix list is bounded and fixable in PR-1.3."},
+      {"decision": "Work shape — feature-integration", "original": "feature-integration; Adding Vortex into existing Polars systems with many touch points. Highest-leverage insight: Analogous prior art.", "verdict": "revisit-but-keep", "rationale": "Most-pessimistic across lenses. Spec/correctness/arch say keep; maint flags partial prior-art-alignment realization. The cache_mode dispatch IS aligned with `parse_parquet_compression`; the `read_vortex` / `scan_vortex` surface is NOT aligned with `read_parquet` / `scan_parquet` (asymmetric parameter list). Correctness's first finding (AbortOnDropHandle missing because IPC sink does wrap) is ALSO produced by the analogous-prior-art insight — vindicating the work shape. Keep, but close the read/scan-surface asymmetry in Phase 3."},
+      {"decision": "CI green-up approach — crates.io `vortex = \"0.70.0\"`", "original": "Replace workspace path-dep with version = '0.70.0'. Strictly better than git-rev/CI-clone/feature-gating: cleanest dep, no release blocker, version-pinned.", "verdict": "keep", "rationale": "All 4 reviewers agree. PR-1.1 transitioned cleanly with a single API-drift fix (DType::Union removal). The transitive arrow-* major version coupling (polars-vortex pinned to `arrow-* = \"58\"` to match Vortex's transitive) deserves an upgrade-runbook comment (captured as should-fix), but the decision itself is sound."},
+      {"decision": "Final phase plan — 4 phases as drafted", "original": "(1) Ratify + crates.io transition, (2) PR-13 AExpr pushdown, (3) PR-8 file-stats + PR-6 multi-file/nested, (4) PR-14 benches + final polish.", "verdict": "revisit-but-keep", "rationale": "Most-pessimistic across lenses. Spec/arch want a scoping lesson captured; correctness/maint say keep. The 4-phase structure should hold; Phase 2 entry should pre-declare any CI-greenup as a separate sub-PR rather than absorbing it into a polish PR mid-phase. Phase 1's actual scope grew 3x but the boundary is clean — the lesson is about sub-PR pre-declaration, not about the phase split."},
+      {"decision": "PR-13 architecture — Option B → A via PR-2.6 cutover", "original": "Parallel paths in PR-2.2/.3/.4/.5; PR-2.6 deletes the SpecializedColumnPredicate fast path.", "verdict": "keep", "rationale": "All 4 reviewers agree. Strategy is mechanically tractable; SpecializedColumnPredicate extraction is contained to a single file (predicate.rs). Captured a should-fix scaffolding-marker finding (predicate.rs needs an inline 'scheduled for PR-2.6 deletion' marker) but the decision itself stands."},
+      {"decision": "PR-8 leads Parquet on `table_statistics`", "original": "Lead the pattern, no API change (Phase 3 scope)", "verdict": "keep", "rationale": "3 of 4 reviewers say keep; maint says `no-longer-applicable` (out of scope to evaluate from this phase). Per most-pessimistic enum ordering, `no-longer-applicable` is treated as a non-verdict (lens can't evaluate) and falls behind `keep` from the other 3, so the synthesized verdict is `keep`. No architectural blocker for Phase 3 to populate `UnifiedScanArgs::table_statistics` from the Vortex footer."},
+      {"decision": "Per-phase review-counts — 4 / 4 / 4 / 4", "original": "All four phase-end reviews use the 4-vote phase-4 preset. Max thoroughness.", "verdict": "revisit-but-keep", "rationale": "Most-pessimistic across lenses. Spec/correctness/maint say keep (citing this 4-vote review's bug-find rate as direct validation); arch says revisit-but-keep (4-vote may be over-thorough for Phases 2 and 3, which are focused new work rather than cumulative artifacts). The current 4-vote Phase 1 review found 6 must-fix items that prior 2-vote per-PR reviews did not surface — that's the empirical case for keeping the cost. But arch's framing has merit: revisit at Phase 4 entry whether Phases 2 and 3 actually need 4-vote or whether 3-vote would have caught the same items."},
+      {"decision": "Single Tokio runtime (Polars' global `ASYNC`) for Vortex async work", "original": "Avoid doubling thread-pool overhead", "verdict": "keep", "rationale": "Unchanged by Phase 1. Sound; session.rs implements correctly via Handle::new(Arc::downgrade(Arc::new(ASYNC.handle()) as Arc<dyn Executor>))."},
+      {"decision": "`mem::transmute` between Arrow FFI structs with size+align asserts + runtime length check", "original": "Compile-time asserts + runtime length check provide safety; the clean alternative (from_ffi_parts upstream API) is a separate polars contribution", "verdict": "keep", "rationale": "Phase 1 didn't touch the transmute call-sites. SAFETY comments are well-written; the should-fix arch finding on read/array_bridge.rs:126 is about the comment LENGTH violating the BAN spirit, not the underlying approach. Compress the comment but keep the approach."},
+      {"decision": "`SpecializedColumnPredicate` fast path preserved during PR-13 transitional phases (Option B)", "original": "Option B trajectory: parallel path first, delete fast path last", "verdict": "keep", "rationale": "Phase 2 scope; unchanged."},
+      {"decision": "`create_skip_batch_predicate = false` for Vortex", "original": "Vortex's pruning_evaluation handles it; explicit branch at polars-mem-engine/src/planner/lp.rs:448-459", "verdict": "keep", "rationale": "Branch is present and well-documented at lp.rs:448-459. Phase 1 didn't touch this."},
+      {"decision": "`hashbrown 0.16` (Polars) + `0.17` (Vortex transitive) coexistence", "original": "BAN against bare PlHashMap::new() is the established workaround", "verdict": "keep", "rationale": "Phase 1 BAN compliance verified across the diff."},
+      {"decision": "`PolarsInstrumentedVortexReadAt` mandatory wrapping", "original": "Local/cloud/in-memory all route through it", "verdict": "keep", "rationale": "Verified at all three sites; Phase 1 didn't change the wrapping."},
+      {"decision": "`row_count: usize::try_from(u64).unwrap_or(usize::MAX)` clamp", "original": "Accepted: 32-bit edge case clamp at nodes/io_sources/vortex/mod.rs:221", "verdict": "revisit-but-keep", "rationale": "The clamp DECISION is correct at the streaming-source site. Application is INCONSISTENT: the matching IR-build-time site at dsl_to_ir/scans.rs:345 uses `as usize` directly — a BAN violation captured as must-fix in the unified findings. Keep the decision (clamp pattern); revise by applying it consistently to both row-count read sites in PR-1.3."},
+      {"decision": "Sorting `ColumnPredicates::predicates` by column name before AND-collect", "original": "Deterministic ordering is a reproducibility guarantee", "verdict": "keep", "rationale": "Confirmed at predicate.rs:50. Phase 1 didn't change this."}
+    ]
+  },
+  "executive_summary": "Phase 1 ('Ratify + crates.io transition') of the polars-vortex integration is the cumulative 31-commit base plus PR-1.1 (path-dep → crates.io `vortex = \"0.70.0\"`), PR-1.2 (Python `cache_mode=` surface + visitor cfg-gating root-cause fix + CI greenup absorption — 10+ items including ruff/dprint/mypy stubs/cargo fmt sweep across 19 files/cargo deny 0BSD + RUSTSEC-2024-0436/dsl-schema hashes), and the implicit ratification of the four settled architectural moves (mem-engine delegates to streaming; single Tokio runtime via Polars' global ASYNC; C-ABI bridge via mem::transmute with size+align asserts + runtime length check; SpecializedColumnPredicate fast path preserved). Reviewed by 4 lenses (spec, correctness, maint, arch) per the phase-4 preset.\n\nThe review surfaces 6 must-fix items concentrated in 4 areas:\n(a) silent data-corruption hazards in the PRE-EXISTING streaming sink writer-task lifecycle: `write_handle = ASYNC.spawn(...)` is not wrapped in `AbortOnDropHandle` (divergent from IPC sink which does wrap), and the producer task drops `tx` on error rather than forwarding the Err — both paths produce valid-looking-but-truncated Vortex files on disk;\n(b) a `u64 as usize` BAN violation at `dsl_to_ir/scans.rs:345` inconsistent with the BAN-compliant clamp at the matching streaming-source site `io_sources/vortex/mod.rs:217`;\n(c) README documentation drift: documented field name `cache` vs actual `segment_cache`, and the documented `scan_vortex` signature missing the new `cache_mode=` parameter (the headline new API surface of this phase);\n(d) one silent error swallow `let _ = self.io_metrics.set(...)` at `builder.rs:49` without rationale comment.\n\nNotable surprises also include: `vortex_file_info` at `scans.rs:336` hardcodes the global segment cache for schema discovery (user's `cache_mode='off'` is silently ignored at that read — captured as should-fix); write-side has zero direct unit tests; `time_extension_days_unit_errors` asserts nothing; `set_global_cache_bytes` (public Python API via `set_vortex_cache_bytes`) has zero functional tests and undocumented mid-scan transient-memory semantics.\n\nKey tradeoffs revisited: (1) per-phase review-counts (4/4/4/4) revisit-but-keep — this 4-vote Phase-1 review's bug-find rate justifies the cost retrospectively, but arch's case that Phases 2-3 (focused new work) could use 3-vote is worth re-evaluating at Phase 4 entry. (2) Work shape (feature-integration) revisit-but-keep — the prior-art-alignment insight directly produced correctness finding 1 (AbortOnDropHandle missing because IPC sink does wrap), vindicating the shape; but `pl.read_vortex` vs `pl.scan_vortex` surface is asymmetric vs the `read_parquet`/`scan_parquet` template. (3) Final phase plan (4-phase) revisit-but-keep — boundaries hold; future phases should pre-declare any CI-greenup as a separate sub-PR rather than absorbing.\n\nVerdict split: spec and arch ACCEPT on their own lens scope (no must-fix from their lenses); correctness and maint REJECT (3 + 4 must-fix from their lenses, with 1 overlap). Conservative-union synthesis is REJECT with 6 must-fix items going into PR-1.3, plus 28 should-fix items and 13 nits captured for Phase 2-4 absorption.",
+  "overall": "reject",
+  "must_fix_count": 6,
+  "should_fix_count": 28,
+  "nit_count": 13
+}
+
+```
+
+</details>
 
 ## Deferred work
 
