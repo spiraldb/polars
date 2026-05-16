@@ -1033,7 +1033,7 @@ this scan to succeed with an empty DataFrame.",
                     // postscript read; previously hardcoded the global cache,
                     // silently ignoring the user's `cache_mode='off'` opt-out
                     // (cycle-2 should-fix).
-                    let segment_cache = options.segment_cache.clone().resolve();
+                    let segment_cache = options.segment_cache.resolve();
                     let (mut file_info, mut metadata) = scans::vortex_file_info(
                         first_scan_source,
                         unified_scan_args.row_index.as_ref(),
