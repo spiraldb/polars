@@ -113,6 +113,28 @@ def test_scan_with_filter(tmp_path: Path) -> None:
     assert out["a"].to_list() == [15, 16, 17, 18, 19]
 
 
+def test_scan_with_arithmetic_filter(tmp_path: Path) -> None:
+    """PR-13.2 acceptance test: ``col + 1 == 5`` pushes down through the
+    AExpr-direct convertor.
+
+    The legacy ``SpecializedColumnPredicate``-derived path cannot represent
+    arithmetic on a column reference — only literal comparisons / IN-lists /
+    range. PR-13.2 wires the convertor at ``physical_plan::lower_ir`` so the
+    Vortex source receives a real ``a + 1 == 5`` Vortex expression. We assert
+    correctness here (Polars reapplies post-decode regardless, so any drop-rows
+    bug would be the *more* dangerous failure mode; a pushdown-not-applied
+    regression would manifest as slower but still-correct results).
+    """
+    path = tmp_path / "arith_filter.vortex"
+    df = pl.DataFrame({"a": list(range(20)), "b": [str(i) for i in range(20)]})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("a") + 1 == 5).collect()
+    assert out.shape == (1, 2)
+    assert out["a"].to_list() == [4]
+    assert out["b"].to_list() == ["4"]
+
+
 def test_scan_with_projection(tmp_path: Path) -> None:
     path = tmp_path / "proj.vortex"
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})

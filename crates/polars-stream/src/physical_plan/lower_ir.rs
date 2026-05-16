@@ -767,17 +767,41 @@ pub fn lower_ir(
                         options,
                         metadata: first_metadata,
                         segment_cache,
-                    } => Arc::new(
-                        crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
-                            options: Arc::new(options.clone()),
-                            first_metadata: first_metadata.clone(),
-                            // Threaded from IR-build (scans.rs::vortex_file_info caller); when
-                            // None (schema-supplied path), the streaming source resolves a
-                            // fresh cache from `options.segment_cache`.
-                            segment_cache: segment_cache.clone(),
-                            io_metrics: std::sync::OnceLock::new(),
-                        },
-                    ) as _,
+                    } => {
+                        // PR-13.2 AExpr-direct pushdown: when a predicate exists and
+                        // `push_predicate` is on, try the convertor. The result rides on
+                        // the builder so `VortexFileReader::begin_read` can prefer it
+                        // over the legacy `SpecializedColumnPredicate` path. We are still
+                        // at IR-build time here, so we have `expr_arena` access — which
+                        // we lose by the time `begin_read` runs (where only
+                        // `Arc<dyn PhysicalIoExpr>` survives). When the convertor returns
+                        // `None` (unhandled AExpr shape), the streaming source falls back
+                        // to the legacy path automatically.
+                        let aexpr_filter = if options.push_predicate {
+                            predicate.as_ref().and_then(|p| {
+                                use polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression;
+                                aexpr_to_vortex_expression(
+                                    p.node(),
+                                    expr_arena,
+                                    Some(file_info.schema.as_ref()),
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        Arc::new(
+                            crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
+                                options: Arc::new(options.clone()),
+                                first_metadata: first_metadata.clone(),
+                                // Threaded from IR-build (scans.rs::vortex_file_info caller); when
+                                // None (schema-supplied path), the streaming source resolves a
+                                // fresh cache from `options.segment_cache`.
+                                segment_cache: segment_cache.clone(),
+                                aexpr_filter,
+                                io_metrics: std::sync::OnceLock::new(),
+                            },
+                        ) as _
+                    },
 
                     #[cfg(feature = "csv")]
                     FileScanIR::Csv { options } => {

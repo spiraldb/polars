@@ -68,9 +68,9 @@ use polars_vortex::vortex::expr::{
 };
 
 use crate::dsl::Operator;
+use crate::plans::AExpr;
 use crate::plans::aexpr::function_expr::{IRBooleanFunction, IRFunctionExpr};
 use crate::plans::lit::LiteralValue;
-use crate::plans::AExpr;
 
 /// Convert a Polars AExpr predicate tree into a Vortex [`Expression`] for pushdown.
 ///
@@ -266,11 +266,9 @@ fn operand_is_bool(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> bool {
 /// to without a schema; `Series` and `Range` aren't sensible predicates anyway.
 fn convert_literal(lv: &LiteralValue) -> Option<Expression> {
     match lv {
-        LiteralValue::Scalar(scalar) => {
-            Some(lit(polars_vortex::read::predicate::polars_scalar_to_vortex(
-                scalar,
-            )?))
-        },
+        LiteralValue::Scalar(scalar) => Some(lit(
+            polars_vortex::read::predicate::polars_scalar_to_vortex(scalar)?,
+        )),
         // Dyn requires materialization against a target dtype; not in foundation scope.
         // Series / Range aren't valid predicate literals.
         _ => None,
@@ -285,12 +283,11 @@ mod tests {
     //! calls [`aexpr_to_vortex_expression`], and asserts the conversion returns `Some` (the
     //! Vortex expression's structure is opaque to the test — we trust the builder helpers).
     //! Unsupported shapes additionally assert `None`.
+    use polars_core::chunked_array::cast::CastOptions;
     use polars_core::prelude::{AnyValue, DataType};
     use polars_core::scalar::Scalar;
     use polars_utils::arena::Arena;
     use polars_utils::pl_str::PlSmallStr;
-
-    use polars_core::chunked_array::cast::CastOptions;
 
     use super::*;
     use crate::plans::lit::DynLiteralValue;
@@ -314,11 +311,7 @@ mod tests {
     }
 
     /// Helper: build an `AExpr::Function` with a Boolean function variant.
-    fn boolean_fn(
-        arena: &mut Arena<AExpr>,
-        bf: IRBooleanFunction,
-        arg: Node,
-    ) -> Node {
+    fn boolean_fn(arena: &mut Arena<AExpr>, bf: IRBooleanFunction, arg: Node) -> Node {
         // ExprIR::new takes a node + OutputName; for predicate-arena tests we use a dummy
         // empty alias (the OutputName isn't consulted by the convertor).
         let expr_ir = ExprIR::new(arg, OutputName::Alias(PlSmallStr::EMPTY));

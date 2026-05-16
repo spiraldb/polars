@@ -51,6 +51,15 @@ pub struct VortexFileReader {
     /// read. When `None` (user-supplied-schema path; no IR-build postscript read happened),
     /// `initialize()` falls back to `options.segment_cache.resolve()` for a fresh cache.
     pub segment_cache: Option<polars_vortex::read::VortexSegmentCacheRef>,
+    /// AExpr-direct convertor result threaded from IR-build (`FileScanIR::Vortex` →
+    /// `VortexReaderBuilder::aexpr_filter` → here). When `Some`, `begin_read` uses this
+    /// Vortex `Expression` directly instead of dispatching through
+    /// `polars_to_vortex_predicate` (the `SpecializedColumnPredicate`-derived fast path).
+    /// The fast path remains as a fallback for shapes the convertor returns `None` for
+    /// (e.g., the predicate didn't translate cleanly because of an unhandled AExpr shape,
+    /// or `push_predicate` is off — though `push_predicate=false` is handled at the
+    /// IR-build call site, so by here `Some` implies the user opted in).
+    pub aexpr_filter: Option<polars_vortex::vortex::expr::Expression>,
     pub io_metrics: OptIOMetrics,
 
     /// Set by `initialize()`.
@@ -252,8 +261,22 @@ impl FileReader for VortexFileReader {
         // advertise `PARTIAL_FILTER` capability, so the multi-scan layer keeps the
         // original predicate around to apply post-decode — pushing only what we can
         // convert is safe (over-conservative pushdown would drop rows incorrectly).
+        //
+        // Preference order:
+        //   1. `self.aexpr_filter` — AExpr-direct convertor result computed at IR-build
+        //      time (`physical_plan::lower_ir`). Covers everything the new convertor
+        //      handles, including arithmetic / CAST / struct shapes that the legacy fast
+        //      path cannot represent.
+        //   2. `polars_to_vortex_predicate(args.predicate)` — legacy
+        //      `SpecializedColumnPredicate`-derived path; takes over when the convertor
+        //      returns `None` (unhandled shape) so we still benefit from the per-column
+        //      fast-path coverage that PR-13 hasn't yet supplanted.
+        // PR-13.6 (Phase 2 final) will delete the fallback once the convertor is a strict
+        // superset of the fast path.
         let filter_expr = if self.options.push_predicate {
-            args.predicate.as_ref().and_then(polars_to_vortex_predicate)
+            self.aexpr_filter
+                .clone()
+                .or_else(|| args.predicate.as_ref().and_then(polars_to_vortex_predicate))
         } else {
             None
         };

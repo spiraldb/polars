@@ -6,6 +6,7 @@ use polars_io::cloud::CloudOptions;
 use polars_io::metrics::IOMetrics;
 use polars_plan::dsl::ScanSource;
 use polars_vortex::read::VortexSegmentCacheRef;
+use polars_vortex::vortex::expr::Expression as VortexExpression;
 use polars_vortex::{VortexScanOptions, vortex};
 
 use super::VortexFileReader;
@@ -23,6 +24,15 @@ pub struct VortexReaderBuilder {
     /// streaming source falls back to `options.segment_cache.resolve()` (e.g., user-supplied
     /// schema path where no postscript read happened at IR-build).
     pub segment_cache: Option<VortexSegmentCacheRef>,
+    /// AExpr-direct convertor result (PR-13.2): when the predicate translated cleanly via
+    /// `polars_plan::plans::aexpr::predicates::vortex_convertor::aexpr_to_vortex_expression`,
+    /// the Vortex `Expression` is captured here at IR-build time (where we still have
+    /// `expr_arena` access). At `begin_read` time we prefer this over the
+    /// `polars_to_vortex_predicate` (`SpecializedColumnPredicate`-derived) path so
+    /// arithmetic/CAST/struct predicates that the legacy fast path cannot represent still
+    /// push down. The multi-scan layer reapplies the full predicate post-decode regardless
+    /// (we advertise `PARTIAL_FILTER`), so it is safe to push only a subset.
+    pub aexpr_filter: Option<VortexExpression>,
     pub io_metrics: std::sync::OnceLock<Arc<IOMetrics>>,
 }
 
@@ -78,6 +88,11 @@ impl FileReaderBuilder for VortexReaderBuilder {
             // Threaded resolved cache for the data read; `None` triggers fallback resolve()
             // inside `VortexFileReader::initialize`. Same pattern as `footer` above.
             segment_cache: self.segment_cache.clone(),
+            // AExpr-direct convertor result; preferred over `polars_to_vortex_predicate` in
+            // `begin_read`. Shared across all sources in a multi-source scan — the
+            // convertor result is purely a function of the (predicate, schema) pair, both
+            // of which are constant across the scan's sources.
+            aexpr_filter: self.aexpr_filter.clone(),
             io_metrics: OptIOMetrics(self.io_metrics.get().cloned()),
             init_data: None,
         }) as _
