@@ -1654,8 +1654,8 @@ _(none — all 4 reviewers agreed on accept verdict)_
 
 | Severity | File:line | Description | Implicated PR | Resolved |
 |----------|-----------|-------------|---------------|----------|
-| must-fix | `.big-plans/vortex-integration.md:404` | PR-1.4 CI-reopen narrative at plan lines 404+408 re-introduces 3 occurrences of the typos-banned token while explaining the typo fix, recreating the exact CI failure. `gh pr checks 1` shows `main` Spell Check FAIL on HEAD `1a244a0f7`. Phase 1 exit criterion (e) not met. | <blank> | [ ] |
-| must-fix | `crates/polars-vortex/README.md:244` | README crate-layout block describes `mod.rs` as `VortexFooterRef alias + back-compat metadata re-export` — but PR-1.4 commit `3479c6bdb` inlined the metadata re-export. README is canonical reference doc; fresh engineers will hit `not found` compile error on `use polars_vortex::read::metadata::VortexFooterRef`. | <blank> | [ ] |
+| must-fix | `.big-plans/vortex-integration.md:404` | PR-1.4 CI-reopen narrative at plan lines 404+408 re-introduces 3 occurrences of the typos-banned token while explaining the typo fix, recreating the exact CI failure. `gh pr checks 1` shows `main` Spell Check FAIL on HEAD `1a244a0f7`. Phase 1 exit criterion (e) not met. | PR-1.4 | [ ] |
+| must-fix | `crates/polars-vortex/README.md:244` | README crate-layout block describes `mod.rs` as `VortexFooterRef alias + back-compat metadata re-export` — but PR-1.4 commit `3479c6bdb` inlined the metadata re-export. README is canonical reference doc; fresh engineers will hit `not found` compile error on `use polars_vortex::read::metadata::VortexFooterRef`. | PR-1.4 | [ ] |
 
 ## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 3) — rejected (4-vote)
 
