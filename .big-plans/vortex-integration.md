@@ -20,9 +20,9 @@ subagent_invocations_this_pr: 0
 subagent_invocations_total: 16
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
-phase_end_cycle: 2
+phase_end_cycle: 3
 phase_end_reject_cycles: 0
-last_phase_end_verdict: null
+last_phase_end_verdict: reject
 current_pr_is_ci_reopen: null
 last_commit: 0677ffcc9
 ```
@@ -1647,6 +1647,106 @@ _(none — all 4 reviewers agreed on accept verdict)_
 }
 
 ```
+
+</details>
+
+## Pending phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 3
+
+| Severity | File:line | Description | Implicated PR | Resolved |
+|----------|-----------|-------------|---------------|----------|
+| must-fix | `.big-plans/vortex-integration.md:404` | PR-1.4 CI-reopen narrative at plan lines 404+408 re-introduces 3 occurrences of the typos-banned token while explaining the typo fix, recreating the exact CI failure. `gh pr checks 1` shows `main` Spell Check FAIL on HEAD `1a244a0f7`. Phase 1 exit criterion (e) not met. | <blank> | [ ] |
+| must-fix | `crates/polars-vortex/README.md:244` | README crate-layout block describes `mod.rs` as `VortexFooterRef alias + back-compat metadata re-export` — but PR-1.4 commit `3479c6bdb` inlined the metadata re-export. README is canonical reference doc; fresh engineers will hit `not found` compile error on `use polars_vortex::read::metadata::VortexFooterRef`. | <blank> | [ ] |
+
+## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 3) — rejected (4-vote)
+
+**Synthesizer output from `/spiral:gauntlet` (`preset=phase-4`, lenses=`spec`+`correctness`+`maint`+`arch`); full Synthesizer Output JSON in the `<details>` block at the end of this section.**
+
+### Executive summary
+
+Overall verdict: REJECT. Two must-fix items prevent Phase 1 close-out, both doc-only and both mechanical to apply. (1) Spec lens caught a typos-CI regression at `.big-plans/vortex-integration.md:404,408` where the narrative explaining the typos fix reintroduces three occurrences of the banned token, recreating the exact CI failure the CI-reopen was meant to close. `gh pr checks 1` shows the `main` Spell Check job still failing on HEAD `1a244a0f7`. The cycle-3 inner-loop CI-reopen 2-vote accepted at confidence:high without verifying actual post-push CI state, which is the procedural surprise driving this reject. (2) Maint lens caught `crates/polars-vortex/README.md:244` still describing a `metadata` back-compat re-export shim that PR-1.4 commit `3479c6bdb` deleted — fresh engineers following the README will write `use polars_vortex::read::metadata::VortexFooterRef` and hit a not-found compile error. README is the canonical reference doc; same severity class as cycle-1's MF-004 and MF-005.
+
+The verdict surfaces a 2-vs-2 split: spec + maint reject on the must-fix items above; correctness (0 findings, all cycle-2 verifications hold) + arch (0 must-fix, 3 should-fix) accept. Synthesizer applies conservative-union — any must-fix forces reject. Notable surprises beyond the must-fix items: the PR-1.4 plan-doc sweep updated only 1 of 5 stale test-count rows (lines 77, 96, 196, 205 still say '65 Rust + 8 Python'); the EXECUTOR Arc pattern at plan:108 mis-specifies what `session.rs:43-49` actually implements (plan-vs-source drift in the opposite direction from usual); the dedicated double-resolve pattern allocates two independent segment caches per scan (flagged from two distinct angles by maint + arch); `morsel_rx.recv()` returning Err is silently treated as clean EOS in vortex `io_sources/mod.rs:173-204` with no documented assumption; and RUSTSEC-2024-0436 enumeration is missing from the PR-1.2 impl-status bullet. The producer-error inline comment finding at `sink/mod.rs:127-137` — flagged independently by spec and maint — drops to `dropped_re_flags` because it's already a Deferred work entry at plan line 1515. Counts: 2 must-fix, 10 should-fix, 6 nits.
+
+### Summary of changes
+
+Phase 1 of polars-vortex integration lands 78 commits / 3834 lines covering: PR-1.1 (path-dep → crates.io `vortex = "0.70.0"`; DType::Union arm removal; DType::Variant bail-test); PR-1.2 (Python `cache_mode=` surface + serde_json non-optional root-cause + 10+ CI-greenup items including ruff/dprint/mypy stubs/cargo fmt sweep/deny.toml 0BSD+RUSTSEC-2024-0436/dsl-schema hashes); PR-1.3 (6 phase-end cycle-1 must-fix items resolved: AbortOnDropHandle wrap, producer-Err forwarding, u64→try_from-clamp at scans.rs:351, README field-name + cache_mode signature, OnceLock::set silent-discard alignment); PR-1.4 (4 cycle-2 cleanup items: segment_cache thread-through, `pub use ::vortex;` narrowed to 5 sub-modules {array, error, file, io, layout}, metadata shim inlined, producer/writer Deferred entry corrected); PR-1.4 CI-reopen (cargo fmt restoration + typo word replacement). Four settled architectural moves intact: mem-engine delegates to streaming with explicit Vortex branch at `lp.rs:448-459`; single Polars ASYNC Tokio runtime; mem::transmute C-ABI bridge with size+align+length triplet; SpecializedColumnPredicate fast path preserved for PR-13 transition. 66 Rust + 10 Python tests pass at source; cycle-3 delta vs cycle-2 is small (PR-1.4 cleanup + CI fix).
+
+### Surprises and discoveries
+
+- **CI-reopen cycle accepted at confidence:high without verifying actual post-push CI state**. `gh pr checks 1` shows `main` Spell Check Typos still failing on HEAD `1a244a0f7` because the typos-fix narrative reintroduces the banned token. (amend_plan: yes)
+- **PR-1.4 declared "row-184 stale test counts" fix only updated row 185**. Four sibling locations (lines 77, 96, 196, 205) remain stale. Partial scope shipment. (amend_plan: yes)
+- **README.md:244 still references the back-compat `metadata` re-export shim** that PR-1.4 commit `3479c6bdb` deleted. README-vs-source drift. (amend_plan: no — source fix needed)
+- **Dedicated double-resolve allocates two independent segment caches per scan**. Flagged by maint (options.rs:67-74 hidden-assumption) + arch (scans.rs:293-302+1033-1039 fragmentation). Cycle-1 PR-1.4 should-fix carry-forward, but reframed now as semantic-divergence not just perf. (amend_plan: yes)
+- **Plan spec at line 108 mis-specifies the EXECUTOR Arc pattern**. Spec would dangle Weak immediately; source at `session.rs:40-48` correctly keeps a `LazyLock<Arc<dyn Executor>>` strong ref. Plan-doc fix needed. (amend_plan: yes)
+- **morsel_rx.recv() Err-as-EOS is undocumented in vortex io_sources/mod.rs:173-204**. Silent-swallowing risk under upstream behavior change. (amend_plan: no — source comment)
+- **RUSTSEC-2024-0436 enumeration missing from PR-1.2 impl-status bullet at plan:339** despite advisory completeness being recurring phase-end expectation. (amend_plan: yes)
+- **lib.rs narrowing comment claims "8 paths" but enumerates 12**. Comment-vs-content drift. (amend_plan: no — source comment)
+- **Cycle-1 deferred items in plan-commit JSON bodies rather than canonical Deferred work bullets**. Discovery friction. Phase 2.0 housekeeping candidate. (amend_plan: no — Phase 2 entry)
+- **2-vs-2 reviewer split on overall verdict**. Both reject votes are doc-only must-fix items — code-clean / doc-drifted phase-end signature. (amend_plan: no — process observation)
+
+### Testing coverage assessment
+
+| Tested case | Test location | Confidence |
+|---|---|---|
+| All 6 cycle-1 phase-end must-fix items resolved | Resolved phase-end must-fix items table | high |
+| segment_cache threaded through both IR-build + streaming | scans.rs:1029-1039 + io_sources/vortex/mod.rs:138 | high |
+| pub use ::vortex narrowed to {array, error, file, io, layout} | lib.rs:23 + grep audit 0 violations | high |
+| 66 Rust + 10 Python tests pass | grep count | high |
+| AbortOnDropHandle wraps sink writer | mod.rs:157-162 | high |
+| Producer-Err forwarded via channel-Err | mod.rs:124-145 | high |
+| row_count clamp uniformity across 3 sites | scans.rs:349 + io_sources/vortex/mod.rs:217 + write/strategy.rs:28 | high |
+| C-ABI bridge size+align+length triplet | read/array_bridge.rs:143-144,175 + write/array_bridge.rs:40-43 | high |
+
+| Untested case | Priority | Why untested |
+|---|---|---|
+| `gh pr checks 1` green on typos check (exit criterion e) | high | FAIL on HEAD `1a244a0f7` — must-fix #1 blocks this |
+| README.md module-path claims compile correctly | high | README:244 stale — must-fix #2 blocks this |
+| Vortex sink producer-error Python regression | high | Deferred work entry |
+| Rust-level streaming source/sink tests | high | Phase 3 scope |
+| vortex_file_info segment_cache regression | high | Carry-forward should-fix |
+| Dedicated double-resolve dual-cache behavior | medium | No test |
+| morsel_rx.recv() Err-as-EOS contract | medium | No test |
+| 32-bit platform row_count >2^32 truncation | low | CI doesn't run 32-bit |
+| polars-stream --features vortex (no cloud) E0004 | low | Pre-existing; Deferred |
+
+Recommendations: Repair the 2 must-fix items first (plan:404+408 typo-narrative + README:244 back-compat phrase), verify CI green locally, push, then accept cycle 4. Should-fix items roll into a Phase 2.0 housekeeping sub-PR.
+
+### Tradeoffs re-evaluation
+
+| Decision | Verdict | Rationale |
+|---|---|---|
+| Reuse existing 31 commits vs rewrite | keep | Cycle-3 firms cycle-2; no new must-fix in source delta. |
+| Work shape — feature-integration; Analogous prior art | keep | PR-1.4 pub-use-vortex audit + .ok().unwrap() sibling-consensus alignment held. |
+| CI green-up — crates.io vortex = "0.70.0" | keep | Source clean; cycle-3 failure is doc-only. |
+| 4 phases as drafted | keep | Boundary held through PR-1.4 + CI-reopen. |
+| PR-13 architecture — Option B → A via PR-2.6 | keep | Phase 2 scope. |
+| PR-8 leads Parquet on table_statistics | keep | Phase 3 scope. |
+| Per-phase review-counts — 4/4/4/4 | revisit-but-keep | Cycle-3 caught what cycle-3 inner-loop missed (CI green verify). Cost-benefit case for 4-vote on cosmetic CI-reopens is marginal. Phase 4 retrospective. |
+| Single Tokio runtime (Polars ASYNC) | keep | Source correct; plan:108 spec wrong (surfaced as should-fix architecture-vs-plan-drift). |
+| mem::transmute Arrow FFI with size+align+length | keep | Phase 1 didn't touch transmute sites. |
+| SpecializedColumnPredicate preserved | keep | Phase 2 scope; scaffolding marker should-fix added. |
+| Sorting ColumnPredicates by name | keep | Phase 1 maintained invariant. |
+| create_skip_batch_predicate=false for Vortex | keep | Branch unchanged. |
+| hashbrown 0.16/0.17 coexistence | keep | BAN compliance verified. |
+| PolarsInstrumentedVortexReadAt mandatory | keep | Three factories all wrap. |
+| row_count clamp `try_from(u64).unwrap_or(MAX)` | keep | Three sites converged. |
+| pub use ::vortex narrowed to 5 sub-modules | keep | PR-1.4 shipped {array, error, file, io, layout}; machine-checkable. |
+
+### Disagreements
+
+| Topic | Synthesizer call |
+|---|---|
+| Overall verdict — 2 reject (spec, maint) vs 2 accept (correctness, arch) | **reject** per conservative-union: any must-fix forces reject. Two reviewers found distinct must-fix items at distinct file_lines; both doc-only fixes that are quick to apply. |
+
+### Dropped re-flags (carry-forward items reviewers re-surfaced)
+
+| Topic | Reason | Reference |
+|---|---|---|
+| Vortex sink producer-error inline comment trim (mod.rs:127-137) | covered by Deferred work — flagged by both spec (scope-drift) and maint (should-fix), but the inline comment trim is already captured as "Vortex sink producer-error inline comment trim + minor polish" in Deferred work. | Deferred work:1515 |
+
+<details><summary>Full Synthesizer Output JSON (gauntlet schema_version: 1)</summary>
+
+See archive section `## Phase 1 raw gauntlet responses (archive) — ### Cycle 3 — preset=phase-4 — reject` above (committed in `d687da096`) for the full Synthesizer Output JSON. Inline copy elided to avoid plan-file bloat; archive is the durability anchor per Step 3.2.5.
 
 </details>
 
