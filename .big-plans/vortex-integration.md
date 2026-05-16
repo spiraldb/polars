@@ -20,9 +20,9 @@ subagent_invocations_this_pr: 0
 subagent_invocations_total: 18
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
-phase_end_cycle: 3
-phase_end_reject_cycles: 1
-last_phase_end_verdict: null
+phase_end_cycle: 4
+phase_end_reject_cycles: 0
+last_phase_end_verdict: accept
 current_pr_is_ci_reopen: null
 last_commit: 522f41397
 ```
@@ -1782,6 +1782,62 @@ Recommendations: Repair the 2 must-fix items first (plan:404+408 typo-narrative 
 See archive section `## Phase 1 raw gauntlet responses (archive) — ### Cycle 3 — preset=phase-4 — reject` above (committed in `d687da096`) for the full Synthesizer Output JSON. Inline copy elided to avoid plan-file bloat; archive is the durability anchor per Step 3.2.5.
 
 </details>
+
+## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 4) — accepted (4-vote)
+
+**Synthesizer output from `/spiral:gauntlet` (`preset=phase-4`, lenses=`spec`+`correctness`+`maint`+`arch`); full Synthesizer Output JSON in the archive section at the top of this Phase-1 review block (commit `6848e0922`).**
+
+### Executive summary
+
+Cycle 4 ACCEPTS at 4-vote across all lenses (spec, correctness, maint, arch), each with high confidence. 0 must-fix, 0 should-fix, 1 nit (cosmetic touchpoint label drift in `last_user_touchpoint_what`; dismissible). The reject-fix iteration that closed cycle 3's 2 doc-only must-fix items shipped clean: plan:404+408 hyphenated `mis-CHARACTERIZES` rephrased to `the hyphenated form of mischaracterizes` (zero remaining banned tokens, verified by grep), and `crates/polars-vortex/README.md:244` now reads `# VortexFooterRef = Arc<Footer> type alias` matching the actual source at `read/mod.rs:16` exactly. Plus a bonus typos-CI fix on my own cycle-3 review prose (`mis-specifies` → `misspecifies` x3 at plan:556, 1668, 1680) caught by CI between cycle-3 rejection and cycle-4 re-entry.
+
+All 4 settled architectural moves intact across the cumulative 78-commit phase: mem-engine delegates to streaming via the explicit Vortex branch at `lp.rs:448-459`; single Polars ASYNC Tokio runtime; mem::transmute C-ABI bridge with size+align+length triplet; SpecializedColumnPredicate fast path preserved for PR-13 transition. The narrowed `pub use ::vortex;` at `lib.rs:22-24` is machine-checkable — anything outside `{array, error, file, io, layout}` fails to compile.
+
+Phase 1 exit criteria all met: (a) THIS review accepts; (b) `cargo check -p polars --features vortex,cloud,parquet,dtype-full` clean; (c) `cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal` shows 66 Rust tests pass; (d) `pytest py-polars/tests/unit/io/test_vortex.py` shows 10 Python tests pass; (e) `gh pr checks 1` shows 12 PASS + 5 long-running pending (test-python matrices), 0 fail — typos + rustfmt explicitly verified PASS on commit `6b808c12a`. Phase 1 closes coherently.
+
+10 cycle-3 should-fix items carry forward to Phase 2.0 housekeeping (stale test counts at 4 plan locations; producer-error inline comment trim; dedicated double-resolve; EXECUTOR plan-spec drift at plan:108; lib.rs narrowing comment paths-count; vortex_file_info function-level doc + type alias; predicate.rs scaffolding marker; morsel_rx.recv() Err-as-EOS doc; RUSTSEC-2024-0436 enumeration). None block Phase 1 close-out per the spec's should-fix-doesn't-block-accept rule.
+
+### Summary of changes
+
+Cycle-4 delta is 11 commits over `88560e6f8..HEAD` (post cycle-3 reject). All doc-only: 2 fix commits (plan typos rephrase + README:244 back-compat phrase drop) + 2 decrement-commits + 1 awaiting-review commit + 1 atomic Step-2.3-step-5 commit + 1 resolution commit + 1 re-enter commit + 1 bonus typos fix (`mis-specifies` → `misspecifies` x3). Total: 2 files modified, +15 / -15 lines. Zero source code touched. Phase 1 cumulative artifact unchanged from cycle 3's accept-baseline EXCEPT for the 2 doc-only fixes.
+
+### Surprises and discoveries
+
+- **Spec-lens review prose itself contained typos-flagged tokens** (`mis-specifies` x3 in cycle-3 executive summary + review section). The very narrative that caught the typos-CI bug recreated it via the rephrase. Process lesson: reviewer prose lives in the same `typos` check scope as plan narrative; review templates should pre-screen for hyphenated `mis-` compounds. (amend_plan: no — process observation)
+- **Touchpoint label drift**: cycle-4 re-entry `last_user_touchpoint_what` says "Phase 3" but `current_phase` is "Phase 1". Ambiguous — "Phase 3" was meant as big-plans skill Step 3 (phase boundary). Non-canonical field; overwritten on next touchpoint. (amend_plan: no)
+- **Cumulative YAML invariants survive the multi-commit reject-loop** (re-open → fix → fix → gauntlet → completion → re-enter). Second successful pass through the loop (first was cycle-2 → cycle-3 CI-reopen). big-plans skill's status-machine appears robust. (amend_plan: no)
+
+### Testing coverage assessment
+
+| Tested case | Test location | Confidence |
+|---|---|---|
+| Plan:404+408 typos rephrase preserves meaning + zero hyphenated tokens | grep MIS-CHARACTERIZES = 0 | high |
+| Plan:556, 1668, 1680 mis-specifies → misspecifies | grep mis-specifies = 0 | high |
+| README:244 matches source read/mod.rs:16 | manual cross-read | high |
+| Cycle-3 maint audit of README crate-layout block (lines 238-258) | re-verified clean | high |
+| Cumulative YAML invariants through reject-loop | per-commit YAML trace | high |
+| Regression check: git diff --stat shows only .md files | 2 files / 15+/15- lines | high |
+| Resolved phase-end must-fix items table both rows [x] with PR-1.4 attribution | plan:1653 | high |
+| CI typos check PASS on commit 6b808c12a | gh pr checks 1 | high |
+| CI rustfmt PASS | gh pr checks 1 | high |
+| 66 Rust + 10 Python tests pass | grep count + CI test jobs | high |
+
+| Untested case | Priority | Why untested |
+|---|---|---|
+| Full CI green (5 long-running test-python matrices still pending) | low | Not blocking; doc-only delta cannot affect test behavior |
+| Cycle-3 should-fix items (10 items) | various | Phase 2.0 housekeeping carry-forward |
+
+### Tradeoffs re-evaluation
+
+All cycle-3 tradeoff verdicts hold unchanged (15 keep + 1 revisit-but-keep). Cycle 4 introduces no new tradeoffs; deferred_items_total unchanged at 6.
+
+### Disagreements
+
+None. All 4 reviewers accept at high confidence.
+
+### Dropped re-flags
+
+None this cycle (the cycle-3 dropped_re_flag entry on producer-error comment trim is now part of the historical archive, not re-surfaced in cycle 4).
 
 ## Deferred work
 
