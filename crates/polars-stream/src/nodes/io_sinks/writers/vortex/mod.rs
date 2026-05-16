@@ -136,7 +136,7 @@ impl FileWriterStarter for VortexWriterStarter {
                                 // the producer's error anyway via `?` below; the join site
                                 // will surface whichever fires first.
                                 let _ = tx
-                                    .send(Err(vortex::error::vortex_err!(
+                                    .send(Err(polars_vortex::vortex::error::vortex_err!(
                                         "vortex sink producer: {e}"
                                     )))
                                     .await;
