@@ -324,7 +324,9 @@ pub fn polars_vortex::write::write_vortex(
 # Read
 pl.scan_vortex(source, *, n_rows=None, row_index_name=None, row_index_offset=0,
                push_predicate=True, initial_read_size=None,
-               scan_concurrency=None, hive_partitioning=None, glob=True,
+               scan_concurrency=None,
+               cache_mode=None,        # Literal["global", "off"] | int | None — Vortex segment cache mode (None / "global" → process-global cache; "off" → disabled; positive int → per-scan Dedicated(bytes))
+               hive_partitioning=None, glob=True,
                hidden_file_prefix=None, schema=None, hive_schema=None,
                try_parse_hive_dates=True, rechunk=False, cache=True,
                storage_options=None, credential_provider="auto",
