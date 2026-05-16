@@ -5,18 +5,18 @@
 ## Current State
 
 ```yaml
-status: phase-boundary
+status: executing
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: null
+current_pr: PR-1.3
 pr_index: 3
-outstanding_must_fix: 0
+outstanding_must_fix: 6
 deferred_items_total: 3
-last_user_touchpoint: 2026-05-15T15:01:18Z
-last_user_touchpoint_what: "PR-1.2 complete (confidence: high, deferred: 1); PR-1.3 reactive placeholder; advancing to Phase 3 end-of-phase 4-vote review"
-subagent_invocations_this_pr: 1
+last_user_touchpoint: 2026-05-15T21:00:00Z
+last_user_touchpoint_what: "phase-end reject — re-open PR-1.3 to address 6 must-fix items"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 10
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
