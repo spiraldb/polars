@@ -46,12 +46,12 @@ impl FileReaderBuilder for VortexReaderBuilder {
     }
 
     fn set_io_metrics(&self, io_metrics: Arc<IOMetrics>) {
-        // `OnceLock::set` returns `Err(input)` if the lock has already been initialized.
-        // The multi-scan layer is permitted to call `set_io_metrics` multiple times on a
-        // shared builder (e.g., when the same builder powers multiple file readers, the
-        // first call wins and subsequent calls are no-ops by design). Discarding the Err
-        // is intentional, not a missed error path.
-        let _ = self.io_metrics.set(io_metrics);
+        // Mirrors the CSV / IPC / NDJSON sibling builders (3 of 4 consensus). Panicking
+        // on a second `set` surfaces refactor regressions immediately: the multi-scan
+        // layer currently invokes `set_io_metrics` exactly once per scan, and any future
+        // change that calls it twice should fail loudly rather than silently use stale
+        // metrics. (Parquet uses `let _ =` but is the lone outlier.)
+        self.io_metrics.set(io_metrics).ok().unwrap()
     }
 
     fn build_file_reader(
