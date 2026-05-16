@@ -68,9 +68,10 @@
 use polars_core::prelude::DataType;
 use polars_core::schema::Schema;
 use polars_utils::arena::{Arena, Node};
+use polars_vortex::vortex::dtype::{DType, Nullability, PType};
 use polars_vortex::vortex::expr::{
-    Expression, and, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null, lit, lt, lt_eq,
-    not, not_eq, or, root,
+    Expression, and, cast, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null, lit, lt,
+    lt_eq, not, not_eq, or, root,
 };
 
 use crate::dsl::Operator;
@@ -232,12 +233,65 @@ pub fn aexpr_to_vortex_expression(
             }
         },
 
+        // --- CAST (PR-2.3 / PR-13.3) ---
+        // `col.cast(Int64) > 100` against an Int32 column pushes down as
+        // `gt(cast(get_item("col", root()), DType::Primitive(I64, Nullable)), lit(100i64))`.
+        // The target dtype is materialized via `polars_dtype_to_vortex_dtype`; unsupported
+        // targets (Decimal — scale/precision interactions; Object — opaque; Categorical /
+        // Enum — string-encoded; Date/Time/Datetime/Duration — Extension types beyond
+        // Vortex's PType/Bool/Utf8 set) fall through to residual via `?`-propagation.
+        AExpr::Cast {
+            expr: inner,
+            dtype,
+            options: _,
+        } => {
+            let target = polars_dtype_to_vortex_dtype(dtype)?;
+            let child = aexpr_to_vortex_expression(*inner, arena, schema)?;
+            Some(cast(child, target))
+        },
+
         // --- unsupported shapes (residual) ---
-        // Cast → PR-2.3. StructField → PR-2.4. Other Function variants (temporal etc.)
-        // → PR-2.5. Sort/Gather/Filter/Agg/Ternary/AnonymousFunction/Over/Rolling etc. all
-        // fall through to residual unconditionally.
+        // StructField → PR-2.4. Other Function variants (temporal etc.) → PR-2.5.
+        // Sort/Gather/Filter/Agg/Ternary/AnonymousFunction/Over/Rolling etc. all fall
+        // through to residual unconditionally.
         _ => None,
     }
+}
+
+/// Convert a Polars [`DataType`] to a Vortex [`DType`] for the CAST arm. Returns `None`
+/// for dtypes Vortex doesn't natively represent as a `Primitive`/`Bool`/`Utf8` (Decimal,
+/// Object, Categorical/Enum, temporal Extension types). Nullability defaults to
+/// `Nullable` because Polars's runtime allows null in any column unless statically proven
+/// otherwise; the runtime nullable Vortex dtype is a strict superset and CAST to a
+/// nullable type is always safe.
+///
+/// **Scope**: PR-2.3 covers only primitive numeric + Bool + Utf8 CAST targets. Decimal
+/// is deliberately refused (Vortex `DType::Decimal` requires `DecimalDType(precision,
+/// scale)` and polars-vortex hasn't validated CAST-via-`vortex::expr::cast` interactions
+/// at the Vortex layer). Other targets are PR-2.4/.5 scope or permanent residuals.
+fn polars_dtype_to_vortex_dtype(dt: &DataType) -> Option<DType> {
+    use DataType::*;
+    let nullable = Nullability::Nullable;
+    Some(match dt {
+        Boolean => DType::Bool(nullable),
+        Int8 => DType::Primitive(PType::I8, nullable),
+        Int16 => DType::Primitive(PType::I16, nullable),
+        Int32 => DType::Primitive(PType::I32, nullable),
+        Int64 => DType::Primitive(PType::I64, nullable),
+        UInt8 => DType::Primitive(PType::U8, nullable),
+        UInt16 => DType::Primitive(PType::U16, nullable),
+        UInt32 => DType::Primitive(PType::U32, nullable),
+        UInt64 => DType::Primitive(PType::U64, nullable),
+        Float32 => DType::Primitive(PType::F32, nullable),
+        Float64 => DType::Primitive(PType::F64, nullable),
+        String => DType::Utf8(nullable),
+        // Decimal — Vortex `DType::Decimal(DecimalDType(precision, scale), nullable)`
+        // requires usize ↔ u8 narrow + validation per the project BAN against `as` casts
+        // on Vortex Decimal precision/scale. Deferred to a future PR.
+        // Object/Categorical/Enum/Date/Datetime/Time/Duration/Binary/List/Struct/Array/
+        // Null/Unknown — not in PR-2.3 scope.
+        _ => return None,
+    })
 }
 
 /// Schema-aware operand type check: determines whether `node`'s resolved dtype is
@@ -841,9 +895,12 @@ mod tests {
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
+    // === PR-2.3 / PR-13.3: CAST in predicates ===
+
+    /// CAST to a supported primitive (Int64) ships in PR-2.3 — was pre-PR-2.3 None,
+    /// now Some.
     #[test]
-    fn unsupported_cast_returns_none() {
-        // `col.cast(Int64)` is PR-2.3's scope.
+    fn shape_cast_to_int64_ships_in_pr_2_3() {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let n = arena.add(AExpr::Cast {
@@ -851,7 +908,77 @@ mod tests {
             dtype: DataType::Int64,
             options: CastOptions::Strict,
         });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// CAST to Float64 — supported.
+    #[test]
+    fn shape_cast_to_float64() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Float64,
+            options: CastOptions::Strict,
+        });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// CAST to Boolean — supported.
+    #[test]
+    fn shape_cast_to_bool() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Boolean,
+            options: CastOptions::Strict,
+        });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// CAST to String — supported.
+    #[test]
+    fn shape_cast_to_string() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::String,
+            options: CastOptions::Strict,
+        });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// CAST to Decimal — refused (Vortex Decimal scale/precision interactions are NOT
+    /// validated at the polars-vortex layer; tracked in the function doc as deferred).
+    #[cfg(feature = "dtype-decimal")]
+    #[test]
+    fn shape_cast_to_decimal_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Decimal(10, 2),
+            options: CastOptions::Strict,
+        });
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// CAST nested in a comparison — `col.cast(Int64) > 100` per the plan's PR-13.3
+    /// acceptance test.
+    #[test]
+    fn shape_cast_then_compare() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let cast_node = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Int64,
+            options: CastOptions::Strict,
+        });
+        let l = lit_i32(&mut arena, 100);
+        let n = binop(&mut arena, cast_node, Operator::Gt, l);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
     #[test]

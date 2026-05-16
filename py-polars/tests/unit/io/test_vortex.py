@@ -135,6 +135,25 @@ def test_scan_with_arithmetic_filter(tmp_path: Path) -> None:
     assert out["b"].to_list() == ["4"]
 
 
+def test_scan_with_cast_filter(tmp_path: Path) -> None:
+    """PR-13.3 acceptance test: ``col.cast(Int64) > 100`` over an Int32
+    column pushes down through the AExpr-direct convertor's CAST arm
+    (PR-2.3).
+
+    Convertor maps `AExpr::Cast { dtype: Int64 }` →
+    `vortex::expr::cast(child, DType::Primitive(I64, Nullable))`. The legacy
+    `SpecializedColumnPredicate` fast path cannot represent a CAST on the
+    column side, so without PR-2.3 this would fall back to no-pushdown.
+    """
+    path = tmp_path / "cast_filter.vortex"
+    df = pl.DataFrame({"a": pl.Series([1, 50, 101, 200], dtype=pl.Int32)})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("a").cast(pl.Int64) > 100).collect()
+    assert out.shape == (2, 1)
+    assert out["a"].to_list() == [101, 200]
+
+
 def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
     """PR-2.2 cycle-1 must-fix M1 regression test (cycle-2 should-fix
     F-SF-CYCLE2-006 / C2-003): hive-partitioned Vortex scans with a predicate
