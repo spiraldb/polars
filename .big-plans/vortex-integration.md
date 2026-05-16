@@ -12,7 +12,7 @@ current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: PR-1.3
 pr_index: 3
-outstanding_must_fix: 2
+outstanding_must_fix: 1
 deferred_items_total: 3
 last_user_touchpoint: 2026-05-15T22:30:00Z
 last_user_touchpoint_what: "PR-1.3 inner-loop gauntlet cycle 1 rejected — 2 must-fix items"
