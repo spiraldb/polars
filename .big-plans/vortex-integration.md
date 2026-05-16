@@ -424,6 +424,146 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 | must-fix | `crates/polars-vortex/README.md:325-332` | The documented `pl.scan_vortex(...)` signature in the README is missing the `cache_mode=` parameter that PR-1.2 shipped — the headline new public-API surface of this phase. README is the canonical reference doc and is... | PR-1.3 | [x] |
 | must-fix | `crates/polars-stream/src/nodes/io_sources/vortex/builder.rs:49` | `let _ = self.io_metrics.set(io_metrics);` silently swallows the `Err(io_metrics)` returned by `OnceLock::set` when called twice. Violates the project BAN: 'Silent error swallowing: `let _ = fallible_op()` ... without... | PR-1.3 | [x] |
 
+## Phase 1 raw gauntlet responses (archive)
+
+### Cycle 3 — preset=phase-4 — reject
+
+<details><summary>Full Synthesizer Output JSON (gauntlet schema_version: 1)</summary>
+
+```json
+{
+  "schema_version": 1,
+  "preset": "phase-4",
+  "lenses_used": ["spec", "correctness", "maint", "arch"],
+  "review_count": 4,
+  "unified_findings": [
+    {
+      "severity": "must-fix",
+      "kind": "missing-acceptance",
+      "file_line": ".big-plans/vortex-integration.md:404",
+      "found_by": ["spec"],
+      "description": "PR-1.4 CI-reopen declared scope is 'fix rustfmt + typos CI failures'. The typos-fix narrative at lines 404 and 408 introduces 3 new occurrences of the typos-banned token while explaining the fix, recreating the exact CI failure. gh pr checks 1 shows main (Lint global / Spell Check with Typos) FAIL on current HEAD 1a244a0f7. Phase 1 exit criterion (e) not met.",
+      "recommended_fix": "Edit plan lines 404 and 408 to reference the prior typo via a typos-safe construction (rephrase as 'closed-compound form', or wrap each reference in extra backticks/code fence). Verify with local typos . before pushing."
+    },
+    {
+      "severity": "must-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/README.md:244",
+      "found_by": ["maint"],
+      "description": "README crate-layout block describes mod.rs as 'VortexFooterRef alias + back-compat metadata re-export' — but PR-1.4 commit 3479c6bdb inlined the metadata re-export. README is the canonical reference doc and is now factually wrong; a fresh engineer following the README will hit a not-found compile error.",
+      "recommended_fix": "Update crates/polars-vortex/README.md:244 to drop the back-compat phrase — e.g., '# VortexFooterRef = Arc<Footer> alias'. Audit the rest of the crate-layout block in one sweep for any other stale references to PR-1.4 inlined/narrowed items."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scope-drift",
+      "file_line": ".big-plans/vortex-integration.md:196",
+      "found_by": ["spec"],
+      "description": "PR-1.4 declared scope: plan-doc fixes (row-184 stale test counts). Only the Phase 1 row was updated. Stale '65 Rust + 8 Python' references remain at lines 77 (layer map), 96 (polars-vortex crate inventory), 196 (PR-1.1 row), 205 (PR-2.6 row).",
+      "recommended_fix": "Sweep the plan doc for all '65 Rust' / '8 Python' / '65+8' references and update each to 'at least 66 / at least 10' matching the line-185 fix."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "fragmentation",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:293-303 + :1033-1039 (overlaps with crates/polars-vortex/src/read/options.rs:67-74)",
+      "found_by": ["maint", "arch"],
+      "description": "Dedicated double-resolve: vortex_file_info and the streaming source each call VortexCacheMode::Dedicated(N).resolve() which allocates a fresh Moka cache. Two independent caches per scan; segments fetched at schema-discovery time don't carry into data read.",
+      "recommended_fix": "Either (a) thread the resolved cache from vortex_file_info through to the streaming source so one cache backs both reads, or (b) document the dual-cache pattern with rationale + perf tradeoff."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "load-bearing-complexity",
+      "file_line": "crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:85-177",
+      "found_by": ["arch"],
+      "description": "Producer/writer dual-task pattern lacks a consolidated top-of-module rationale comment. The dual-runtime split (producer on async_executor, writer on Tokio ASYNC) is load-bearing for the cross-runtime channel mediation but rationale is scattered.",
+      "recommended_fix": "Add a 5-10 line module-doc block explaining: why two tasks, who signals shutdown, channel buffer-depth meaning, where error paths reunite. Reference the Deferred-work producer-error comment trim entry for the inline cleanup."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "architecture-vs-plan-drift",
+      "file_line": "crates/polars-vortex/src/session.rs:43-49 + .big-plans/vortex-integration.md:108",
+      "found_by": ["arch"],
+      "description": "Plan spec at line 108 reads 'Handle::new(Arc::downgrade(Arc::new(ASYNC.handle()) as Arc<dyn Executor>))' which would create a Weak<dyn Executor> that IMMEDIATELY dangles. Actual implementation at session.rs:40-48 holds a static LazyLock<Arc<dyn Executor>> so the Weak always resolves. Source is correct; spec is wrong.",
+      "recommended_fix": "Update plan line 108 to match session.rs:40-48: 'Handle::new(Arc::downgrade(&EXECUTOR))' where EXECUTOR is a static LazyLock<Arc<dyn Executor>>."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-vortex/src/lib.rs:14-21",
+      "found_by": ["maint"],
+      "description": "Narrowing doc-comment claims '8 paths' but enumerates 12 distinct items across 5 sub-modules. Audit miscount or pre-update text.",
+      "recommended_fix": "Update the count to 12 (or replace path-by-path enumeration with the invariant 'Anything outside vortex::{array, error, file, io, layout} fails to compile. Re-run the audit before adding a new path.')."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:293-303",
+      "found_by": ["maint"],
+      "description": "vortex_file_info has no function-level doc-comment; the fully-qualified type 'std::sync::Arc<dyn polars_vortex::vortex::layout::segments::SegmentCache>' is unwieldy at the signature site.",
+      "recommended_fix": "Add /// doc-comment summarizing (1) when called (IR-build-time postscript schema discovery), (2) each parameter's purpose, (3) the segment_cache contract. Introduce a type alias VortexSegmentCacheRef and use it at cross-crate signatures."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "name-quality",
+      "file_line": "crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:302",
+      "found_by": ["maint"],
+      "description": "Fully-qualified segment_cache type at signature site (overlaps with the doc-quality finding above; name-quality angle).",
+      "recommended_fix": "Same remediation — introduce a type alias and use it at the signature site."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "scaffolding",
+      "file_line": "crates/polars-vortex/src/read/predicate.rs:1-21",
+      "found_by": ["maint"],
+      "description": "Missing scaffolding marker on the SpecializedColumnPredicate fast path slated for deletion in PR-2.6. Without a TODO marker, engineers landing PR-2.6 will have to re-derive the deletion scope.",
+      "recommended_fix": "Add '// TODO(PR-2.6): remove this SpecializedColumnPredicate fast path once the general predicate-pushdown path lands. Tracked: .big-plans/vortex-integration.md:<row>' comment."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "hidden-assumption",
+      "file_line": "crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:173-204",
+      "found_by": ["maint"],
+      "description": "Undocumented behavioral assumption: morsel_rx.recv() returning Err is treated as clean EOS. If upstream changes behavior, silent-swallowing risk.",
+      "recommended_fix": "Add a comment documenting the assumption. Optionally add a debug_assert that no error has been queued on the error channel at this point."
+    },
+    {
+      "severity": "should-fix",
+      "kind": "doc-quality",
+      "file_line": ".big-plans/vortex-integration.md:339",
+      "found_by": ["spec"],
+      "description": "PR-1.2 impl-status bullet missing RUSTSEC-2024-0436 enumeration (was added to deny.toml in PR-1.2 alongside 0BSD).",
+      "recommended_fix": "Add RUSTSEC-2024-0436 to the PR-1.2 impl-status bullet enumeration."
+    }
+  ],
+  "disagreements": [
+    {
+      "topic": "Overall verdict — 2 reject vs 2 accept",
+      "positions": [
+        { "lens": "spec", "position": "reject (must-fix: typos recurrence at plan:404)" },
+        { "lens": "correctness", "position": "accept (0 findings)" },
+        { "lens": "maint", "position": "reject (must-fix: README:244 back-compat phrase outdated)" },
+        { "lens": "arch", "position": "accept (0 must-fix, 3 should-fix)" }
+      ],
+      "synthesizer_call": "reject — conservative-union: ANY must-fix forces reject. Two reviewers found distinct must-fix items at distinct file_lines (plan:404 doc-typos recurrence; README:244 source-of-truth drift). Both are doc-only fixes that are quick to apply."
+    }
+  ],
+  "dropped_re_flags": [
+    {
+      "topic": "Vortex sink producer-error inline comment trim (mod.rs:127-137)",
+      "reason": "covered by Deferred work",
+      "reference": "Deferred work:1515"
+    }
+  ],
+  "executive_summary": "Overall verdict: REJECT. Two must-fix items prevent Phase 1 close-out, both doc-only and both mechanical to apply. (1) Spec lens caught a typos-CI regression at .big-plans/vortex-integration.md:404,408 where the narrative explaining the typos fix reintroduces three occurrences of the banned token, recreating the exact CI failure. The cycle-3 inner-loop CI-reopen 2-vote accepted at confidence:high without verifying actual post-push CI state. (2) Maint lens caught crates/polars-vortex/README.md:244 still describing a 'metadata' back-compat re-export shim that PR-1.4 commit 3479c6bdb deleted — fresh engineers will hit a not-found compile error. 2-vs-2 split: spec + maint reject; correctness + arch accept. Synthesizer applies conservative-union. Notable surprises: 4 unfixed stale-test-count locations beyond row 185; EXECUTOR Arc pattern at plan:108 mis-specifies session.rs:43-49; Dedicated double-resolve allocates 2 independent caches per scan (flagged from 2 angles); morsel_rx.recv() Err-as-EOS is undocumented; RUSTSEC-2024-0436 enumeration missing from PR-1.2 impl-status. The producer-error inline comment finding drops to dropped_re_flags (already a Deferred work entry). Counts: 2 must-fix, 10 should-fix, 6 nits. Estimated remediation: ~30 minutes for the 2 must-fix items + reverify CI green.",
+  "overall": "reject",
+  "must_fix_count": 2,
+  "should_fix_count": 10,
+  "nit_count": 6,
+  "review_cycles_this_invocation": 1
+}
+```
+
+</details>
+
 ## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 1) — rejected (4-vote)
 
 **Synthesizer output from `/spiral:gauntlet` (`preset=phase-4`, lenses=`spec`+`correctness`+`maint`+`arch`); full Synthesizer Output JSON in the `<details>` block at the end of this section.**
