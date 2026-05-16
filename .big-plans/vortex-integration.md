@@ -5,7 +5,7 @@
 ## Current State
 
 ```yaml
-status: executing
+status: awaiting-review
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
@@ -14,8 +14,8 @@ current_pr: PR-2.1
 pr_index: 2
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T19:55:00Z
-last_user_touchpoint_what: "started PR-2.1 (PR-13.1 AExpr-direct convertor module foundation — 14 shapes; new crates/polars-vortex/src/read/aexpr_predicate.rs)"
+last_user_touchpoint: 2026-05-16T20:10:00Z
+last_user_touchpoint_what: "PR-2.1 implementation complete (vortex_convertor in polars-plan; file location corrected from plan); invoking gauntlet preset=pr-2"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 22
 review_cycles_this_pr: 0
@@ -24,7 +24,7 @@ phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: fd9924928
+last_commit: 4f8750a59
 ```
 
 ## Context
