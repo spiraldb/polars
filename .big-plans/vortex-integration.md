@@ -15,10 +15,10 @@ pr_index: 4
 outstanding_must_fix: 0
 deferred_items_total: 6
 last_user_touchpoint: 2026-05-16T00:15:00Z
-last_user_touchpoint_what: "PR-1.4 inner-loop cycle 1 rejected — 1 CI-blocker must-fix (clippy::clone_on_copy)"
-subagent_invocations_this_pr: 1
-subagent_invocations_total: 14
-review_cycles_this_pr: 1
+last_user_touchpoint_what: "PR-1.4 inner-loop cycle 2 accepted (zero must-fix); 4 cycle-1 should-fix items deferred to Phase 2 entry"
+subagent_invocations_this_pr: 2
+subagent_invocations_total: 15
+review_cycles_this_pr: 2
 phase_entry_sha: 657c78c97
 phase_end_cycle: 2
 phase_end_reject_cycles: 0
