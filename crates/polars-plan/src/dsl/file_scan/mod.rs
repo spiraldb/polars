@@ -18,7 +18,7 @@ use polars_utils::slice_enum::Slice;
 #[cfg(feature = "vortex")]
 use polars_vortex::VortexScanOptions;
 #[cfg(feature = "vortex")]
-use polars_vortex::read::metadata::VortexFooterRef;
+use polars_vortex::read::VortexFooterRef;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use strum_macros::IntoStaticStr;

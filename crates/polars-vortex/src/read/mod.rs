@@ -15,8 +15,3 @@ pub mod schema;
 /// dedicated module) because it's a single type alias.
 pub type VortexFooterRef = Arc<Footer>;
 
-/// Compatibility module — `polars-plan` and downstream crates referred to this
-/// path during the integration's evolution.
-pub mod metadata {
-    pub use super::VortexFooterRef;
-}
