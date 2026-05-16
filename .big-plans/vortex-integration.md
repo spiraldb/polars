@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: phase-boundary
+status: executing
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: null
+current_pr: PR-1.4
 pr_index: 5
-outstanding_must_fix: 0
+outstanding_must_fix: 2
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T15:35:00Z
-last_user_touchpoint_what: "PR-1.4 CI-reopen complete (confidence: high, 0 new deferred); advancing to Phase 3.1 (pr_index==phase_pr_count+1)"
+last_user_touchpoint: 2026-05-16T16:00:00Z
+last_user_touchpoint_what: "phase-end reject (cycle 3) — re-open PR-1.4 to address 2 must-fix items (plan:404 typos recurrence + README:244 back-compat phrase)"
 subagent_invocations_this_pr: 0
-subagent_invocations_total: 16
+subagent_invocations_total: 17
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 3
 phase_end_reject_cycles: 0
 last_phase_end_verdict: reject
 current_pr_is_ci_reopen: null
-last_commit: 0677ffcc9
+last_commit: 00aac72af
 ```
 
 ## Context
