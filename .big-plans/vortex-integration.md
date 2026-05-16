@@ -5,20 +5,20 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: executing
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: PR-1.4
 pr_index: 4
-outstanding_must_fix: 0
+outstanding_must_fix: 1
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T00:10:00Z
-last_user_touchpoint_what: "PR-1.4 4 commits done; awaiting inner-loop gauntlet review"
-subagent_invocations_this_pr: 0
-subagent_invocations_total: 13
-review_cycles_this_pr: 0
+last_user_touchpoint: 2026-05-16T00:15:00Z
+last_user_touchpoint_what: "PR-1.4 inner-loop cycle 1 rejected — 1 CI-blocker must-fix (clippy::clone_on_copy)"
+subagent_invocations_this_pr: 1
+subagent_invocations_total: 14
+review_cycles_this_pr: 1
 phase_entry_sha: 657c78c97
 phase_end_cycle: 2
 phase_end_reject_cycles: 0
