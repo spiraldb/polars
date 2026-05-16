@@ -142,7 +142,16 @@ fn bytes_to_like_literal(bytes: &[u8]) -> Option<&str> {
 /// type system unifies nullability when comparing against a `NonNullable` column,
 /// so this is correct but may reduce pruning effectiveness if Vortex's pruning
 /// evaluator is stricter than its comparison evaluator.
-fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<VortexScalar> {
+/// Convert a Polars [`polars_core::scalar::Scalar`] into a Vortex [`VortexScalar`].
+///
+/// `pub` because the PR-13 AExpr-direct convertor at
+/// `polars_plan::plans::aexpr::predicates::vortex_convertor` (added in PR-2.1) reuses this
+/// mapping for `AExpr::Literal(LiteralValue::Scalar(s))` shapes. Single source of truth for
+/// the `AnyValue` → `VortexScalar` mapping across both convertor paths; once PR-2.6 deletes
+/// this `predicate` module's [`polars_to_vortex_predicate`], the helper either migrates to
+/// the AExpr-direct path or stays here as a standalone scalar-conversion utility (it's not
+/// coupled to the specialized-predicate translation).
+pub fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<VortexScalar> {
     let nul = Nullability::Nullable;
     Some(match scalar.value() {
         AnyValue::Null => return None, // Vortex `null` requires a known DType; skip for now.

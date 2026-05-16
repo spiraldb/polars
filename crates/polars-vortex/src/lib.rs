@@ -18,7 +18,7 @@ pub mod write;
 /// files is machine-checkable. Re-run the actual-use audit (grep for `polars_vortex::vortex::`)
 /// before adding a new sub-module to this list.
 pub mod vortex {
-    pub use ::vortex::{array, error, file, io, layout};
+    pub use ::vortex::{array, error, expr, file, io, layout};
 }
 pub use read::options::{VortexCacheMode, VortexScanOptions};
 pub use session::session;
