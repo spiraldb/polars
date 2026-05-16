@@ -14,4 +14,3 @@ pub mod schema;
 /// [`polars_plan::dsl::FileScanIR::Vortex::footer`]. Lives here (rather than in a
 /// dedicated module) because it's a single type alias.
 pub type VortexFooterRef = Arc<Footer>;
-

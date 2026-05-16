@@ -300,10 +300,7 @@ pub(super) async fn vortex_file_info(
     // matching streaming-source path threads the same value via
     // `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:138`.
     segment_cache: std::sync::Arc<dyn polars_vortex::vortex::layout::segments::SegmentCache>,
-) -> PolarsResult<(
-    FileInfo,
-    Option<polars_vortex::read::VortexFooterRef>,
-)> {
+) -> PolarsResult<(FileInfo, Option<polars_vortex::read::VortexFooterRef>)> {
     use polars_core::runtime::ASYNC;
     use polars_vortex::read::read_at::{in_memory_read_at, local_file_read_at};
     use polars_vortex::read::schema::vortex_dtype_to_schema;
