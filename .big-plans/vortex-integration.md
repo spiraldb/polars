@@ -5,7 +5,7 @@
 ## Current State
 
 ```yaml
-status: executing
+status: phase-boundary
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
@@ -14,15 +14,15 @@ current_pr: null
 pr_index: 5
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T16:28:00Z
-last_user_touchpoint_what: "phase-end reject (cycle 3) — PR-1.4 must-fix items resolved; Pending table closed"
+last_user_touchpoint: 2026-05-16T16:30:00Z
+last_user_touchpoint_what: "re-enter Phase 3 end-review after cycle-3 reject; ready for cycle-4 gauntlet"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 18
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 3
-phase_end_reject_cycles: 0
-last_phase_end_verdict: reject
+phase_end_reject_cycles: 1
+last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
 last_commit: 522f41397
 ```
@@ -1650,7 +1650,7 @@ _(none — all 4 reviewers agreed on accept verdict)_
 
 </details>
 
-## Pending phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 3
+## Resolved phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 3
 
 | Severity | File:line | Description | Implicated PR | Resolved |
 |----------|-----------|-------------|---------------|----------|
