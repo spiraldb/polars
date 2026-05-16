@@ -295,6 +295,11 @@ pub(super) async fn vortex_file_info(
     row_index: Option<&RowIndex>,
     cloud_options: Option<&polars_io::cloud::CloudOptions>,
     n_sources: usize,
+    // User-resolved segment cache (from `VortexScanOptions::segment_cache.resolve()`).
+    // The IR-build-time postscript read MUST honor the user's cache_mode choice; the
+    // matching streaming-source path threads the same value via
+    // `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:138`.
+    segment_cache: std::sync::Arc<dyn polars_vortex::vortex::layout::segments::SegmentCache>,
 ) -> PolarsResult<(
     FileInfo,
     Option<polars_vortex::read::metadata::VortexFooterRef>,
@@ -302,7 +307,7 @@ pub(super) async fn vortex_file_info(
     use polars_core::runtime::ASYNC;
     use polars_vortex::read::read_at::{in_memory_read_at, local_file_read_at};
     use polars_vortex::read::schema::vortex_dtype_to_schema;
-    use polars_vortex::session::{segment_cache, session};
+    use polars_vortex::session::session;
     use polars_vortex::vortex::file::OpenOptionsSessionExt;
 
     let session = session();
@@ -333,7 +338,7 @@ pub(super) async fn vortex_file_info(
         .spawn(async move {
             session
                 .open_options()
-                .with_segment_cache(segment_cache())
+                .with_segment_cache(segment_cache)
                 .open(read_at)
                 .await
                 .map_err(|e| polars_err!(ComputeError: "vortex open: {e}"))
@@ -1024,11 +1029,17 @@ this scan to succeed with an empty DataFrame.",
                         )
                     }
 
+                    // Honor `VortexScanOptions::segment_cache` at the IR-build-time
+                    // postscript read; previously hardcoded the global cache,
+                    // silently ignoring the user's `cache_mode='off'` opt-out
+                    // (cycle-2 should-fix).
+                    let segment_cache = options.segment_cache.clone().resolve();
                     let (mut file_info, mut metadata) = scans::vortex_file_info(
                         first_scan_source,
                         unified_scan_args.row_index.as_ref(),
                         cloud_options,
                         n_sources,
+                        segment_cache,
                     )
                     .await
                     .map_err(|e| e.context(failed_here!(vortex scan)))?;
