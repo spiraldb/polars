@@ -45,6 +45,12 @@ pub struct VortexFileReader {
     pub cloud_options: Option<Arc<CloudOptions>>,
     pub options: Arc<VortexScanOptions>,
     pub footer: Option<Arc<Footer>>,
+    /// Resolved segment cache threaded from IR-build via `FileScanIR::Vortex::segment_cache`
+    /// → `VortexReaderBuilder::segment_cache` → here. When `Some`, `initialize()` uses this
+    /// Arc directly so the data read shares one Moka cache with the IR-build postscript
+    /// read. When `None` (user-supplied-schema path; no IR-build postscript read happened),
+    /// `initialize()` falls back to `options.segment_cache.resolve()` for a fresh cache.
+    pub segment_cache: Option<polars_vortex::read::VortexSegmentCacheRef>,
     pub io_metrics: OptIOMetrics,
 
     /// Set by `initialize()`.
@@ -132,10 +138,20 @@ impl FileReader for VortexFileReader {
         if let Some(n) = self.options.initial_read_size {
             open_opts = open_opts.with_initial_read_size(n);
         }
-        // Attach the requested segment cache. `Global` (default) returns the
-        // process-wide cache so successive scans of the same file reuse
-        // decompressed segments; `Off` / `Dedicated(N)` give finer control.
-        open_opts = open_opts.with_segment_cache(self.options.segment_cache.resolve());
+        // Attach the requested segment cache. Prefer the threaded cache (resolved once at
+        // IR-build time via `FileScanIR::Vortex::segment_cache`) so `Dedicated(N)` shares
+        // ONE Moka cache instance between the IR-build postscript read and this data read
+        // — segments fetched during schema discovery carry into the scan. Fall back to a
+        // fresh `.resolve()` only on the user-supplied-schema path where no IR-build read
+        // happened (`segment_cache: None` from `FileScanIR::Vortex`). `Global` and `Off`
+        // are unaffected because `.resolve()` is idempotent for those variants (returns
+        // the process-wide singleton / a NoOp respectively).
+        let segment_cache = self
+            .segment_cache
+            .clone()
+            .map(|c| c.0)
+            .unwrap_or_else(|| self.options.segment_cache.resolve());
+        open_opts = open_opts.with_segment_cache(segment_cache);
 
         let vxf = ASYNC
             .spawn(async move {

@@ -138,6 +138,14 @@ pub enum FileScanIR {
         options: VortexScanOptions,
         #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
         metadata: Option<VortexFooterRef>,
+        /// Caller-resolved segment cache, threaded from IR-build into the streaming source
+        /// so the schema-discovery read and the data read share one Moka cache instance.
+        /// Without this thread-through, `VortexCacheMode::Dedicated(N).resolve()` runs twice
+        /// per logical scan (once at IR-build, once at streaming-source-time), producing
+        /// two independent caches and losing the discovery→data prefetching benefit. See
+        /// [`polars_vortex::read::VortexSegmentCacheRef`].
+        #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
+        segment_cache: Option<polars_vortex::read::VortexSegmentCacheRef>,
     },
 
     #[cfg(feature = "python")]
@@ -448,6 +456,7 @@ mod _file_scan_eq_hash {
         Vortex {
             options: &'a polars_vortex::VortexScanOptions,
             metadata: Option<usize>,
+            segment_cache: Option<usize>,
         },
 
         #[cfg(feature = "python")]
@@ -497,9 +506,14 @@ mod _file_scan_eq_hash {
                 },
 
                 #[cfg(feature = "vortex")]
-                FileScanIR::Vortex { options, metadata } => FileScanEqHashWrap::Vortex {
+                FileScanIR::Vortex {
+                    options,
+                    metadata,
+                    segment_cache,
+                } => FileScanEqHashWrap::Vortex {
                     options,
                     metadata: metadata.as_ref().map(arc_as_ptr),
+                    segment_cache: segment_cache.as_ref().map(|c| arc_as_ptr(&c.0)),
                 },
 
                 #[cfg(feature = "python")]

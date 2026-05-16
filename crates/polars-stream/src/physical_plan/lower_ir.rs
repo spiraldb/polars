@@ -766,10 +766,15 @@ pub fn lower_ir(
                     FileScanIR::Vortex {
                         options,
                         metadata: first_metadata,
+                        segment_cache,
                     } => Arc::new(
                         crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
                             options: Arc::new(options.clone()),
                             first_metadata: first_metadata.clone(),
+                            // Threaded from IR-build (scans.rs::vortex_file_info caller); when
+                            // None (schema-supplied path), the streaming source resolves a
+                            // fresh cache from `options.segment_cache`.
+                            segment_cache: segment_cache.clone(),
                             io_metrics: std::sync::OnceLock::new(),
                         },
                     ) as _,

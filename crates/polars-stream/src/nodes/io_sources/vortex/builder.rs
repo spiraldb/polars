@@ -5,6 +5,7 @@ use std::sync::Arc;
 use polars_io::cloud::CloudOptions;
 use polars_io::metrics::IOMetrics;
 use polars_plan::dsl::ScanSource;
+use polars_vortex::read::VortexSegmentCacheRef;
 use polars_vortex::{VortexScanOptions, vortex};
 
 use super::VortexFileReader;
@@ -16,6 +17,12 @@ use crate::nodes::io_sources::multi_scan::reader_interface::capabilities::Reader
 pub struct VortexReaderBuilder {
     pub options: Arc<VortexScanOptions>,
     pub first_metadata: Option<Arc<vortex::file::Footer>>,
+    /// Resolved segment cache threaded from IR-build (`FileScanIR::Vortex::segment_cache`).
+    /// When `Some`, the streaming source uses this Arc for the data read so it shares one
+    /// Moka cache instance with the IR-build-time postscript read. When `None`, the
+    /// streaming source falls back to `options.segment_cache.resolve()` (e.g., user-supplied
+    /// schema path where no postscript read happened at IR-build).
+    pub segment_cache: Option<VortexSegmentCacheRef>,
     pub io_metrics: std::sync::OnceLock<Arc<IOMetrics>>,
 }
 
@@ -68,6 +75,9 @@ impl FileReaderBuilder for VortexReaderBuilder {
             footer: (scan_source_idx == 0)
                 .then(|| self.first_metadata.clone())
                 .flatten(),
+            // Threaded resolved cache for the data read; `None` triggers fallback resolve()
+            // inside `VortexFileReader::initialize`. Same pattern as `footer` above.
+            segment_cache: self.segment_cache.clone(),
             io_metrics: OptIOMetrics(self.io_metrics.get().cloned()),
             init_data: None,
         }) as _

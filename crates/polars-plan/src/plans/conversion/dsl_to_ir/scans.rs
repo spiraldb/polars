@@ -289,17 +289,47 @@ pub(super) async fn parquet_file_info(
     Ok((file_info, Some(metadata)))
 }
 
+/// Discovers the Vortex schema + row count by reading the file's postscript at IR-build time
+/// (before the streaming source spins up). Used during DSL → IR conversion to populate
+/// [`FileInfo`] (the schema + row count contract the optimizer and mem-engine consume).
+///
+/// # Parameters
+///
+/// - `first_scan_source` — only the first source is read for schema discovery; downstream
+///   sources share the schema (validated post-discovery by multi-scan).
+/// - `row_index` — when set, inserts the row-index column at the head of the discovered schema
+///   so downstream consumers see it as a real column.
+/// - `cloud_options` — for `ScanSourceRef::Path` with a non-local scheme; ignored otherwise.
+///   When the `cloud` feature is OFF and a remote path is supplied, errors loudly.
+/// - `n_sources` — used only for `known_size` propagation: single-source scans publish the
+///   exact row count; multi-source scans publish `None` (per-file count summation happens
+///   later at the multi-scan layer).
+/// - `segment_cache` — **caller-resolved** [`VortexSegmentCacheRef`] (from
+///   [`VortexCacheMode::resolve`](polars_vortex::read::options::VortexCacheMode::resolve)).
+///   The caller threads the SAME `Arc` into the streaming source via
+///   [`FileScanIR::Vortex::segment_cache`](polars_plan::dsl::FileScanIR) so the IR-build
+///   postscript read and the streaming data read share one Moka cache instance. Dedicated(N)
+///   single-cache semantics depend on this thread-through; do not call `.resolve()` separately
+///   here.
+///
+/// # Returns
+///
+/// `(FileInfo, Option<VortexFooterRef>)` — the IR-level file info + the parsed footer for the
+/// first source. The footer is `Some` only for the first source (downstream sources re-parse
+/// their own footers at streaming-source-time per the multi-scan fast-path convention).
+///
+/// # When called
+///
+/// Exactly once per Vortex `LazyFrame::scan_vortex(...)` invocation, during DSL → IR
+/// conversion. NOT called during streaming data reads (those go through the streaming source
+/// node at `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs`).
 #[cfg(feature = "vortex")]
 pub(super) async fn vortex_file_info(
     first_scan_source: ScanSourceRef<'_>,
     row_index: Option<&RowIndex>,
     cloud_options: Option<&polars_io::cloud::CloudOptions>,
     n_sources: usize,
-    // User-resolved segment cache (from `VortexScanOptions::segment_cache.resolve()`).
-    // The IR-build-time postscript read MUST honor the user's cache_mode choice; the
-    // matching streaming-source path threads the same value via
-    // `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:138`.
-    segment_cache: std::sync::Arc<dyn polars_vortex::vortex::layout::segments::SegmentCache>,
+    segment_cache: polars_vortex::read::VortexSegmentCacheRef,
 ) -> PolarsResult<(
     FileInfo,
     Option<polars_vortex::read::VortexFooterRef>,
@@ -340,7 +370,7 @@ pub(super) async fn vortex_file_info(
         .spawn(async move {
             session
                 .open_options()
-                .with_segment_cache(segment_cache)
+                .with_segment_cache(segment_cache.0)
                 .open(read_at)
                 .await
                 .map_err(|e| polars_err!(ComputeError: "vortex open: {e}"))
@@ -1024,6 +1054,9 @@ this scan to succeed with an empty DataFrame.",
                         FileScanIR::Vortex {
                             options,
                             metadata: None,
+                            // No IR-build postscript read happened (user supplied schema);
+                            // streaming source will resolve fresh.
+                            segment_cache: None,
                         },
                     )
                 } else {
@@ -1039,17 +1072,22 @@ this scan to succeed with an empty DataFrame.",
                         )
                     }
 
-                    // Honor `VortexScanOptions::segment_cache` at the IR-build-time
-                    // postscript read; previously hardcoded the global cache,
-                    // silently ignoring the user's `cache_mode='off'` opt-out
-                    // (cycle-2 should-fix).
-                    let segment_cache = options.segment_cache.resolve();
+                    // Resolve once and thread the SAME `Arc<dyn SegmentCache>` through both
+                    // (a) `vortex_file_info` for the IR-build-time postscript schema-discovery
+                    // read and (b) the FileScanIR::Vortex::segment_cache field for the
+                    // streaming source's data read. For `Dedicated(N)` this is load-bearing:
+                    // pre-PR-2.0 the streaming source called `options.segment_cache.resolve()`
+                    // independently, producing TWO independent Moka caches per logical scan;
+                    // now both reads share one cache, so segments fetched during discovery
+                    // carry into the data read (cycle-3 PR-2.0 fix; see plan PR-2.0 row).
+                    let segment_cache: polars_vortex::read::VortexSegmentCacheRef =
+                        options.segment_cache.resolve().into();
                     let (mut file_info, mut metadata, table_stats_df) = scans::vortex_file_info(
                         first_scan_source,
                         unified_scan_args.row_index.as_ref(),
                         cloud_options,
                         n_sources,
-                        segment_cache,
+                        segment_cache.clone(),
                     )
                     .await
                     .map_err(|e| e.context(failed_here!(vortex scan)))?;
@@ -1083,11 +1121,26 @@ this scan to succeed with an empty DataFrame.",
                             Some(crate::dsl::TableStatistics(Arc::new(stats_df)));
                     }
 
+                    // Bundle segment_cache into an Option so it can be dropped in lockstep
+                    // with metadata on cache pressure (cycle-1 must-fix C-002: a Dedicated(N)
+                    // cache held alive in IR memory ties up N bytes of caller-budgeted
+                    // segment storage indefinitely). The streaming source's None-fallback
+                    // then re-resolves cleanly (Global/Off idempotent; Dedicated gets a
+                    // fresh empty cache).
+                    let mut segment_cache_opt = Some(segment_cache);
                     if self.inner.read().unwrap().len() > max_metadata_scan_cached() {
                         _ = metadata.take();
+                        _ = segment_cache_opt.take();
                     }
 
-                    (file_info, FileScanIR::Vortex { options, metadata })
+                    (
+                        file_info,
+                        FileScanIR::Vortex {
+                            options,
+                            metadata,
+                            segment_cache: segment_cache_opt,
+                        },
+                    )
                 }
             },
             #[cfg(feature = "csv")]
