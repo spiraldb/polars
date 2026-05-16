@@ -1044,7 +1044,17 @@ this scan to succeed with an empty DataFrame.",
             FileScanDsl::Vortex { options } => {
                 if let Some(schema) = &options.schema {
                     // User supplied a schema; we skip the footer read entirely. The reader will
-                    // still verify the schema matches the file at scan time.
+                    // still verify the schema matches the file at scan time. Even though no
+                    // IR-build postscript read happens, we MUST still resolve segment_cache
+                    // once here and thread the resulting Arc through to all VortexFileReader
+                    // instances — otherwise each per-file reader's None-fallback at
+                    // `io_sources/vortex/mod.rs::initialize` would independently call
+                    // `options.segment_cache.resolve()`, allocating N independent Moka caches
+                    // for an N-file Dedicated(M) scan (one M-byte cache per file instead of
+                    // the documented one M-byte cache per logical scan). cycle-1 must-fix
+                    // C-001.
+                    let segment_cache: polars_vortex::read::VortexSegmentCacheRef =
+                        options.segment_cache.resolve().into();
                     (
                         FileInfo {
                             schema: schema.clone(),
@@ -1054,9 +1064,7 @@ this scan to succeed with an empty DataFrame.",
                         FileScanIR::Vortex {
                             options,
                             metadata: None,
-                            // No IR-build postscript read happened (user supplied schema);
-                            // streaming source will resolve fresh.
-                            segment_cache: None,
+                            segment_cache: Some(segment_cache),
                         },
                     )
                 } else {
@@ -1122,11 +1130,12 @@ this scan to succeed with an empty DataFrame.",
                     }
 
                     // Bundle segment_cache into an Option so it can be dropped in lockstep
-                    // with metadata on cache pressure (cycle-1 must-fix C-002: a Dedicated(N)
+                    // with metadata on cache pressure. cycle-1 must-fix C-002: a Dedicated(N)
                     // cache held alive in IR memory ties up N bytes of caller-budgeted
-                    // segment storage indefinitely). The streaming source's None-fallback
-                    // then re-resolves cleanly (Global/Off idempotent; Dedicated gets a
-                    // fresh empty cache).
+                    // segment storage indefinitely. Drop both when the IR cache is full so
+                    // long-running sessions don't accumulate per-IR Moka caches; the
+                    // streaming source's None-fallback then re-resolves cleanly (Global/Off
+                    // idempotent; Dedicated gets a fresh empty cache).
                     let mut segment_cache_opt = Some(segment_cache);
                     if self.inner.read().unwrap().len() > max_metadata_scan_cached() {
                         _ = metadata.take();
