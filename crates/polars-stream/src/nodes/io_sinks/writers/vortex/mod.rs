@@ -32,7 +32,6 @@ use polars_vortex::write::strategy::build_write_options;
 
 use crate::async_executor::{self, TaskPriority};
 use crate::async_primitives::connector;
-use crate::utils::tokio_handle_ext;
 use crate::nodes::io_sinks::components::sink_morsel::SinkMorsel;
 use crate::nodes::io_sinks::components::size::{
     NonZeroRowCountAndSize, RowCountAndSize, TakeableRowsProvider,
@@ -40,6 +39,7 @@ use crate::nodes::io_sinks::components::size::{
 use crate::nodes::io_sinks::writers::interface::{
     FileOpenTaskHandle, FileWriterStarter, ideal_sink_morsel_size_env,
 };
+use crate::utils::tokio_handle_ext;
 
 pub struct VortexWriterStarter {
     pub options: Arc<VortexWriteOptions>,
