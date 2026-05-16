@@ -15,7 +15,7 @@ pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 7
 last_user_touchpoint: 2026-05-16T20:40:00Z
-last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at to_graph.rs:843 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
+last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at lower_ir.rs:766 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 23
 review_cycles_this_pr: 0
@@ -24,7 +24,7 @@ phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 2751eb300
+last_commit: 307cfef5f
 ```
 
 ## Context
@@ -413,6 +413,31 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 - **Deferred items**: 0 new (cumulative `deferred_items_total: 6` unchanged).
 - **Surprises during fix-application**:
   - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
+
+### PR-2.2: PR-13.2 Wire AExpr convertor + arithmetic + bitwise-vs-logical schema gate (2 PR-work commits, ending at `307cfef5f` — awaiting review)
+
+- **Scope shipped (commit 1 — `f7ab28055`)**:
+  - **Plus arithmetic**: added `Operator::Plus → vortex::expr::checked_add` to the convertor's `BinaryExpr` arm. `checked_add` is the only arithmetic builder Vortex publicly exposes in `vortex::expr::*` at the pinned SHA — Sub/Mul/Div/Mod remain residual until upstream exposes their public builders (tracked: PR-2.3+ scope check).
+  - **Schema parameter**: `aexpr_to_vortex_expression(root_node, arena, schema: Option<&Schema>)` — threaded down recursion. Existing callers updated to pass `None` or `Some(&schema)` explicitly; cycle-1 should-fix from PR-2.1 closed.
+  - **Bitwise-vs-logical schema gate**: for `Operator::And` / `Operator::Or` only (NOT `LogicalAnd`/`LogicalOr` — those are by construction boolean-typed in the IR), check operand dtypes against schema. If any operand is non-Boolean, refuse pushdown. If schema is `None` (pre-typecheck path), conservatively refuse. `operand_is_bool` helper recursively handles And/Or in operands (a compound `(a & b) & c` boolean tree is still boolean at the root).
+  - **Test additions**: 4 new tests for schema-gate behavior (no-schema → None; non-bool int operand → None; bool column passes; nested-Or operand passes). Existing 23 → 31 total.
+  - **`vortex::expr::checked_add` import** added to the convertor module's narrowed import.
+
+- **Scope shipped (commit 2 — `307cfef5f`)**:
+  - **Wire-up at `lower_ir.rs:766`** (corrected from plan's `to_graph.rs:843` reference — the actual destructure site is `physical_plan::lower_ir::FileScanIR::Vortex` arm of `lower_node`). Computes `aexpr_filter: Option<VortexExpression>` from `(predicate.node(), expr_arena, file_info.schema)` while still inside the IR-build context, then stores on `VortexReaderBuilder`. By the time `begin_read` runs only `Arc<dyn PhysicalIoExpr>` survives — this is the right (and only) anchor point. `options.push_predicate` gate respected.
+  - **New `aexpr_filter` field** on `VortexReaderBuilder` (polars-stream side) and `VortexFileReader` — threaded by `build_file_reader` mirroring PR-2.0's `segment_cache` pattern. Field clone is cheap (Vortex `Expression` is internally Arc-wrapped).
+  - **Preference order in `VortexFileReader::begin_read`** (Option B parallel-path strategy): `self.aexpr_filter` → `polars_to_vortex_predicate(args.predicate)` → no pushdown. The AExpr-direct path covers everything PR-13 handles (Plus today; CAST/struct/temporal in PR-2.3-.5); the legacy `SpecializedColumnPredicate`-derived fast path remains as fallback for shapes the convertor returns `None` for. PR-2.6 (Phase 2 final) deletes the fallback once the convertor is a strict superset.
+  - **Module-path correction**: external callers must use `polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression` — the `aexpr` module is `pub(crate)` (per `plans/mod.rs:7`); the public route is the glob re-export `pub use aexpr::*` at line 31.
+  - **Python e2e test** (`test_scan_with_arithmetic_filter` in `py-polars/tests/unit/io/test_vortex.py`): `pl.scan_vortex(path).filter(pl.col("a") + 1 == 5).collect()` against a 20-row file. Polars reapplies the predicate post-decode regardless (PARTIAL_FILTER capability), so any drop-rows bug would surface as wrong row count — a pushdown-not-applied regression manifests as slower but still-correct (and isn't caught by this test directly; the gauntlet should re-check via inspection of the IR-time `aexpr_filter` value if possible).
+
+- **Tests added**: 4 unit tests in polars-plan's `vortex_convertor::tests` (schema-gate coverage) + 1 Python e2e (`test_scan_with_arithmetic_filter`). Convertor test count: 31 (was 27 after Plus-arithmetic test added). Python test count: +1.
+- **Verification**: `cargo check -p polars-stream -p polars-plan --features vortex,cloud` clean; `cargo test -p polars-plan --features vortex,is_between,is_in vortex_convertor` → 31 passed; `cargo fmt --all -- --check` clean; pushed to `spiraldb/vortex-integration`. **Python e2e not run locally** — no `.venv` set up in this worktree; CI is the canonical e2e verifier.
+- **Confidence**: medium-high (Plus is mechanical; wire-up mirrors the well-established segment_cache pattern; schema gate has unit-test coverage). The `POLARS_VORTEX_VERIFY_PUSHDOWN=1` debug-mode (planned for this PR) is deferred to a follow-up — comparing IR-time convertor output against the legacy path requires the IR-time output to be inspected from a Rust-level test, and the multi-scan layer's predicate reapplication makes a drop-rows divergence invisible at the DataFrame level. Tracked as a new deferred item; not blocking.
+- **Pre-existing-issue side task spawned**: Vortex sink (`crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:91`) doesn't handle `Writeable::Cloud(_)` without the `cloud` feature → `cargo check -p polars-stream --features vortex` fails with E0004. Existed before this PR (verified via `git stash`); flagged via SpawnTask. Not in PR-2.2 scope.
+
+- **Surprises during implementation**:
+  - **`aexpr` is `pub(crate)`**: initial wire-up tried `polars_plan::plans::aexpr::predicates::vortex_convertor::*` which failed with E0603. The public route is `polars_plan::plans::predicates::vortex_convertor::*` via the glob re-export `pub use aexpr::*` in `plans/mod.rs`. The plan PR-2.1 row's "Files touched" list named `aexpr/predicates/` paths, but external visibility goes through the re-export — easy to miss.
+  - **Wire-up site is `lower_ir.rs:766`, not `to_graph.rs:843`**: plan PR-2.2 row referenced `to_graph.rs:843` but the actual `FileScanIR::Vortex` destructure where `expr_arena` is in scope is in `lower_ir.rs`. The plan row stays as a navigation hint; the actual change is at the corrected location.
 
 ### PR-2.1: PR-13.1 AExpr-direct convertor module foundation (3 PR-work commits, ending at `06f4f8592`)
 
