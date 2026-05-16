@@ -114,13 +114,34 @@ impl FileWriterStarter for VortexWriterStarter {
                     let mut tx = chunk_tx;
                     while let Ok(morsel) = morsel_rx.recv().await {
                         let (df, _permit) = morsel.into_inner();
-                        let (_chunk_dtype, chunks) =
-                            polars_vortex::write::df_to_stream::dataframe_to_vortex_chunks(&df)?;
-                        for chunk in chunks {
-                            if tx.send(Ok(chunk)).await.is_err() {
-                                // Writer dropped; bail.
-                                return Ok::<_, polars_error::PolarsError>(());
-                            }
+                        match polars_vortex::write::df_to_stream::dataframe_to_vortex_chunks(&df) {
+                            Ok((_chunk_dtype, chunks)) => {
+                                for chunk in chunks {
+                                    if tx.send(Ok(chunk)).await.is_err() {
+                                        // Writer dropped; bail.
+                                        return Ok::<_, polars_error::PolarsError>(());
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                // Forward the producer error through the channel BEFORE
+                                // bailing. The writer's `ArrayStreamAdapter` polls
+                                // `VortexResult<VortexArrayRef>` items; sending `Err(...)`
+                                // makes it bail with our error instead of seeing the
+                                // dropped channel as clean end-of-stream and finalizing
+                                // a truncated-but-valid Vortex footer on disk.
+                                //
+                                // `tx.send` failing is benign here — it means the writer
+                                // already shut down (e.g., its own error). We're returning
+                                // the producer's error anyway via `?` below; the join site
+                                // will surface whichever fires first.
+                                let _ = tx
+                                    .send(Err(vortex::error::vortex_err!(
+                                        "vortex sink producer: {e}"
+                                    )))
+                                    .await;
+                                return Err(e);
+                            },
                         }
                     }
                     // Sentinel: drop tx → stream end-of-input
