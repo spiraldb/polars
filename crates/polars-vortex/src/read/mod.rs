@@ -123,7 +123,10 @@ mod segment_cache_ref_tests {
         let p_via_field = Arc::as_ptr(&wrapper.0) as *const ();
         let p_orig = Arc::as_ptr(&inner) as *const ();
 
-        assert_eq!(p_via_deref, p_via_field, "Deref must reference the same Arc as .0");
+        assert_eq!(
+            p_via_deref, p_via_field,
+            "Deref must reference the same Arc as .0"
+        );
         assert_eq!(p_via_deref, p_orig, "Deref must reference the original Arc");
     }
 }
