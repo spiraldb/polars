@@ -342,7 +342,11 @@ pub(super) async fn vortex_file_info(
         .map_err(|e| polars_err!(ComputeError: "tokio join: {e}"))??;
 
     let (mut pl_schema, arrow_schema) = vortex_dtype_to_schema(vxf.dtype())?;
-    let row_count = vxf.row_count() as usize;
+    // Clamp to usize::MAX on 32-bit platforms where Vortex files with >2^32 rows
+    // are technically representable. Mirrors the BAN-compliant clamp at
+    // `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:217` so both
+    // row-count read sites in the Vortex pipeline use the same shape.
+    let row_count = usize::try_from(vxf.row_count()).unwrap_or(usize::MAX);
     if let Some(ri) = row_index {
         insert_row_index_to_schema(Arc::make_mut(&mut pl_schema), ri.name.clone())?;
     }
