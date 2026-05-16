@@ -23,7 +23,10 @@ pub fn build_write_options(opts: &VortexWriteOptions) -> VortexFileWriteOptions 
     let mut strategy_builder =
         WriteStrategyBuilder::default().with_btrblocks_builder(compressor_builder);
     if let Some(rbs) = opts.row_block_size {
-        strategy_builder = strategy_builder.with_row_block_size(rbs as usize);
+        // Clamp the u64 row_block_size to usize::MAX on 32-bit platforms; matches the
+        // BAN-compliant pattern at scans.rs:349 and io_sources/vortex/mod.rs:217.
+        let rbs_usize = usize::try_from(rbs).unwrap_or(usize::MAX);
+        strategy_builder = strategy_builder.with_row_block_size(rbs_usize);
     }
     let strategy = strategy_builder.build();
 
