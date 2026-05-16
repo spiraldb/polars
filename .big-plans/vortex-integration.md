@@ -12,7 +12,7 @@ current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: PR-1.3
 pr_index: 3
-outstanding_must_fix: 3
+outstanding_must_fix: 2
 deferred_items_total: 3
 last_user_touchpoint: 2026-05-15T21:00:00Z
 last_user_touchpoint_what: "phase-end reject — re-open PR-1.3 to address 6 must-fix items"
