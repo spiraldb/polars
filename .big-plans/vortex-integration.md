@@ -5,7 +5,7 @@
 ## Current State
 
 ```yaml
-status: executing
+status: phase-boundary
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
@@ -14,15 +14,15 @@ current_pr: null
 pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-15T22:45:00Z
-last_user_touchpoint_what: "PR-1.3 complete at confidence: high (cycle 2 accepted); routing back to Step 3.3.5 step 3 to flip Pending rows"
+last_user_touchpoint: 2026-05-15T23:00:00Z
+last_user_touchpoint_what: "PR-1.3 reject-fix iteration complete; re-entering Phase 3 from Step 3.1 for cycle-2 phase-end review"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 12
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 1
-phase_end_reject_cycles: 0
-last_phase_end_verdict: reject
+phase_end_reject_cycles: 1
+last_phase_end_verdict: null
 last_commit: 850c06d47
 ```
 
@@ -381,7 +381,7 @@ Living ledger — populated by inner-loop and phase-end reviews.
   - **All 6 phase-end must-fix items were in PRE-EXISTING 31-commit code** (not in PR-1.1 or PR-1.2 directly). Phase 1's "retroactive ratification" framing is real — the phase-4 gauntlet's purpose at this phase was specifically to surface latent issues in the pre-existing integration foundation. Verdict: framing worked as designed.
   - **Cycle-2 surfaced a pre-existing build break unrelated to PR-1.3**: `polars-stream --features vortex` (without `cloud`) errors with E0004 on the Vortex sink Writeable match — `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Tracked as Deferred work for Phase 2 cleanup or follow-up PR.
 
-## Pending phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1
+## Resolved phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1
 
 | Severity | File:line | Description | Implicated PR | Resolved |
 |----------|-----------|-------------|---------------|----------|
