@@ -241,7 +241,7 @@ crates/polars-vortex/
     ├── lib.rs                       # re-exports + `vortex` umbrella passthrough
     ├── session.rs                   # global VortexSession + global Moka segment cache
     ├── read/
-    │   ├── mod.rs                   # VortexFooterRef alias + back-compat `metadata` re-export
+    │   ├── mod.rs                   # VortexFooterRef = Arc<Footer> type alias
     │   ├── options.rs               # VortexScanOptions, VortexCacheMode (with resolve())
     │   ├── schema.rs                # Vortex DType → polars-arrow ArrowSchema walker
     │   ├── read_at.rs               # PolarsInstrumentedVortexReadAt decorator
