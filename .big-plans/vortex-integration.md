@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: phase-boundary
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: PR-1.4
+current_pr: null
 pr_index: 5
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T15:30:00Z
-last_user_touchpoint_what: "PR-1.4 CI-reopen gauntlet cycle 1 accepted (0 must-fix, 0 should-fix, 3 nits — all meta-process)"
-subagent_invocations_this_pr: 1
+last_user_touchpoint: 2026-05-16T15:35:00Z
+last_user_touchpoint_what: "PR-1.4 CI-reopen complete (confidence: high, 0 new deferred); advancing to Phase 3.1 (pr_index==phase_pr_count+1)"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 16
-review_cycles_this_pr: 1
+review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 2
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
-current_pr_is_ci_reopen: true
-last_commit: c1dac4b23
+current_pr_is_ci_reopen: null
+last_commit: 0677ffcc9
 ```
 
 ## Context
@@ -398,6 +398,20 @@ Living ledger — populated by inner-loop and phase-end reviews.
 - **Surprises during implementation**:
   - **The cycle-1 phase-end review's top should-fix recommendations all landed cleanly as a focused 4-commit cleanup PR**, validating the cycle-2 phase-end framework: when reviewers consistently surface fixable items at the phase boundary, an explicit "Phase N.4 cleanup" sub-PR is a natural fit rather than absorbing into the next phase's work or carrying as Deferred work indefinitely.
   - **PR-1.4's cycle-1 inner-loop reject (clippy::clone_on_copy)** was a small-cost-high-signal find: both reviewers caught it independently (fresh as nit, correctness as must-fix per the `cargo-fail-warning.py` CI-blocker analysis). Process win: the strict-warning CI setup ensures even nit-level lints get surfaced as gate-blocking; verification checklist should include `cargo clippy -p <touched-crate> --features <features>` in addition to `cargo check`.
+
+#### Re-completion (CI-reopen at phase-boundary, before cycle-3 phase-end review)
+
+PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commit `7eaf4e2fe`: (a) `rustfmt` on `scans.rs:300-303` (multi-line `PolarsResult<(FileInfo, Option<VortexFooterRef>)>` return type) + `read/mod.rs:17` (trailing blank line); (b) `typos` on `MIS-CHARACTERIZES` at plan lines 1197 + 1441. Both were mechanical fixes: `cargo fmt --all` restored the rustfmt-required form, two `MIS-CHARACTERIZES` occurrences replaced with `MISCHARACTERIZES` (correct closed-compound spelling).
+
+- **Scope shipped (CI-reopen)**:
+  - **rustfmt restoration** (commit `0a71bc2f4`): collapsed 4-line return-type at `scans.rs:300-303` to a single 77-char line; removed trailing blank line at `read/mod.rs:17`. Mechanical `cargo fmt --all` output.
+  - **Typos fix** (commit `f0e99e43f`, bundled with plan re-open): `MIS-CHARACTERIZES` → `MISCHARACTERIZES` at both occurrences in the cycle-2 phase-end review section (narrative prose at `:1197` + JSON-archive blob at `:1441`). Closed-compound spelling; zero semantic drift.
+- **Tests added**: None — cosmetic CI fixes, no behavioral change. Existing 66 Rust + 10 Python tests unaffected.
+- **Review (CI-reopen iteration)**: 2-vote gauntlet `preset=pr-2` (lenses=`fresh`+`correctness`) over diff range `7eaf4e2fe..HEAD`. **Accepted at cycle 1** (both reviewers `high` confidence). 0 must-fix, 0 should-fix, 3 nits — all meta-process commentary about big-plans skill itself (non-canonical `current_pr_is_ci_reopen` field; `last_commit` anchoring ambiguity; typo-fix verification). None map to BANS / Accepted tradeoffs / Deferred work. All 3 nits dismissed per Step 2.4 nit-handling convention. Full Synthesizer Output JSON in plan-commit `0677ffcc9` body.
+- **Confidence**: high
+- **Deferred items**: 0 new (cumulative `deferred_items_total: 6` unchanged).
+- **Surprises during fix-application**:
+  - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
 
 ## Resolved phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1
 
