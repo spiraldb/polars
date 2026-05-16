@@ -46,6 +46,11 @@ impl FileReaderBuilder for VortexReaderBuilder {
     }
 
     fn set_io_metrics(&self, io_metrics: Arc<IOMetrics>) {
+        // `OnceLock::set` returns `Err(input)` if the lock has already been initialized.
+        // The multi-scan layer is permitted to call `set_io_metrics` multiple times on a
+        // shared builder (e.g., when the same builder powers multiple file readers, the
+        // first call wins and subsequent calls are no-ops by design). Discarding the Err
+        // is intentional, not a missed error path.
         let _ = self.io_metrics.set(io_metrics);
     }
 
