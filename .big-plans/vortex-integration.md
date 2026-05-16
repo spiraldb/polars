@@ -5,17 +5,17 @@
 ## Current State
 
 ```yaml
-status: phase-boundary
+status: planning
 branch: vortex-integration
-planning_sub_flow: null
+planning_sub_flow: amend-phase-1
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: null
 pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-15T23:00:00Z
-last_user_touchpoint_what: "PR-1.3 reject-fix iteration complete; re-entering Phase 3 from Step 3.1 for cycle-2 phase-end review"
+last_user_touchpoint: 2026-05-16T00:00:00Z
+last_user_touchpoint_what: "Phase 1 cycle-2 accepted; user chose Amend to insert PR-1.4 (cleanup of top should-fix items)"
 subagent_invocations_this_pr: 1
 subagent_invocations_total: 13
 review_cycles_this_pr: 0
@@ -181,7 +181,7 @@ Initial draft from handoff-plan skeleton, refined by Phase 1.2 subagent findings
 
 | Phase | Name | Scope (one line) | Exit criteria (machine-checkable) | PR count | Review-count |
 |---|---|---|---|---|---|
-| 1 | Ratify + crates.io transition | Retroactive 4-vote gauntlet of cumulative diff vs `main` + path-dep → crates.io migration + cheap polish | (a) 4-vote phase-end review accepts. (b) `cargo check -p polars --features vortex,cloud,parquet,dtype-full` clean. (c) `cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal` → 65 Rust tests pass. (d) `pytest py-polars/tests/unit/io/test_vortex.py` → 8 tests pass. (e) `gh pr checks 1 --repo spiraldb/polars` shows green for Rust + Python core checks. | 3-4 | **4-vote** |
+| 1 | Ratify + crates.io transition | Retroactive 4-vote gauntlet of cumulative diff vs `main` + path-dep → crates.io migration + cheap polish | (a) 4-vote phase-end review accepts. (b) `cargo check -p polars --features vortex,cloud,parquet,dtype-full` clean. (c) `cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal` → at least 66 Rust tests pass. (d) `pytest py-polars/tests/unit/io/test_vortex.py` → at least 10 tests pass. (e) `gh pr checks 1 --repo spiraldb/polars` shows green for Rust + Python core checks. | 4 | **4-vote** |
 | 2 | PR-13 aggressive AExpr pushdown | New convertor module (Option B trajectory per user Step 1.4 decision); arithmetic / CAST / struct field access / temporal extracts shipped incrementally; PR-2.6 (final sub-PR) deletes the `SpecializedColumnPredicate` fast path | (a) 4-vote review accepts. (b) Every row in existing plan's §5 pushdown coverage table implemented + tested OR documented as deliberately deferred. (c) New e2e tests verify pushdown engagement via Vortex `Expression::display_tree()` or `POLARS_VERBOSE` log assertion. (d) Build/test suite still green. | 5-6 | **4-vote** |
 | 3 | PR-8 file-stats + PR-6 multi-file / nested coverage | Populate `UnifiedScanArgs::table_statistics` from Vortex footer (lead the pattern, no API change); add multi-file scan tests + schema-evolution policy round-trips (`missing_columns`/`extra_columns`/`cast_options`) + nested-type (List/Struct) end-to-end + small-int dtypes (i8/i16/u8/u16) | (a) 4-vote review accepts. (b) Multi-file scan with file-level stats shows whole-file skips (via `EXPLAIN` or Vortex pruning counters). (c) Schema-evolution policy tests pass across the missing/extra/cast matrix. (d) Nested-type roundtrip tests pass. (e) Small-int dtype roundtrip tests pass. (f) Build/test suite green. | 3-4 | **4-vote** |
 | 4 | PR-14 benches + final polish + merge prep | Criterion benches (`crates/polars/benches/io_vortex.rs`): cold-cache full scan, filtered scan with column predicates (TPC-H Q6/Q14 style), cloud-read latency, second-run cache-hit ratio, write throughput. Top-level README mention; remaining unblocked deferred items resolved; final 4-vote review on the FULL cumulative diff vs main | (a) 4-vote review accepts. (b) `cargo bench --features vortex --bench io_vortex` compiles + runs. (c) TPC-H Q6/Q14 comparison documented in `crates/polars-vortex/README.md`. (d) `gh pr checks 1 --repo spiraldb/polars` still green. (e) Ready for squash-merge. | 2-3 | **4-vote** |
@@ -195,6 +195,7 @@ Initial draft. Refined during Step 1.4 + per-PR scope-checks at the start of eac
 | PR-1.1 | 1 | crates.io transition: replace workspace path-dep with `vortex = "0.70.0"` | `Cargo.toml` (workspace `:118`), `Cargo.lock`. If polars-vortex code uses Vortex internals not in 0.70.0's surface: scope expands to either pin a later released version or adapt polars-vortex. | (a) `cargo check -p polars --features vortex,cloud,parquet,dtype-full` clean. (b) 65 Rust + 8 Python tests pass locally. (c) `gh pr checks 1` shows green on clippy-stable / check-features / test (ubuntu) / Lint Rust / build-rust-docs. |
 | PR-1.2 | 1 | Phase 1 polish: `VortexCacheMode` Python surface (`cache_mode=` param), visitor feature-gating fix (actual shape: `serde_json` non-optional in `polars-python/Cargo.toml`, since the `scan_type_to_pyobject` Vortex arm uses `serde_json::to_string` while the dep was `optional`-gated on the `json` feature — see commit `6f0fe06a9`), in-memory `ScanSourceRef::Buffer` zero-copy if low-effort | `polars-python/src/lazyframe/general.rs`, `py-polars/src/polars/io/vortex/functions.py`, `polars-python/Cargo.toml` (serde_json non-optional), `polars-vortex/src/read/read_at.rs` | `cache_mode` Python parameter exposed + tested (including bool/float/u64-overflow rejection paths); visitor cfg-gating fix at the Cargo.toml level; in-memory buffer zero-copy deferred (assessed: not low-effort); CI-greenup absorbed (cargo fmt sweep, ruff, dprint, mypy stubs, clippy approx_constant, deny 0BSD, dsl-schema wiring + hashes regen) |
 | PR-1.3 | 1 | Address any must-fix items from Phase 1 retroactive 4-vote gauntlet | varies | Phase 1 end-of-phase review accepts |
+| PR-1.4 | 1 | Phase 1 cycle-2 cleanup: thread `VortexScanOptions::segment_cache` through `vortex_file_info`; narrow `pub use ::vortex;` to 5 sub-modules; inline `read::metadata` back-compat shim (one caller update); plan-doc fixes (row-184 stale test counts; producer/writer determinism Deferred entry update) | `crates/polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:300,336,344-345`, `crates/polars-plan/src/dsl/file_scan/mod.rs:21`, `crates/polars-vortex/src/lib.rs:18`, `crates/polars-vortex/src/read/mod.rs:18-22`, `.big-plans/vortex-integration.md` | (a) `cargo check -p polars-stream --features vortex,cloud` clean. (b) 66 Rust + 10 Python tests still pass. (c) Phase 1 end-of-phase review cycle 3 accepts. |
 | PR-2.1 | 2 | PR-13.1 — AExpr-direct convertor module foundation (Column / Literal / Eq/NotEq/Lt/LtEq/Gt/GtEq/And/Or / IsNull/IsNotNull/Not) | `crates/polars-vortex/src/read/aexpr_predicate.rs` (new), `crates/polars-vortex/src/read/mod.rs` | Module compiles; unit tests for each shape pass with arena-constructed inputs; no wire-up yet |
 | PR-2.2 | 2 | PR-13.2 — Wire convertor at `to_graph.rs:843` + ship arithmetic in predicates | `aexpr_predicate.rs` (extend), `crates/polars-stream/src/physical_plan/to_graph.rs:843`, `crates/polars-stream/src/nodes/io_sources/vortex/builder.rs` + `mod.rs` | e2e test scans `col + 1 == 5` and asserts pushed Vortex `Expression` is non-None; `POLARS_VORTEX_VERIFY_PUSHDOWN=1` debug-mode comparison emits no divergences |
 | PR-2.3 | 2 | PR-13.3 — CAST in predicates | `aexpr_predicate.rs`, possibly `polars-vortex/src/read/schema.rs` | e2e test for `col.cast(Int64) > 100` over `Int32` column pushes down; decimal-cast residual case documented |
