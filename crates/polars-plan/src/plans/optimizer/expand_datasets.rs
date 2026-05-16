@@ -299,6 +299,16 @@ pub(super) fn expand_datasets(
                             FileScanDsl::Vortex { options } => FileScanIR::Vortex {
                                 options,
                                 metadata: None,
+                                // Post-expansion catch-up path: no IR-build postscript read
+                                // ran here (dataset providers fill in scan types after path
+                                // expansion), so segment_cache stays None and the streaming
+                                // source's fallback at `io_sources/vortex/mod.rs:152-156`
+                                // resolves once per scan. For Dedicated(N) on multi-file
+                                // python-dataset scans this falls back to per-file resolve
+                                // — a known follow-up tracked alongside the main
+                                // schema-supplied path's invariant; for Global/Off it's
+                                // idempotent and harmless. (cycle-2 must-fix C2-001.)
+                                segment_cache: None,
                             },
 
                             #[cfg(feature = "json")]
