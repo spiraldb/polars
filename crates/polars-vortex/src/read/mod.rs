@@ -53,3 +53,77 @@ impl From<Arc<dyn SegmentCache>> for VortexSegmentCacheRef {
         Self(arc)
     }
 }
+
+#[cfg(test)]
+mod segment_cache_ref_tests {
+    //! PR-2.0 commit-3 introduced [`VortexSegmentCacheRef`] as the thread-through type for
+    //! `FileScanIR::Vortex::segment_cache`. The single-cache invariant rests on the wrapper
+    //! preserving `Arc<dyn SegmentCache>` IDENTITY across clone / Deref / From; if any of
+    //! these silently allocate or copy, the IR-build-time and streaming-source caches would
+    //! diverge and re-introduce the cycle-3 Dedicated double-resolve bug.
+    //!
+    //! These tests verify the contract directly on the wrapper (without spinning up a real
+    //! scan). The corresponding end-to-end integration test (a `pl.scan_vortex(...,
+    //! cache_mode=Dedicated(N))` that confirms ONE Moka cache instance is used across the
+    //! IR-build postscript read AND the streaming data read) is deferred to PR-3.1's
+    //! `table_statistics` work — PR-3.1 already touches `vortex_file_info` and is the
+    //! natural place to add the end-to-end harness. (cycle-1 PR-2.0 must-fix C-003.)
+    use super::*;
+    use crate::read::options::VortexCacheMode;
+
+    #[test]
+    fn clone_preserves_arc_identity() {
+        // The whole point of the wrapper: cloning it must NOT clone the inner cache.
+        // Cloning ANY non-trivial Arc<dyn SegmentCache> would re-introduce the double-cache
+        // bug because the IR thread-through clones across builders / readers / files.
+        let inner: Arc<dyn SegmentCache> = VortexCacheMode::Dedicated(1 << 20).resolve();
+        let wrapper = VortexSegmentCacheRef(inner.clone());
+        let cloned = wrapper.clone();
+
+        let p1 = Arc::as_ptr(&wrapper.0) as *const ();
+        let p2 = Arc::as_ptr(&cloned.0) as *const ();
+        let p_orig = Arc::as_ptr(&inner) as *const ();
+
+        assert_eq!(
+            p1, p2,
+            "VortexSegmentCacheRef::clone must preserve Arc<dyn SegmentCache> identity"
+        );
+        assert_eq!(
+            p1, p_orig,
+            "Construction via VortexSegmentCacheRef(arc) must preserve Arc identity"
+        );
+    }
+
+    #[test]
+    fn from_arc_preserves_identity() {
+        // `.into()` must be a thin newtype wrap, not a clone of the inner contents.
+        let inner: Arc<dyn SegmentCache> = VortexCacheMode::Dedicated(1 << 20).resolve();
+        let p_orig = Arc::as_ptr(&inner) as *const ();
+
+        let wrapper: VortexSegmentCacheRef = inner.clone().into();
+        let p_wrapped = Arc::as_ptr(&wrapper.0) as *const ();
+
+        assert_eq!(
+            p_orig, p_wrapped,
+            "From<Arc<dyn SegmentCache>> must preserve identity (newtype wrap, not clone-then-allocate)"
+        );
+    }
+
+    #[test]
+    fn deref_returns_inner_arc_by_reference() {
+        // `Deref` must hand out `&Arc<dyn SegmentCache>` pointing at the SAME inner Arc;
+        // it MUST NOT clone or rewrap. Without this, `&*wrapper` at the call site would
+        // produce a different Arc::as_ptr than `&wrapper.0`.
+        let inner: Arc<dyn SegmentCache> = VortexCacheMode::Dedicated(1 << 20).resolve();
+        let wrapper = VortexSegmentCacheRef(inner.clone());
+
+        // Manually deref the wrapper to get `&Arc<dyn SegmentCache>`.
+        let derefed: &Arc<dyn SegmentCache> = &wrapper;
+        let p_via_deref = Arc::as_ptr(derefed) as *const ();
+        let p_via_field = Arc::as_ptr(&wrapper.0) as *const ();
+        let p_orig = Arc::as_ptr(&inner) as *const ();
+
+        assert_eq!(p_via_deref, p_via_field, "Deref must reference the same Arc as .0");
+        assert_eq!(p_via_deref, p_orig, "Deref must reference the original Arc");
+    }
+}
