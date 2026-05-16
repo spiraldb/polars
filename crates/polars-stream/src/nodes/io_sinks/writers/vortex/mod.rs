@@ -112,6 +112,12 @@ impl FileWriterStarter for VortexWriterStarter {
                 TaskPriority::High,
                 async move {
                     let mut tx = chunk_tx;
+                    // `morsel_rx.recv()` returning Err is treated as clean EOS: upstream
+                    // dropped the morsel channel after sending all data. Producer errors
+                    // (e.g., dataframe_to_vortex_chunks failure in the match below) are
+                    // surfaced via the dedicated chunk_tx channel + the spawned-task Err
+                    // return; they do NOT flow through morsel_rx. This is the Polars-wide
+                    // sink-task pattern (CSV/IPC/NDJSON/Parquet all do the same).
                     while let Ok(morsel) = morsel_rx.recv().await {
                         let (df, _permit) = morsel.into_inner();
                         match polars_vortex::write::df_to_stream::dataframe_to_vortex_chunks(&df) {
@@ -124,17 +130,14 @@ impl FileWriterStarter for VortexWriterStarter {
                                 }
                             },
                             Err(e) => {
-                                // Forward the producer error through the channel BEFORE
-                                // bailing. The writer's `ArrayStreamAdapter` polls
-                                // `VortexResult<VortexArrayRef>` items; sending `Err(...)`
-                                // makes it bail with our error instead of seeing the
-                                // dropped channel as clean end-of-stream and finalizing
-                                // a truncated-but-valid Vortex footer on disk.
-                                //
-                                // `tx.send` failing is benign here — it means the writer
-                                // already shut down (e.g., its own error). We're returning
-                                // the producer's error anyway via `?` below; the join site
-                                // will surface whichever fires first.
+                                // On producer error, send Err through the channel so the
+                                // writer's ArrayStreamAdapter aborts instead of seeing the
+                                // dropped channel as clean EOS + finalizing a truncated
+                                // footer. tx.send failure is benign (writer already shut
+                                // down). User-visible error is always the producer's
+                                // PolarsError (the producer.await? join below sees this
+                                // task's Err return before write_handle.await runs); the
+                                // channel-Err is defense in depth.
                                 let _ = tx
                                     .send(Err(polars_vortex::vortex::error::vortex_err!(
                                         "vortex sink producer: {e}"

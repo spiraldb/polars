@@ -1,5 +1,13 @@
 //! Polars predicate → Vortex `Expression` convertor (filter pushdown).
 //!
+//! **TODO(PR-2.6)**: this entire fast path is SCAFFOLDING for the PR-13 Option B → A
+//! trajectory. The AExpr-direct convertor at `read/aexpr_predicate.rs` (introduced in PR-2.1
+//! through PR-2.5) supersedes this `SpecializedColumnPredicate`-based fast path; PR-2.6 deletes
+//! this file (or reduces it to scalar+LIKE helpers absorbed into `aexpr_predicate.rs`) and
+//! switches the call site at `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:242` to
+//! the AExpr-direct path. Tracked: `.big-plans/vortex-integration.md` PR-2.6 row + Accepted
+//! tradeoffs entry on the SpecializedColumnPredicate fast path.
+//!
 //! We translate the structured pieces of [`polars_io::predicates::ScanIOPredicate`] into a
 //! Vortex `Expression` to hand to `ScanBuilder::with_filter`. What we can't translate stays
 //! as a residual filter, which the multi-scan layer applies post-decode (the streaming

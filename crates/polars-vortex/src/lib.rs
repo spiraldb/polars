@@ -12,13 +12,11 @@ pub mod session;
 pub mod write;
 
 /// Re-exports of upstream Vortex types/macros used across polars-stream's Vortex source/sink,
-/// polars-plan's IR conversion, and polars-vortex tests. The 5 sub-modules below cover the
-/// actual cross-crate surface (8 paths: array::{ArrayRef, VortexSessionExecute,
-/// arrow::ArrowArrayExecutor, stream::ArrayStreamAdapter}; error::{vortex_err!, VortexResult};
-/// file::{Footer, OpenOptionsSessionExt, VortexFile}; io::{VortexReadAt, std_file::FileReadAt};
-/// layout::segments::SegmentCache). Narrowed from `pub use ::vortex;` in PR-1.4 so the BAN
-/// against new `vortex`-internal symbol use outside the bridge files becomes machine-checkable
-/// — anything outside the 5 sub-modules fails to compile.
+/// polars-plan's IR conversion, and polars-vortex tests. **Invariant**: anything outside
+/// `vortex::{array, error, file, io, layout}` fails to compile — narrowed from `pub use
+/// ::vortex;` in PR-1.4 so the BAN against new `vortex`-internal symbol use outside the bridge
+/// files is machine-checkable. Re-run the actual-use audit (grep for `polars_vortex::vortex::`)
+/// before adding a new sub-module to this list.
 pub mod vortex {
     pub use ::vortex::{array, error, file, io, layout};
 }
