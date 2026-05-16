@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: executing
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
 phase_index: 2
-current_pr: PR-2.2
+current_pr: null
 pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 10
 last_user_touchpoint: 2026-05-16T20:40:00Z
 last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at lower_ir.rs:766 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
-subagent_invocations_this_pr: 2
-subagent_invocations_total: 25
-review_cycles_this_pr: 1
+subagent_invocations_this_pr: 4
+subagent_invocations_total: 27
+review_cycles_this_pr: 2
 phase_entry_sha: fc43d1b8d
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: c9172f95b
+last_commit: d16b363c6
 ```
 
 ## Context
@@ -414,7 +414,7 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 - **Surprises during fix-application**:
   - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
 
-### PR-2.2: PR-13.2 Wire AExpr convertor + arithmetic + bitwise-vs-logical schema gate (3 PR-work commits, ending at `c9172f95b` — awaiting cycle-2 review)
+### PR-2.2: PR-13.2 Wire AExpr convertor + arithmetic + bitwise-vs-logical schema gate (4 PR-work commits, ending at `d16b363c6` — accepted cycle 2)
 
 - **Scope shipped (commit 1 — `f7ab28055`)**:
   - **Plus arithmetic**: added `Operator::Plus → vortex::expr::checked_add` to the convertor's `BinaryExpr` arm. `checked_add` is the only arithmetic builder Vortex publicly exposes in `vortex::expr::*` at the pinned SHA — Sub/Mul/Div/Mod remain residual until upstream exposes their public builders (tracked: PR-2.3+ scope check).
@@ -462,6 +462,20 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
   - **`aexpr` is `pub(crate)`**: initial wire-up tried `polars_plan::plans::aexpr::predicates::vortex_convertor::*` which failed with E0603. The public route is `polars_plan::plans::predicates::vortex_convertor::*` via the glob re-export `pub use aexpr::*` in `plans/mod.rs`. The plan PR-2.1 row's "Files touched" list named `aexpr/predicates/` paths, but external visibility goes through the re-export.
   - **Wire-up site is `lower_ir.rs:766`, not `to_graph.rs:843`**: plan PR-2.2 row referenced `to_graph.rs:843` but the actual `FileScanIR::Vortex` destructure where `expr_arena` is in scope is in `lower_ir.rs`. The plan row stays as a navigation hint; the actual change is at the corrected location.
   - **Cycle-1 surfaced THREE distinct correctness concerns the implementer missed**: (a) hive-column reachability — the convertor would've happily emitted Vortex references to columns not in the Vortex file, reachable from production scan_vortex usage; (b) Vortex `checked_add` fallibility — scan-time errors instead of residual fallback; (c) Vortex `checked_add`'s `Binary::coerce_args` precondition. All three caught by the correctness lens; one (hive) also caught by the fresh lens via different reasoning (cross-cutting w/ the legacy path's hive-strip). **Process lesson**: when the convertor's contract says "always SAFE" but the underlying Vortex builders are fallible, the contract is load-bearing and EVERY new shape (Plus, future CAST/Struct/Temporal) needs an explicit "what does this builder do under hostile inputs" check. Future PR-2.3/.4/.5 rows should bake this check into the acceptance criteria.
+
+- **Cycle-2 review (2-vote `pr-2`, lenses=fresh+correctness, prior_fix_commit_sha=`c9172f95b`, both ACCEPT high-confidence)** — zero must-fix, 7 should-fix observations. Cycle-2 ACCEPT verdict via gauntlet rule (all N reviewers accept AND zero must-fix → overall accept).
+
+  **Most-impactful cycle-2 finding**: **C2-001 (correctness, should-fix → applied)** — the cycle-1 hive guard had a SIBLING bug class via the fix-attention H4 self-reinforcement mechanism. `file_info.schema` "Does not include logical columns like `include_file_path` and row index" but the cycle-1 guard only checked `hive_parts.is_some()`. A user-reachable repro `pl.scan_vortex(path, row_index_name="ri").filter(pl.col("ri") > 10).collect()` would hit the convertor → emit `get_item("ri", root())` → Vortex bails at scan-time. **Fix in commit `d16b363c6`**: extended the guard to ALSO refuse when `unified_scan_args.row_index.is_some()` or `include_file_paths.is_some()`. Both new Python e2e tests (`test_scan_with_row_index_and_filter`, `test_scan_with_hive_partitioning_and_filter`) lock the refuse paths.
+
+  **Other cycle-2 should-fix items applied inline in `d16b363c6`**:
+  - F-SF-CYCLE2-003 / C2-002 (Int128/UInt128 asymmetry): removed `Int128` from `is_vortex_numeric_dtype` to align with what `polars_scalar_to_vortex` actually translates (neither Int128 nor UInt128 had literal-conversion arms; both above Vortex's `PType` ceiling).
+  - F-SF-CYCLE2-001/002/005 + F-SF-CYCLE2-007 (doc-quality sweep): test-module doc-block updated to note the structural-assertion exception for Plus; "14 shapes" / "15 shapes" prose reconciled with table row count; Arithmetic-caveat doc-comment expanded to list Datetime/Time/Duration alongside Date.
+  - F-SF-CYCLE2-004 (nested-Plus + non-Plus-operand tests): added `shape_plus_nested_numeric_passes` and `shape_plus_with_multiply_operand_returns_none` (2 new tests).
+  - F-SF-CYCLE2-006 / C2-003 (Python e2e for hive-refuse path): added `test_scan_with_hive_partitioning_and_filter` and `test_scan_with_row_index_and_filter` (2 new Python tests).
+
+- **Final test count**: convertor unit tests 38 (was 31 → 36 → 38 across cycles); Python e2e tests +3 (`test_scan_with_arithmetic_filter`, `test_scan_with_hive_partitioning_and_filter`, `test_scan_with_row_index_and_filter`).
+- **Final confidence**: high. Both cycle-2 reviewers accept with high confidence; all cycle-1 must-fix items are resolved with new test coverage; all cycle-2 should-fix observations are addressed inline or carried forward in Deferred work.
+- **Deferred items growth (cycle-1 cumulative)**: 3 new Deferred-work entries (per-column hive-vs-file split, Vortex `wrapping_add` upstream API, POLARS_VORTEX_VERIFY_PUSHDOWN debug mode). Cycle-2 added 0 new (all should-fix items addressed inline). Vortex sink `Writeable::Cloud` arm flagged as a separate side-task via SpawnTask. Total `deferred_items_total: 10` (was 7 at PR-2.1 completion).
 
 ### PR-2.1: PR-13.1 AExpr-direct convertor module foundation (3 PR-work commits, ending at `06f4f8592`)
 
@@ -1952,7 +1966,7 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
   - (iii) **Recursive-walk stack-overflow risk on pathological inputs** (cycle-1 correctness nit #5): deeply nested predicates (thousands of clauses) would consume one stack frame per AExpr node. Vortex's own `and_collect`/`or_collect` builders use balanced binary trees to avoid this (see `vortex-array/src/expr/exprs.rs:345-356`). Typical predicate depths are small (~5-10 levels); guard via depth-counter or batch-flatten before recursing. Deferred to Phase 4 polish unless benchmarks show issues.
 
 - **Vortex sink Writeable match non-exhaustive under `polars-stream --features vortex` (without `cloud`)** (`crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:91`): `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` on polars-stream's own `cloud` feature, but the underlying enum's Cloud variant remains visible because `polars-io` (a non-optional polars-stream dep with `features = ["async", "file_cache"]`) enables `polars-io/cloud` transitively via `file_cache`. `cargo check -p polars-stream --features vortex` fails with E0004; `cargo check -p polars --features vortex,cloud,parquet,dtype-full` is clean because that combo keeps `polars-stream/cloud` on. Predates PR-1.3 (commit `bbe16b34a` introduced the cloud sink). Two fix paths: (a) make polars-stream's `vortex` feature transitively enable `cloud` (mirroring how `parquet` may handle it), or (b) add a fall-through wildcard arm in the Vortex sink match. Out of PR-1.3 scope (a 6-must-fix patch); track for Phase 2 cleanup or a follow-up PR. (Deferred from PR-1.3 inner-loop cycle 2 should-fix #1, 2026-05-15.)
-- **Hive-partitioned Vortex scans don't benefit from AExpr convertor pushdown** (PR-2.2 cycle-1 must-fix M1 — partial resolution): `lower_ir.rs` now refuses convertor pushdown when `hive_parts.is_some()` (conservative; legacy `polars_to_vortex_predicate` fast path still fires via `begin_read`'s fallback). A future PR could thread a per-column hive-vs-file split through `lower_ir`, mirroring `polars-mem-engine/src/scan_predicate/functions.rs`'s `create_scan_predicate` `hive_predicate` extraction (lines 42-90): split the AExpr into (hive-only, file-only, mixed); push the file-only part through the convertor; let the hive-only part flow through Polars's hive-partition pruning machinery. Modest scope (~40 LoC); deferred because Phase 2's primary objective (PR-13 pushdown coverage) doesn't block on this and the conservative refuse is sound. Tracked for a Phase 4 polish PR or a follow-up. (Deferred from PR-2.2 cycle-1 must-fix M1, 2026-05-16.)
+- **Virtual-column-partitioned Vortex scans don't benefit from AExpr convertor pushdown** (PR-2.2 cycle-1 must-fix M1 + cycle-2 must-fix-extension C2-001 — partial resolution): `lower_ir.rs` now refuses convertor pushdown when ANY of `hive_parts.is_some()`, `unified_scan_args.row_index.is_some()`, or `unified_scan_args.include_file_paths.is_some()` (conservative; legacy `polars_to_vortex_predicate` fast path still fires via `begin_read`'s fallback). A future PR could thread a per-column file-vs-virtual split through `lower_ir`, mirroring `polars-mem-engine/src/scan_predicate/functions.rs`'s `create_scan_predicate` `hive_predicate` extraction (lines 42-90): split the AExpr into (virtual-only, file-only, mixed); push the file-only part through the convertor; let the virtual-only part flow through Polars's standard machinery (hive-partition pruning for hive, row-index materialization for row_index, etc.). Modest scope (~60 LoC after extending to cover all three virtual-column kinds); deferred because Phase 2's primary objective (PR-13 pushdown coverage) doesn't block on this and the conservative refuse is sound. Tracked for a Phase 4 polish PR or a follow-up. (Deferred from PR-2.2 cycle-1 must-fix M1, extended cycle-2 C2-001, 2026-05-16.)
 
 - **Vortex `wrapping_add` (or non-fallible add) public API** (PR-2.2 cycle-1 must-fix M2 — partial resolution): The current `Plus → checked_add` mapping has a semantic divergence with Polars's wrapping `+`: Vortex errors at scan-time on integer overflow while Polars wraps. For typical OLAP queries with small-int data this is rare, but `col + 1 == big_value` on a column near MAX errors out instead of producing wrapped-then-compared results. PR-2.2 documents this in the function doc-comment; the proper fix is for Vortex to expose `wrapping_add` (or similar) in `vortex::expr::*` so polars-vortex can prefer it for Polars Plus semantics. Tracking as an upstream-Vortex coordination item — file when polars-vortex hits a real-world user query that surfaces the divergence, or as part of PR-2.5 (which already coordinates Vortex's `datetime_parts` op). (Deferred from PR-2.2 cycle-1 must-fix M2 / F-MF-002, 2026-05-16.)
 
