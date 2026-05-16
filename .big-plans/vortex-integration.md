@@ -5,24 +5,24 @@
 ## Current State
 
 ```yaml
-status: executing
+status: phase-boundary
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: PR-1.4
-pr_index: 4
+current_pr: null
+pr_index: 5
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T00:15:00Z
-last_user_touchpoint_what: "PR-1.4 inner-loop cycle 2 accepted (zero must-fix); 4 cycle-1 should-fix items deferred to Phase 2 entry"
-subagent_invocations_this_pr: 2
+last_user_touchpoint: 2026-05-16T00:20:00Z
+last_user_touchpoint_what: "PR-1.4 complete at confidence: high; entering phase-end cycle 3 phase-4 gauntlet"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 15
-review_cycles_this_pr: 2
+review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 2
 phase_end_reject_cycles: 0
-last_phase_end_verdict: accept
+last_phase_end_verdict: null
 last_commit: 2eb45441c
 ```
 
@@ -381,6 +381,22 @@ Living ledger — populated by inner-loop and phase-end reviews.
   - **Cycle-1 MF-002 fix introduced a build break that my verification missed.** The umbrella `cargo check -p polars --features vortex,cloud,parquet,dtype-full` succeeded because that feature combo doesn't include `new_streaming`, so polars-stream's vortex sink code wasn't even compiled. The right verification is `cargo check -p polars-stream --features vortex,cloud`. Process gap; should be added to BAN / verification checklist for future PR-N inner-loops touching polars-stream.
   - **All 6 phase-end must-fix items were in PRE-EXISTING 31-commit code** (not in PR-1.1 or PR-1.2 directly). Phase 1's "retroactive ratification" framing is real — the phase-4 gauntlet's purpose at this phase was specifically to surface latent issues in the pre-existing integration foundation. Verdict: framing worked as designed.
   - **Cycle-2 surfaced a pre-existing build break unrelated to PR-1.3**: `polars-stream --features vortex` (without `cloud`) errors with E0004 on the Vortex sink Writeable match — `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Tracked as Deferred work for Phase 2 cleanup or follow-up PR.
+
+### PR-1.4: Phase 1 cycle-2 cleanup (5 PR-work commits, ending at `5c634f26f`)
+
+- **Scope shipped**:
+  - **Thread `VortexScanOptions::segment_cache` through `vortex_file_info`** (commit `68f9d5c14`): IR-build-time postscript schema-discovery read now honors the user's `cache_mode='off'` / `'global'` / `Dedicated(N)` choice (was previously hardcoded to the global cache). Mirrors the streaming-source pattern at `io_sources/vortex/mod.rs:138`. Signature change: `vortex_file_info` now takes an extra `segment_cache: Arc<dyn SegmentCache>` parameter; sole caller resolves `options.segment_cache.resolve()` and passes it through.
+  - **Narrow `pub use ::vortex;` to 5 sub-modules** (commit `38035b2f0`): `pub mod vortex { pub use ::vortex::{array, error, file, io, layout}; }`. Audit confirmed 11 actual cross-crate `polars_vortex::vortex::*` paths span exactly these 5 sub-modules; the project BAN against new `vortex`-internal symbol use is now machine-checkable.
+  - **Inline `read::metadata` back-compat shim** (commit `3479c6bdb`): deleted the 5-line `pub mod metadata { pub use super::VortexFooterRef; }` shim at `read/mod.rs:18-22`. Two callers (`polars-plan/src/dsl/file_scan/mod.rs:21`, `polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:300`) updated to use the canonical `polars_vortex::read::VortexFooterRef` path.
+  - **Plan-doc fix on Vortex sink producer/writer error-path determinism** (commit `2eb45441c`): corrected the Deferred work entry per cycle-2 correctness-lens finding (producer-Err path is deterministic per `producer.await?` ordering, not race-y).
+  - **Cycle-1-inner-loop must-fix `.clone()` removal** (commit `5c634f26f`): dropped redundant `.clone()` on `VortexCacheMode` (Copy-derived) at `scans.rs:1036`. Triggered `clippy::clone_on_copy` warning which CI's `tools/cargo-fail-warning.py` treats as failure; fix is one-character delta matching the streaming-source prior art at `io_sources/vortex/mod.rs:138`.
+- **Tests added**: None new. Existing 66 Rust + 10 Python tests continue to pass. The cycle-1 phase-end coverage gap ("vortex_file_info honors VortexScanOptions::segment_cache") is now CLOSED in source but still ships without a dedicated regression test — deferred per Deferred work entry (same priority bucket as the MF-001/MF-002 Python regression test).
+- **Review**: 2-vote (gauntlet `preset=pr-2`, lenses=`fresh`+`correctness`) / **accepted at cycle 2** (cycles: 2). Cycle 1: 1 must-fix (clippy::clone_on_copy CI-blocker), 4 should-fix (all 4 deferred to Phase 2 entry — Dedicated double-resolve perf; missing regression test; long doc-comments; signature-shape architecture nit), 1 nit (dismissed). Cycle 2: 0 findings, both reviewers accept at confidence: high. Full Synthesizer Output JSON in plan-commit bodies for cycle-1 (`24f8f5d4f`) and cycle-2 (`3fc5ee4bd`).
+- **Confidence**: high
+- **Deferred items**: 4 cycle-1 should-fix items deferred to Phase 2 entry (Dedicated double-resolve; segment_cache regression test; long doc-comments; signature shape). Cumulative `deferred_items_total: 6` (unchanged — the 4 PR-1.4 should-fix items are tracked in cycle-1's synthesizer-output JSON committed to `24f8f5d4f` body, not in the Deferred work section yet; they'll be migrated as part of Phase 2.0 housekeeping if/when that sub-PR runs).
+- **Surprises during implementation**:
+  - **The cycle-1 phase-end review's top should-fix recommendations all landed cleanly as a focused 4-commit cleanup PR**, validating the cycle-2 phase-end framework: when reviewers consistently surface fixable items at the phase boundary, an explicit "Phase N.4 cleanup" sub-PR is a natural fit rather than absorbing into the next phase's work or carrying as Deferred work indefinitely.
+  - **PR-1.4's cycle-1 inner-loop reject (clippy::clone_on_copy)** was a small-cost-high-signal find: both reviewers caught it independently (fresh as nit, correctness as must-fix per the `cargo-fail-warning.py` CI-blocker analysis). Process win: the strict-warning CI setup ensures even nit-level lints get surfaced as gate-blocking; verification checklist should include `cargo clippy -p <touched-crate> --features <features>` in addition to `cargo check`.
 
 ## Resolved phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1
 
