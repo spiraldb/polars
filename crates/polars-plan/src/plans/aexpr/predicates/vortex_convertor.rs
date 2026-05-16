@@ -87,6 +87,28 @@ use crate::plans::AExpr;
 ///
 /// `Some(Expression)` on full pushdown; `None` if any shape can't be translated. Always
 /// SAFE — the caller treats `None` as "not pushable" and lets the residual filter run.
+///
+/// # ⚠️ Bitwise-vs-logical operator caveat — addressed at the call site in PR-2.2
+///
+/// Polars' [`Operator::And`] / [`Operator::Or`] and [`IRBooleanFunction::Not`] are
+/// **bitwise-OR-logical**: they work on integer columns as bitwise ops AND on bool columns
+/// as logical ops. The annotation `// Also bitwise negate` at
+/// `crates/polars-plan/src/plans/aexpr/function_expr/boolean.rs:49` is explicit about this.
+///
+/// Vortex's [`and`], [`or`], and [`not`] are **boolean-only**.
+///
+/// The convertor maps all three unconditionally to Vortex's boolean variants. For the
+/// typical predicate root (a boolean tree consumed by `WHERE`), this is correct. But for
+/// embedded integer-bitwise sub-trees — e.g., `(col_int & 1) > 0` — the convertor would
+/// emit `gt(and(col_int, lit(1)), lit(0))`, which is semantically wrong (Vortex's `and`
+/// is undefined on integer arrays).
+///
+/// **TODO (PR-2.2 wire-up)**: When wiring at `to_graph.rs:843`, the call site has the
+/// `output_schema` available. Either (a) skip-the-pushdown when any operand of And/Or/Not
+/// is non-bool — this is what [`super::column_expr`] does at lines 245-247 — or (b) thread
+/// a `&Schema` into this convertor and guard inside the match arms. Option (a) at the call
+/// site is cheaper because the convertor stays schema-free. Tracked: PR-2.1 cycle-1
+/// should-fix items (both fresh + correctness lenses).
 pub fn aexpr_to_vortex_expression(
     root_node: Node,
     arena: &Arena<AExpr>,
@@ -393,6 +415,28 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 1);
         let n = binop(&mut arena, c, Operator::Xor, l);
+        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+    }
+
+    #[test]
+    fn unsupported_eq_validity_returns_none() {
+        // EqValidity is the null-aware equality variant Vortex doesn't have a direct
+        // equivalent for; the convertor explicitly returns None at the match arm.
+        // (cycle-1 fresh-lens F-002.)
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 1);
+        let n = binop(&mut arena, c, Operator::EqValidity, l);
+        assert!(aexpr_to_vortex_expression(n, &arena).is_none());
+    }
+
+    #[test]
+    fn unsupported_not_eq_validity_returns_none() {
+        // NotEqValidity — paired with EqValidity. (cycle-1 fresh-lens F-002.)
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 1);
+        let n = binop(&mut arena, c, Operator::NotEqValidity, l);
         assert!(aexpr_to_vortex_expression(n, &arena).is_none());
     }
 
