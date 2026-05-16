@@ -10,21 +10,21 @@ branch: vortex-integration
 planning_sub_flow: null
 current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
 phase_index: 2
-current_pr: PR-2.1
-pr_index: 2
+current_pr: null
+pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 7
-last_user_touchpoint: 2026-05-16T20:30:00Z
-last_user_touchpoint_what: "PR-2.1 cycle 1 accepted (0 must-fix, 5 should-fix — 2 fixed inline, 3 deferred); test count 23 (vortex_convertor)"
-subagent_invocations_this_pr: 1
+last_user_touchpoint: 2026-05-16T20:35:00Z
+last_user_touchpoint_what: "PR-2.1 complete (confidence: high, 1 review cycle, 3 PR-work commits, +1 deferred entry); ready for PR-2.2"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 23
-review_cycles_this_pr: 1
+review_cycles_this_pr: 0
 phase_entry_sha: fc43d1b8d
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 06f4f8592
+last_commit: db61a822c
 ```
 
 ## Context
@@ -413,6 +413,23 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 - **Deferred items**: 0 new (cumulative `deferred_items_total: 6` unchanged).
 - **Surprises during fix-application**:
   - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
+
+### PR-2.1: PR-13.1 AExpr-direct convertor module foundation (3 PR-work commits, ending at `06f4f8592`)
+
+- **Scope shipped**:
+  - **New module** `crates/polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs` (~450 LoC including 23 tests): translates Polars `AExpr` predicate trees → Vortex `Expression` trees for filter pushdown. Covers the 14 foundational shapes per the plan PR-2.1 row: Column, Literal::Scalar, 6 comparisons (Eq/NotEq/Lt/LtEq/Gt/GtEq), And/Or + LogicalAnd/LogicalOr aliases, IsNull/IsNotNull/Not (via `IRBooleanFunction`). Exhaustive match on Polars `Operator` (8 mapped, 10 explicit None — arithmetic deferred to PR-2.2, EqValidity/NotEqValidity/Xor permanent None). `_ => None` wildcard catches unsupported AExpr variants (Cast → PR-2.3, StructField → PR-2.4, temporal → PR-2.5, Sort/Gather/Filter/Agg/Ternary/AnonymousFunction/Over/Rolling). Recursive `?`-propagation ensures any unsupported sub-tree poisons the whole tree (sound — multi-scan layer re-applies full predicate post-decode).
+  - **File location correction** (commit `e970759d7`): plan PR-2.1 row originally targeted `polars-vortex/src/read/aexpr_predicate.rs`, but polars-vortex cannot depend on polars-plan (the dep arrow points polars-plan → polars-vortex per polars-plan/Cargo.toml:28+:80, gated on the `vortex` feature). Convertor lives in polars-plan instead. Plan PR-2.1 row amended in commit `4f8750a59`.
+  - **Narrowed re-export widening** (commit `e970759d7`): added `expr` to `polars-vortex/src/lib.rs`'s narrowed re-export (now `{array, error, expr, file, io, layout}`) so polars-plan can reach `vortex::expr::{eq, lt, ...}` builders through the BAN-checked re-export. Audit-verified: only 6 sub-modules used externally; BAN remains machine-checkable.
+  - **`polars_scalar_to_vortex` visibility bump** (commit `e970759d7`): made `pub` (was `pub(super)`) so polars-plan's vortex_convertor reuses the single source of truth for `AnyValue` → `VortexScalar` mapping across both convertor paths.
+  - **Stub file** `crates/polars-vortex/src/read/aexpr_predicate.rs` (commit `e970759d7`): documents the architectural relocation; not registered in `read/mod.rs`, not compiled. Documentation-only; will be deleted in a housekeeping pass.
+  - **Cycle-1 should-fix work** (commit `06f4f8592`): bitwise-vs-logical TODO at function doc-block (Polars `And/Or/Not` are bitwise-or-logical, Vortex's are boolean-only; PR-2.2 wire-up site at `to_graph.rs:843` is the schema-gated mitigation point). Plus 2 None-returning tests for `Operator::EqValidity`/`NotEqValidity`. Test count 21 → 23.
+- **Tests added**: 23 new unit tests in polars-plan's `vortex_convertor::tests` module (14 shape coverage + 4 unsupported-shape None coverage + 2 integration tests + 2 cycle-1-added None-coverage). polars-vortex test count unchanged at 69 (these tests live in polars-plan behind the `vortex` feature).
+- **Review**: 2-vote (gauntlet `preset=pr-2`, lenses=fresh+correctness) / **accepted at cycle 1** (cycles: 1). Both reviewers high confidence; 0 must-fix, 5 should-fix (2 addressed inline, 3 deferred), 1 nit (orphan stub file). Full Synthesizer Output JSON in plan-commit `db61a822c` body.
+- **Confidence**: high
+- **Deferred items**: 1 new bundled Deferred-work entry covering 3 cycle-1 should-fix items (tautological tests; eager arg conversion; recursive-walk stack-overflow risk). Cumulative `deferred_items_total: 7` (was 6).
+- **Surprises during implementation**:
+  - **Plan PR-2.1 row's file location was architecturally impossible**: polars-vortex can't depend on polars-plan (dep direction is the reverse, gated on `vortex` feature). Caught immediately by `cargo check` failing with E0433 on `use polars_plan::...` in the initial polars-vortex draft. Convertor relocated to polars-plan; plan row amended. **Planning lesson**: cross-crate type-flow constraints aren't visible in the "Files touched" plan column without an explicit dep-graph check. Future PR rows should be cross-validated against `cargo metadata --format-version 1 | jq '.resolve.nodes'` or equivalent before writing.
+  - **Tautological-test pattern re-occurrence**: cycle-1 fresh + correctness lenses flagged the same `.is_some()`-only test pattern that PR-2.0 cycle-2 caught on the C-003 unit tests. This is a fresh occurrence in new tests authored by the same agent — the carry-forward note didn't influence the new test design. **Process lesson**: when a should-fix is deferred (not fixed inline), reference it explicitly in subsequent PR's test-design phase to avoid pattern recurrence.
 
 ### PR-2.0: Phase 2.0 housekeeping (12 PR-work commits, ending at `efcbc92f2`)
 
