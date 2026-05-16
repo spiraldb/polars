@@ -5,18 +5,18 @@
 ## Current State
 
 ```yaml
-status: planning
+status: executing
 branch: vortex-integration
-planning_sub_flow: amend-phase-1
+planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: null
-pr_index: 3
+current_pr: PR-1.4
+pr_index: 4
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T00:00:00Z
-last_user_touchpoint_what: "Phase 1 cycle-2 accepted; user chose Amend to insert PR-1.4 (cleanup of top should-fix items)"
-subagent_invocations_this_pr: 1
+last_user_touchpoint: 2026-05-16T00:05:00Z
+last_user_touchpoint_what: "amend phase 1 complete; entering PR-1.4 inner-loop"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 13
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
