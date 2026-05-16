@@ -294,7 +294,7 @@ pub struct VortexScanOptions {
     pub push_predicate: bool,            // default true — translate predicates to Vortex Expressions
     pub initial_read_size: Option<usize>,
     pub scan_concurrency: Option<NonZeroUsize>,
-    pub cache: VortexCacheMode,          // Global | Off | Dedicated(bytes)
+    pub segment_cache: VortexCacheMode,  // Global | Off | Dedicated(bytes). Named `segment_cache` (not `cache`) to avoid collision with `ScanArgsVortex::cache: bool` (LazyFrame query cache).
 }
 
 // Write options — embedded in FileWriteFormat::Vortex
