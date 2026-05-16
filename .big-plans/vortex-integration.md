@@ -401,11 +401,11 @@ Living ledger — populated by inner-loop and phase-end reviews.
 
 #### Re-completion (CI-reopen at phase-boundary, before cycle-3 phase-end review)
 
-PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commit `7eaf4e2fe`: (a) `rustfmt` on `scans.rs:300-303` (multi-line `PolarsResult<(FileInfo, Option<VortexFooterRef>)>` return type) + `read/mod.rs:17` (trailing blank line); (b) `typos` on `MIS-CHARACTERIZES` at plan lines 1197 + 1441. Both were mechanical fixes: `cargo fmt --all` restored the rustfmt-required form, two `MIS-CHARACTERIZES` occurrences replaced with `MISCHARACTERIZES` (correct closed-compound spelling).
+PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commit `7eaf4e2fe`: (a) `rustfmt` on `scans.rs:300-303` (multi-line `PolarsResult<(FileInfo, Option<VortexFooterRef>)>` return type) + `read/mod.rs:17` (trailing blank line); (b) `typos` on the hyphenated form of "mischaracterizes" at plan lines 1197 + 1441. Both were mechanical fixes: `cargo fmt --all` restored the rustfmt-required form, two hyphenated-form occurrences replaced with the closed-compound `MISCHARACTERIZES` spelling.
 
 - **Scope shipped (CI-reopen)**:
   - **rustfmt restoration** (commit `0a71bc2f4`): collapsed 4-line return-type at `scans.rs:300-303` to a single 77-char line; removed trailing blank line at `read/mod.rs:17`. Mechanical `cargo fmt --all` output.
-  - **Typos fix** (commit `f0e99e43f`, bundled with plan re-open): `MIS-CHARACTERIZES` → `MISCHARACTERIZES` at both occurrences in the cycle-2 phase-end review section (narrative prose at `:1197` + JSON-archive blob at `:1441`). Closed-compound spelling; zero semantic drift.
+  - **Typos fix** (commit `f0e99e43f`, bundled with plan re-open): hyphenated-form → `MISCHARACTERIZES` at both occurrences in the cycle-2 phase-end review section (narrative prose at `:1197` + JSON-archive blob at `:1441`). Closed-compound spelling; zero semantic drift.
 - **Tests added**: None — cosmetic CI fixes, no behavioral change. Existing 66 Rust + 10 Python tests unaffected.
 - **Review (CI-reopen iteration)**: 2-vote gauntlet `preset=pr-2` (lenses=`fresh`+`correctness`) over diff range `7eaf4e2fe..HEAD`. **Accepted at cycle 1** (both reviewers `high` confidence). 0 must-fix, 0 should-fix, 3 nits — all meta-process commentary about big-plans skill itself (non-canonical `current_pr_is_ci_reopen` field; `last_commit` anchoring ambiguity; typo-fix verification). None map to BANS / Accepted tradeoffs / Deferred work. All 3 nits dismissed per Step 2.4 nit-handling convention. Full Synthesizer Output JSON in plan-commit `0677ffcc9` body.
 - **Confidence**: high
