@@ -12,10 +12,10 @@ current_phase: "Ratify + crates.io transition"
 phase_index: 1
 current_pr: PR-1.4
 pr_index: 5
-outstanding_must_fix: 2
+outstanding_must_fix: 1
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T16:00:00Z
-last_user_touchpoint_what: "phase-end reject (cycle 3) — re-open PR-1.4 to address 2 must-fix items (plan:404 typos recurrence + README:244 back-compat phrase)"
+last_user_touchpoint: 2026-05-16T16:05:00Z
+last_user_touchpoint_what: "phase-end reject (cycle 3) PR-1.4 fix 1/2 landed (typos at plan:404+408 rephrased); 1 must-fix remaining (README:244)"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 17
 review_cycles_this_pr: 0
@@ -24,7 +24,7 @@ phase_end_cycle: 3
 phase_end_reject_cycles: 0
 last_phase_end_verdict: reject
 current_pr_is_ci_reopen: null
-last_commit: 00aac72af
+last_commit: d71911f07
 ```
 
 ## Context
