@@ -10,15 +10,15 @@ branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: PR-1.3
+current_pr: null
 pr_index: 3
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-15T22:30:00Z
-last_user_touchpoint_what: "PR-1.3 inner-loop gauntlet cycle 2 accepted (zero must-fix); 1 should-fix (pre-existing build break) deferred"
-subagent_invocations_this_pr: 2
+last_user_touchpoint: 2026-05-15T22:45:00Z
+last_user_touchpoint_what: "PR-1.3 complete at confidence: high (cycle 2 accepted); routing back to Step 3.3.5 step 3 to flip Pending rows"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 12
-review_cycles_this_pr: 2
+review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 1
 phase_end_reject_cycles: 0
@@ -354,6 +354,32 @@ Living ledger — populated by inner-loop and phase-end reviews.
 - **Surprises during implementation**:
   - vortex 0.70.0 doesn't expose `DType::Union` (the local Vortex workspace's `0.1.0` did); fix was a single-arm removal in `schema.rs`. `DType::Variant` is in 0.70.0 — the original PR-1.1 fix incorrectly removed both arms; rolled back to keep `Variant`.
   - The `GIT_CONFIG_GLOBAL=/tmp/clean-home/.gitconfig CARGO_NET_GIT_FETCH_WITH_CLI=false` env-shim is no longer required (user notified 2026-05-15 mid-cycle). Memory `polars_build_tips.md` + plan BAN updated. Plan-commit `79a9ecdbf` strikethrough'd the BAN.
+
+### PR-1.3: Address must-fix items from Phase 1 retroactive 4-vote gauntlet (10 PR-work commits, ending at `7018c4582`)
+
+- **Scope shipped**:
+  - **6 phase-end must-fix items from cycle 1** of the Phase 1 4-vote gauntlet, all in pre-existing 31-commit code:
+    - **MF-001** [`polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:135`]: writer task `ASYNC.spawn(...)` now wrapped in `tokio_handle_ext::AbortOnDropHandle` (mirrors IPC sink at `ipc/mod.rs:101`). Prevents silent-truncation when the outer async_executor task fails before reaching the explicit `write_handle.await`.
+    - **MF-002** [same file, producer task lines 110-130]: producer-task errors from `dataframe_to_vortex_chunks(&df)` now forwarded through the `mpsc::channel::<VortexResult<VortexArrayRef>>` as `Err(...)` BEFORE the channel is dropped. The writer's `ArrayStreamAdapter` propagates the Err instead of seeing a clean-EOS-then-write-footer signal that would produce a truncated-but-valid Vortex file on disk.
+    - **MF-003** [`polars-plan/src/plans/conversion/dsl_to_ir/scans.rs:345`]: `vxf.row_count() as usize` replaced with `usize::try_from(...).unwrap_or(usize::MAX)` per project BAN, matching the established clamp at `polars-stream/src/nodes/io_sources/vortex/mod.rs:217`.
+    - **MF-004** [`crates/polars-vortex/README.md:297`]: documented struct-field name `cache` corrected to actual `segment_cache` (rename was intentional per `read/options.rs:26-27` comment to distinguish from the LazyFrame query cache).
+    - **MF-005** [`crates/polars-vortex/README.md:325-332`]: `pl.scan_vortex` documented signature now includes the new `cache_mode=` parameter shipped in PR-1.2.
+    - **MF-006** [`polars-stream/src/nodes/io_sources/vortex/builder.rs:49`]: `set_io_metrics`'s silent `let _ = self.io_metrics.set(...)` replaced with `.ok().unwrap()` to align with the CSV/IPC/NDJSON 3-of-4 sibling consensus (panic on duplicate `set` surfaces refactor regressions immediately). Cycle 1's first fix was a comment-add; the inner-loop gauntlet flagged that comment as fabricating a "by design" trait contract not supported by the actual single-call site (verified via cycle-2's trace through `multi_scan/mod.rs:185-200` + `pipeline/initialization.rs:366` + `physical_plan/lower_ir.rs:769-775`).
+  - **2 inner-loop cycle-1 must-fix items** found during PR-1.3 self-review:
+    - `vortex::error::vortex_err!` build break at `vortex/mod.rs:139`: `polars-stream` has no direct `vortex` crate dep — only `polars-vortex`. Cycle-1 verification gap: `cargo check -p polars` (umbrella, without `new_streaming`) didn't activate polars-stream's vortex code; the right check is `-p polars-stream --features vortex,cloud`. Fix at `e1688a567` uses `polars_vortex::vortex::error::vortex_err!` via the `pub use ::vortex;` re-export at `polars-vortex/src/lib.rs:18`.
+    - MF-006 comment fabrication (described above; fix at `f408469d3`).
+  - **2 inner-loop cycle-1 should-fix items** fixed in PR-1.3:
+    - `rbs as usize` BAN class at `crates/polars-vortex/src/write/strategy.rs:26` — same pattern as MF-003 (`usize::try_from(rbs).unwrap_or(usize::MAX)`). Commit `297fb7cf9`.
+    - `cargo fmt` import-group ordering at `polars-stream/.../vortex/mod.rs:35` (the `use crate::utils::tokio_handle_ext;` added in MF-001 was mid-group). Commit `7018c4582`.
+- **Tests added**: None new. Existing 66 Rust unit+integration tests + 10 Python tests continue to pass; the MF-001/MF-002 guarantees are not yet covered by a regression test (deferred per Deferred work — Rust-level test infrastructure and Python-level test both captured).
+- **Review**: 2-vote (gauntlet `preset=pr-2`, lenses=`fresh`+`correctness`) / **accepted at cycle 2** (cycles: 2). Cycle 1: 2 must-fix (vortex_err build break, MF-006 comment fabrication), 4 should-fix (2 fixed-now: rbs clamp / cargo fmt; 2 deferred: producer/writer error race / Python regression test), 3 nits dismissed. Cycle 2: 0 must-fix, 1 should-fix deferred (pre-existing E0004 build break under `polars-stream --features vortex` without `cloud` — predates PR-1.3), 0 nit. Full Synthesizer Output JSON in plan-commit bodies for cycle-1 (`a708bbe12`) and cycle-2 (`400f3e1a6`).
+- **Confidence**: high
+- **Deferred items**: 3 new in PR-1.3 (Vortex sink producer/writer error-path determinism polish; Python-level regression test for MF-001/MF-002; pre-existing E0004 build break under `vortex`-without-`cloud` combo). Cumulative `deferred_items_total: 6`.
+- **Surprises during implementation**:
+  - **Cycle-1 MF-006 fix was reward-hacking the silent-discard BAN.** The "fix" (adding a comment explaining why the silent-discard was acceptable) fabricated a "multi-call by design" trait contract that didn't exist. The cycle-2 inner-loop review caught this and routed to a strictly better fix: align with the 3-of-4 sibling consensus via `.ok().unwrap()`. Lesson: when adding a comment to justify a silent-error swallow, check whether the underlying pattern is correct rather than just explaining why the swallow is acceptable.
+  - **Cycle-1 MF-002 fix introduced a build break that my verification missed.** The umbrella `cargo check -p polars --features vortex,cloud,parquet,dtype-full` succeeded because that feature combo doesn't include `new_streaming`, so polars-stream's vortex sink code wasn't even compiled. The right verification is `cargo check -p polars-stream --features vortex,cloud`. Process gap; should be added to BAN / verification checklist for future PR-N inner-loops touching polars-stream.
+  - **All 6 phase-end must-fix items were in PRE-EXISTING 31-commit code** (not in PR-1.1 or PR-1.2 directly). Phase 1's "retroactive ratification" framing is real — the phase-4 gauntlet's purpose at this phase was specifically to surface latent issues in the pre-existing integration foundation. Verdict: framing worked as designed.
+  - **Cycle-2 surfaced a pre-existing build break unrelated to PR-1.3**: `polars-stream --features vortex` (without `cloud`) errors with E0004 on the Vortex sink Writeable match — `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Tracked as Deferred work for Phase 2 cleanup or follow-up PR.
 
 ## Pending phase-end must-fix items — Phase 1: Ratify + crates.io transition — cycle 1
 
