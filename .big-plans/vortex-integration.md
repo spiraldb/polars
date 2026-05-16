@@ -16,8 +16,8 @@ outstanding_must_fix: 0
 deferred_items_total: 3
 last_user_touchpoint: 2026-05-15T15:01:18Z
 last_user_touchpoint_what: "PR-1.2 complete (confidence: high, deferred: 1); PR-1.3 reactive placeholder; advancing to Phase 3 end-of-phase 4-vote review"
-subagent_invocations_this_pr: 0
-subagent_invocations_total: 9
+subagent_invocations_this_pr: 1
+subagent_invocations_total: 10
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 0
