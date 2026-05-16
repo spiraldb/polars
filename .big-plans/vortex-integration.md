@@ -5,17 +5,17 @@
 ## Current State
 
 ```yaml
-status: phase-boundary
+status: executing
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: null
+current_pr: PR-1.4
 pr_index: 5
-outstanding_must_fix: 0
+outstanding_must_fix: 2
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T00:20:00Z
-last_user_touchpoint_what: "PR-1.4 complete at confidence: high; entering phase-end cycle 3 phase-4 gauntlet"
+last_user_touchpoint: 2026-05-16T15:00:00Z
+last_user_touchpoint_what: "re-open PR-1.4 for CI fix (rustfmt + typos detected at phase-boundary before cycle-3 gauntlet)"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 15
 review_cycles_this_pr: 0
@@ -23,7 +23,8 @@ phase_entry_sha: 657c78c97
 phase_end_cycle: 2
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
-last_commit: 2eb45441c
+current_pr_is_ci_reopen: true
+last_commit: 7eaf4e2fe
 ```
 
 ## Context
@@ -1193,7 +1194,7 @@ Phase 1 ('Ratify + crates.io transition') of polars-vortex closes coherently at 
 - **Cycle-2 surfaced a pre-existing E0004 build break under `polars-stream --features vortex` (without `cloud`): the Vortex sink Writeable match's `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` on polars-stream's own `cloud` feature, but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Predates PR-1.3.**
   - How handled: Deferred (cumulative deferred 6). Tracked for Phase 2 cleanup or follow-up PR.
   - Amend plan: `already-done`
-- **Correctness lens traced the producer/writer error-path race exhaustively and verified the Deferred work entry 'Vortex sink producer/writer error-path determinism polish' MIS-CHARACTERIZES the behavior. The producer's `.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs, so the producer's PolarsError always propagates first; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. Producer-Err path is deterministic; only error-message-WORDING is what the Deferred entry was trying to characterize as 'race-y' but it's not race-y in user-visible behavior.**
+- **Correctness lens traced the producer/writer error-path race exhaustively and verified the Deferred work entry 'Vortex sink producer/writer error-path determinism polish' MISCHARACTERIZES the behavior. The producer's `.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs, so the producer's PolarsError always propagates first; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. Producer-Err path is deterministic; only error-message-WORDING is what the Deferred entry was trying to characterize as 'race-y' but it's not race-y in user-visible behavior.**
   - How handled: Not yet — captured as should-fix above to update both the inline comment and the Deferred work entry. Trivial doc-only correction.
   - Amend plan: `yes`
 - **`pub use ::vortex;` re-export WIDENED via PR-1.3's MF-002 fix introducing a macro dependency (`vortex::error::vortex_err!`). Macros from external crates have looser stability contracts than function signatures, so this is a regression on the layering concern cycle-1 already flagged. But the narrowing recommendation still works WITH the macro because macros are re-exported by module — `pub mod vortex { pub use ::vortex::{array, error, file, io, session}; }` covers every actual use including the macro.**
@@ -1437,7 +1438,7 @@ _(none — all 4 reviewers agreed on accept verdict)_
       {"what": "PR-1.3's cycle-1 MF-006 fix was a reward-hacking comment-add. Cycle-2 inner-loop caught it via specific code-trace through multi_scan/mod.rs:185-200 + pipeline/initialization.rs:366 + physical_plan/lower_ir.rs:769-775 (single-call-site reality) and routed to the strictly-better .ok().unwrap() fix aligned with CSV/IPC/NDJSON 3-of-4 sibling consensus. Lesson: when adding a justification comment to a silent-error swallow, audit the underlying pattern.", "how_handled": "Resolved cycle-2; documented in PR-1.3 surprises.", "amend_plan": "already-done"},
       {"what": "PR-1.3's cycle-1 MF-002 fix introduced a build break (`vortex::error::vortex_err!` doesn't resolve in polars-stream). The umbrella `cargo check -p polars --features vortex,cloud,parquet,dtype-full` doesn't include `new_streaming`, so polars-stream's vortex sink code wasn't compiled. Verification gap: the right check is `-p polars-stream --features vortex,cloud`.", "how_handled": "Resolved cycle-2 via `polars_vortex::vortex::error::vortex_err!` through the broad re-export. Recommend adding `cargo check -p polars-stream --features vortex,cloud` to the verification checklist for future PRs touching polars-stream.", "amend_plan": "already-done"},
       {"what": "Cycle-2 surfaced a pre-existing E0004 build break under `polars-stream --features vortex` (without `cloud`): the Vortex sink Writeable match's `Writeable::Cloud(_)` arm is `#[cfg(feature = \"cloud\")]` on polars-stream's own `cloud` feature, but the underlying enum's Cloud variant remains visible because `polars-io`'s `file_cache` feature transitively enables `polars-io/cloud`. CI doesn't catch this combo. Predates PR-1.3.", "how_handled": "Deferred (cumulative deferred 6). Tracked for Phase 2 cleanup or follow-up PR.", "amend_plan": "already-done"},
-      {"what": "Correctness lens traced the producer/writer error-path race exhaustively and verified the Deferred work entry 'Vortex sink producer/writer error-path determinism polish' MIS-CHARACTERIZES the behavior. The producer's `.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs, so the producer's PolarsError always propagates first; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. Producer-Err path is deterministic; only error-message-WORDING is what the Deferred entry was trying to characterize as 'race-y' but it's not race-y in user-visible behavior.", "how_handled": "Not yet — captured as should-fix above to update both the inline comment and the Deferred work entry. Trivial doc-only correction.", "amend_plan": "yes"},
+      {"what": "Correctness lens traced the producer/writer error-path race exhaustively and verified the Deferred work entry 'Vortex sink producer/writer error-path determinism polish' MISCHARACTERIZES the behavior. The producer's `.await?` ALWAYS sees the producer's terminal value before `write_handle.await` runs, so the producer's PolarsError always propagates first; the writer's VortexError-wrapped form is silently discarded via AbortOnDrop. Producer-Err path is deterministic; only error-message-WORDING is what the Deferred entry was trying to characterize as 'race-y' but it's not race-y in user-visible behavior.", "how_handled": "Not yet — captured as should-fix above to update both the inline comment and the Deferred work entry. Trivial doc-only correction.", "amend_plan": "yes"},
       {"what": "`pub use ::vortex;` re-export WIDENED via PR-1.3's MF-002 fix introducing a macro dependency (`vortex::error::vortex_err!`). Macros from external crates have looser stability contracts than function signatures, so this is a regression on the layering concern cycle-1 already flagged. But the narrowing recommendation still works WITH the macro because macros are re-exported by module — `pub mod vortex { pub use ::vortex::{array, error, file, io, session}; }` covers every actual use including the macro.", "how_handled": "Captured as should-fix above with concrete narrowing recommendation.", "amend_plan": "no"},
       {"what": "Plan-row PR-1.2 'Files touched (expected)' field still lists 4 files; actual is ~30. Cycle-1 should-fix #1 noted this; PR-1.3 didn't address (must-fix-only). Implementation status carries the truth; the 'expected' field is documentation-completeness drift.", "how_handled": "Captured as nit above. Low priority.", "amend_plan": "no"},
       {"what": "Phase 1 exit criteria row 184 still reads '65 Rust tests' / '8 Python tests' — actual is 66 / 10. Cycle-1 should-fix with `Amend plan: yes`; not updated across two cycles. Stale numbers will carry into Phase 2 planning unless fixed.", "how_handled": "Captured as should-fix above. Plan-edit before Phase 2 entry.", "amend_plan": "yes"}
