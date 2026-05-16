@@ -10,15 +10,15 @@ branch: vortex-integration
 planning_sub_flow: null
 current_phase: "Ratify + crates.io transition"
 phase_index: 1
-current_pr: PR-1.4
+current_pr: null
 pr_index: 5
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T16:25:00Z
-last_user_touchpoint_what: "PR-1.4 reject-fix gauntlet cycle 1 accepted (0 must-fix, 0 should-fix, 0 nits — both reviewers high confidence)"
-subagent_invocations_this_pr: 1
+last_user_touchpoint: 2026-05-16T16:28:00Z
+last_user_touchpoint_what: "phase-end reject (cycle 3) — PR-1.4 must-fix items resolved; Pending table closed"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 18
-review_cycles_this_pr: 1
+review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 3
 phase_end_reject_cycles: 0
@@ -1654,8 +1654,8 @@ _(none — all 4 reviewers agreed on accept verdict)_
 
 | Severity | File:line | Description | Implicated PR | Resolved |
 |----------|-----------|-------------|---------------|----------|
-| must-fix | `.big-plans/vortex-integration.md:404` | PR-1.4 CI-reopen narrative at plan lines 404+408 re-introduces 3 occurrences of the typos-banned token while explaining the typo fix, recreating the exact CI failure. `gh pr checks 1` shows `main` Spell Check FAIL on HEAD `1a244a0f7`. Phase 1 exit criterion (e) not met. | PR-1.4 | [ ] |
-| must-fix | `crates/polars-vortex/README.md:244` | README crate-layout block describes `mod.rs` as `VortexFooterRef alias + back-compat metadata re-export` — but PR-1.4 commit `3479c6bdb` inlined the metadata re-export. README is canonical reference doc; fresh engineers will hit `not found` compile error on `use polars_vortex::read::metadata::VortexFooterRef`. | PR-1.4 | [ ] |
+| must-fix | `.big-plans/vortex-integration.md:404` | PR-1.4 CI-reopen narrative at plan lines 404+408 re-introduces 3 occurrences of the typos-banned token while explaining the typo fix, recreating the exact CI failure. `gh pr checks 1` shows `main` Spell Check FAIL on HEAD `1a244a0f7`. Phase 1 exit criterion (e) not met. | PR-1.4 | [x] |
+| must-fix | `crates/polars-vortex/README.md:244` | README crate-layout block describes `mod.rs` as `VortexFooterRef alias + back-compat metadata re-export` — but PR-1.4 commit `3479c6bdb` inlined the metadata re-export. README is canonical reference doc; fresh engineers will hit `not found` compile error on `use polars_vortex::read::metadata::VortexFooterRef`. | PR-1.4 | [x] |
 
 ## Phase 1: Ratify + crates.io transition — end-of-phase review (cycle 3) — rejected (4-vote)
 
