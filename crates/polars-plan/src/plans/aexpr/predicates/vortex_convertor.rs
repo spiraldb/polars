@@ -21,9 +21,9 @@
 //! re-export so the AnyValue→VortexScalar mapping has one canonical source of truth across
 //! both the SpecializedColumnPredicate path and this AExpr-direct path.)
 //!
-//! ## What this module covers (PR-2.1 / PR-13.1 foundation)
+//! ## What this module covers (PR-2.1 foundation + PR-2.2 extensions)
 //!
-//! The 14 shapes below — the "kernel" the rest of PR-13 extends.
+//! The 15 shapes below — the "kernel" the rest of PR-13 extends.
 //!
 //! | Shape | AExpr matcher | Vortex builder |
 //! |---|---|---|
@@ -35,29 +35,34 @@
 //! | `<=` | `AExpr::BinaryExpr { op: LtEq, .. }` | `lt_eq` |
 //! | `>` | `AExpr::BinaryExpr { op: Gt, .. }` | `gt` |
 //! | `>=` | `AExpr::BinaryExpr { op: GtEq, .. }` | `gt_eq` |
-//! | logical AND | `AExpr::BinaryExpr { op: And \| LogicalAnd, .. }` | `and` |
-//! | logical OR | `AExpr::BinaryExpr { op: Or \| LogicalOr, .. }` | `or` |
+//! | logical AND | `AExpr::BinaryExpr { op: And \| LogicalAnd, .. }` | `and` (schema-gated for `And`) |
+//! | logical OR | `AExpr::BinaryExpr { op: Or \| LogicalOr, .. }` | `or` (schema-gated for `Or`) |
+//! | addition (numeric) | `AExpr::BinaryExpr { op: Plus, .. }` (PR-2.2) | `checked_add` (schema-gated to numeric) |
 //! | `is_null` | `AExpr::Function { Boolean(IsNull), .. }` | `is_null` |
 //! | `is_not_null` | `AExpr::Function { Boolean(IsNotNull), .. }` | `is_not_null` |
-//! | `not` | `AExpr::Function { Boolean(Not), .. }` | `not` |
+//! | `not` | `AExpr::Function { Boolean(Not), .. }` | `not` (schema-gated) |
 //!
-//! ## What this module does NOT cover yet (PR-13.2-.5 follow-ups)
+//! ## What this module does NOT cover yet (PR-2.3-.5 follow-ups)
 //!
-//! Arithmetic in predicates (`Plus`/`Minus`/`Multiply`/divides/`Modulus`) → PR-2.2.
-//! CAST → PR-2.3. Struct field access (`StructField`) → PR-2.4. Temporal extracts
-//! (`AExpr::Function { IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5. Anything else
-//! (`Sort`, `Gather`, `Filter`, `Agg`, `Ternary`, `AnonymousFunction`, `Over`, `Rolling`,
-//! etc.) returns `None` and falls through as residual; the multi-scan layer re-applies the
-//! full predicate post-decode so dropping coverage is always SOUND, just suboptimal.
+//! Remaining arithmetic (`Minus`/`Multiply`/divides/`Modulus`) → still residual; PR-2.2
+//! ships `Plus` only because `checked_add` is the only arithmetic builder publicly exposed
+//! in `vortex::expr::*` at the pinned SHA. CAST → PR-2.3. Struct field access
+//! (`StructField`) → PR-2.4. Temporal extracts (`AExpr::Function {
+//! IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5. Anything else (`Sort`, `Gather`,
+//! `Filter`, `Agg`, `Ternary`, `AnonymousFunction`, `Over`, `Rolling`, etc.) returns `None`
+//! and falls through as residual; the multi-scan layer re-applies the full predicate
+//! post-decode so dropping coverage is always SOUND, just suboptimal.
 //!
 //! ## Wiring
 //!
-//! No call site yet. PR-2.2 will wire the convertor at
-//! `crates/polars-stream/src/physical_plan/to_graph.rs:843` (inside the `FileScanIR::Vortex`
-//! branch of `lower_node`), where the [`AExpr`] arena is live alongside the predicate
-//! `ExprIR`. The resulting `Expression` is attached to the Vortex `VortexReaderBuilder` via
-//! a Vortex-specific side channel (parallel to how `FileScanIR::Vortex::metadata` and the
-//! new (PR-2.0) `segment_cache` already thread).
+//! Wired at `crates/polars-stream/src/physical_plan/lower_ir.rs:780-791` (inside the
+//! `FileScanIR::Vortex` branch of `lower_ir`), where the [`AExpr`] arena is live alongside
+//! the predicate `ExprIR`. The resulting `Expression` is attached to the Vortex
+//! `VortexReaderBuilder.aexpr_filter` field via a Vortex-specific side channel (parallel
+//! to how `FileScanIR::Vortex::metadata` and the (PR-2.0) `segment_cache` thread).
+//! `VortexFileReader::begin_read` prefers `aexpr_filter` over the legacy
+//! `polars_to_vortex_predicate` path; PR-2.6 will delete the legacy path once the
+//! convertor is a strict superset of `SpecializedColumnPredicate` coverage.
 
 use polars_core::prelude::DataType;
 use polars_core::schema::Schema;
@@ -84,33 +89,45 @@ use crate::plans::lit::LiteralValue;
 ///
 /// - `root_node` — the AExpr root to convert. The convertor walks the tree rooted here.
 /// - `arena` — the [`AExpr`] arena. Borrowed immutably (no nodes added).
+/// - `schema` — the resolved [`Schema`] of the columns the AExpr references. Used by the
+///   And/Or/Not bitwise-vs-logical gate (which refuses pushdown on integer operands) and
+///   by the Plus arm's numeric gate (which refuses pushdown on non-numeric operands). When
+///   `None`, the convertor conservatively refuses And/Or/Not AND Plus pushdown. Production
+///   wire-up (`physical_plan::lower_ir`) always supplies `Some`; `None` is exposed only
+///   to keep ad-hoc unit-test construction ergonomic.
 ///
 /// # Returns
 ///
 /// `Some(Expression)` on full pushdown; `None` if any shape can't be translated. Always
 /// SAFE — the caller treats `None` as "not pushable" and lets the residual filter run.
 ///
-/// # ⚠️ Bitwise-vs-logical operator caveat — addressed at the call site in PR-2.2
+/// # Bitwise-vs-logical operator caveat (addressed via schema gate)
 ///
 /// Polars' [`Operator::And`] / [`Operator::Or`] and [`IRBooleanFunction::Not`] are
 /// **bitwise-OR-logical**: they work on integer columns as bitwise ops AND on bool columns
-/// as logical ops. The annotation `// Also bitwise negate` at
-/// `crates/polars-plan/src/plans/aexpr/function_expr/boolean.rs:49` is explicit about this.
-///
+/// as logical ops. (Operator::And/Or dispatch through `aexpr/schema.rs::get_arithmetic_field`
+/// which returns the operand dtype unchanged; for `Not`, see
+/// `crates/polars-plan/src/plans/aexpr/function_expr/boolean.rs:49 // Also bitwise negate`.)
 /// Vortex's [`and`], [`or`], and [`not`] are **boolean-only**.
 ///
-/// The convertor maps all three unconditionally to Vortex's boolean variants. For the
-/// typical predicate root (a boolean tree consumed by `WHERE`), this is correct. But for
-/// embedded integer-bitwise sub-trees — e.g., `(col_int & 1) > 0` — the convertor would
-/// emit `gt(and(col_int, lit(1)), lit(0))`, which is semantically wrong (Vortex's `and`
-/// is undefined on integer arrays).
+/// PR-2.2 mitigates by threading `schema` and gating each of And/Or/Not on
+/// `operand_is_bool` (mirroring [`super::column_expr`]'s `dtype.is_bool()` guard at lines
+/// 245-247). For `LogicalAnd` / `LogicalOr` we skip the gate because the IR-level "logical"
+/// form is by construction boolean-typed.
 ///
-/// **TODO (PR-2.2 wire-up)**: When wiring at `to_graph.rs:843`, the call site has the
-/// `output_schema` available. Either (a) skip-the-pushdown when any operand of And/Or/Not
-/// is non-bool — this is what [`super::column_expr`] does at lines 245-247 — or (b) thread
-/// a `&Schema` into this convertor and guard inside the match arms. Option (a) at the call
-/// site is cheaper because the convertor stays schema-free. Tracked: PR-2.1 cycle-1
-/// should-fix items (both fresh + correctness lenses).
+/// # Arithmetic semantic caveat (PR-2.2 / PR-13.2)
+///
+/// Plus is mapped to Vortex's `checked_add` — the only arithmetic builder publicly exposed
+/// in `vortex::expr::*` at the pinned SHA. Vortex's `checked_add` is **fallible on
+/// overflow** (`vortex-array/src/expr/analysis/fallible.rs:36
+/// checked_add_defaults_to_fallible`): an integer overflow during scan errors out at
+/// scan-time rather than silently wrapping (Polars' `+` operator wraps). The convertor
+/// only emits `checked_add` when both operands are numeric (the `operand_is_numeric` gate);
+/// String/Bool/Date/Struct/List Plus operations refuse pushdown (without the gate, Vortex's
+/// `Binary::coerce_args` would `vortex_bail!` at scan-time, violating the
+/// always-SAFE-fallback contract). For numeric Plus near boundary values, the user observes
+/// a scan-time error instead of Polars' wrapping behavior. This is a known semantic
+/// divergence; see Deferred work (`Vortex wrapping_add public API`).
 pub fn aexpr_to_vortex_expression(
     root_node: Node,
     arena: &Arena<AExpr>,
@@ -124,21 +141,27 @@ pub fn aexpr_to_vortex_expression(
         // --- comparisons + boolean combinators (BinaryExpr) ---
         AExpr::BinaryExpr { left, op, right } => {
             // Bitwise-vs-logical schema gate (cycle-1 should-fix from PR-2.1): Polars
-            // `And/Or` are bitwise-or-logical (boolean.rs:49 `// Also bitwise negate`
-            // and surrounding context). Vortex's `and`/`or` are boolean-only. When the
-            // schema is available and either operand is not boolean, refuse pushdown.
-            // For `LogicalAnd`/`LogicalOr` we don't gate — the IR-level "logical" form
+            // `And/Or` are bitwise-or-logical (aexpr/schema.rs:127-149 dispatches through
+            // `get_arithmetic_field` so output dtype follows operand dtype). Vortex's
+            // `and`/`or` are boolean-only. Refuse pushdown when either operand is not
+            // boolean. `LogicalAnd`/`LogicalOr` are skipped — the IR-level "logical" form
             // is by construction boolean-typed.
             if matches!(op, Operator::And | Operator::Or) {
-                if let Some(s) = schema {
-                    if !operand_is_bool(*left, arena, s) || !operand_is_bool(*right, arena, s) {
-                        return None;
-                    }
+                let Some(s) = schema else { return None };
+                if !operand_is_bool(*left, arena, s) || !operand_is_bool(*right, arena, s) {
+                    return None;
                 }
-                // If schema is None (lower_ir's pre-typecheck path), conservatively
-                // refuse And/Or pushdown rather than risk bitwise-on-int → boolean-only
-                // dispatch on the Vortex side.
-                if schema.is_none() {
+            }
+            // Plus numeric gate (PR-2.2 cycle-1 must-fix): Vortex's `checked_add` is only
+            // valid on numeric primitives with matching dtypes
+            // (`vortex-array/src/scalar_fn/fns/binary/mod.rs:104-128`). Polars allows Plus
+            // on String (concat), Bool, Date+Duration, etc. — emitting `checked_add` on
+            // those would `vortex_bail!` at scan-time, violating the always-SAFE-fallback
+            // contract. Refuse when either operand is non-numeric or when the schema is
+            // unavailable (conservative).
+            if matches!(op, Operator::Plus) {
+                let Some(s) = schema else { return None };
+                if !operand_is_numeric(*left, arena, s) || !operand_is_numeric(*right, arena, s) {
                     return None;
                 }
             }
@@ -191,11 +214,8 @@ pub fn aexpr_to_vortex_expression(
             // `dtype.is_bool()` guard. IsNull/IsNotNull accept any dtype and produce
             // boolean output, so no gate.
             if matches!(boolean_fn, IRBooleanFunction::Not) {
-                if let Some(s) = schema {
-                    if !operand_is_bool(arg_node, arena, s) {
-                        return None;
-                    }
-                } else {
+                let Some(s) = schema else { return None };
+                if !operand_is_bool(arg_node, arena, s) {
                     return None;
                 }
             }
@@ -250,12 +270,70 @@ fn operand_is_bool(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> bool {
             // Arithmetic and bitwise Xor produce non-bool output.
             _ => false,
         },
+        // Enumerate the IRBooleanFunction variants we know produce Boolean array output.
+        // `Not` is bitwise-or-logical (output dtype = input dtype), so we recurse on its
+        // arg. Other variants (Any/All/IsEmpty produce scalar bool, not array bool; the
+        // outer convertor returns None for those anyway via the `_ => None` arm in the
+        // Function match) are conservatively treated as non-bool here — the convertor's
+        // own arm-level None fallback is the second line of defense.
         AExpr::Function {
-            function: IRFunctionExpr::Boolean(_),
+            input,
+            function: IRFunctionExpr::Boolean(bf),
             ..
-        } => true,
+        } => match bf {
+            IRBooleanFunction::IsNull | IRBooleanFunction::IsNotNull => true,
+            IRBooleanFunction::Not => input
+                .first()
+                .map(|expr_ir| operand_is_bool(expr_ir.node(), arena, schema))
+                .unwrap_or(false),
+            _ => false,
+        },
         _ => false,
     }
+}
+
+/// Schema-aware operand type check: determines whether `node`'s resolved dtype is a
+/// numeric primitive compatible with Vortex's `checked_add`. Used by the Plus gate to
+/// refuse pushdown on String / Bool / Date / Struct / List operands that Vortex's
+/// `Binary::coerce_args` would `vortex_bail!` on at scan-time.
+///
+/// Conservatively returns `false` when the dtype can't be resolved (unknown column,
+/// nested expression). The caller's None-fallback drops the Plus arm to residual.
+fn operand_is_numeric(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> bool {
+    match arena.get(node) {
+        AExpr::Column(name) => schema.get(name).is_some_and(is_vortex_numeric_dtype),
+        AExpr::Literal(LiteralValue::Scalar(s)) => is_vortex_numeric_dtype(s.dtype()),
+        // Recursive `Plus` produces numeric output if both operands are numeric; this
+        // lets `(col + 1) + 1` push down (operands at each level are numeric).
+        AExpr::BinaryExpr {
+            left,
+            op: Operator::Plus,
+            right,
+        } => operand_is_numeric(*left, arena, schema) && operand_is_numeric(*right, arena, schema),
+        _ => false,
+    }
+}
+
+/// Is `dt` one of the Vortex-primitive dtypes that `checked_add` accepts?
+/// Mirrors Vortex's `is_primitive() && eq_ignore_nullability` precondition (numeric
+/// integer + float). Decimals are deliberately NOT numeric here — Vortex's `Decimal` is
+/// primitive but `checked_add` on Decimals has scale/precision interactions polars-vortex
+/// hasn't validated; refuse for safety.
+fn is_vortex_numeric_dtype(dt: &DataType) -> bool {
+    use DataType::*;
+    matches!(
+        dt,
+        Int8 | Int16
+            | Int32
+            | Int64
+            | Int128
+            | UInt8
+            | UInt16
+            | UInt32
+            | UInt64
+            | Float32
+            | Float64
+    )
 }
 
 /// Convert a Polars [`LiteralValue`] to a Vortex literal [`Expression`].
@@ -555,7 +633,8 @@ mod tests {
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
-    /// Plus arithmetic — PR-2.2 ships this via `vortex::expr::checked_add`.
+    /// Plus arithmetic — PR-2.2 ships this via `vortex::expr::checked_add`. Numeric
+    /// operands required (the cycle-1 must-fix gate).
     #[test]
     fn shape_plus_arithmetic() {
         // `(col_a + 1) == 5` — typical PR-13.2 acceptance shape per the plan.
@@ -565,21 +644,106 @@ mod tests {
         let a_plus_1 = binop(&mut arena, a, Operator::Plus, one);
         let five = lit_i32(&mut arena, 5);
         let n = binop(&mut arena, a_plus_1, Operator::Eq, five);
-        // No schema needed for Plus + Eq (neither fires the And/Or/Not gate).
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        // Plus numeric gate fires; supply Int32 schema for `a`.
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     // === Unsupported-shapes-return-None coverage ===
 
-    /// PR-2.2 ships Plus → checked_add. Pre-PR-2.2 this test asserted None; now it
-    /// must assert Some.
+    /// PR-2.2 ships Plus → checked_add when operands are numeric and schema is provided.
+    /// Pre-PR-2.2 this test asserted None; now it must assert Some.
     #[test]
     fn shape_plus_ships_in_pr_2_2() {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 1);
         let n = binop(&mut arena, c, Operator::Plus, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Plus without schema → conservative refuse (Plus gate's None branch).
+    #[test]
+    fn shape_plus_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 1);
+        let n = binop(&mut arena, c, Operator::Plus, l);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// Plus on a Boolean column → numeric gate refuses (Vortex `checked_add` would
+    /// `vortex_bail!` at scan-time).
+    #[test]
+    fn shape_plus_bool_column_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let n = binop(&mut arena, a, Operator::Plus, one);
+        let schema = schema_a_bool(); // `a` is Boolean here
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Plus on a String column → numeric gate refuses (Polars allows Plus-as-concat;
+    /// Vortex `checked_add` does not).
+    #[test]
+    fn shape_plus_string_column_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let n = binop(&mut arena, a, Operator::Plus, b);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::String);
+        schema.with_column(PlSmallStr::from("b"), DataType::String);
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Plus on Float64 columns → numeric gate passes (Float is in the numeric set).
+    #[test]
+    fn shape_plus_float_column_passes() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let n = binop(&mut arena, a, Operator::Plus, b);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::Float64);
+        schema.with_column(PlSmallStr::from("b"), DataType::Float64);
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Structural assertion (cycle-1 must-fix from gauntlet — addresses the
+    /// tautological-test concern carried forward from PR-2.1 cycle-1, for this PR's most
+    /// load-bearing new shape). Verifies the Plus → `checked_add` mapping actually
+    /// produces the expected Vortex `Expression` shape, not just `.is_some()`. A
+    /// paste-swap bug (e.g., `Operator::Plus => checked_mul(...)`) would be caught here.
+    #[test]
+    fn shape_plus_arithmetic_structural() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let a_plus_1 = binop(&mut arena, a, Operator::Plus, one);
+        let five = lit_i32(&mut arena, 5);
+        let n = binop(&mut arena, a_plus_1, Operator::Eq, five);
+        let schema = schema_a_b_int32();
+        let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
+        // Vortex's SQL-form Display produces a stable string. The exact format may
+        // evolve across Vortex releases; assert only the recognizable structural
+        // anchors (operator names + literal values + the column reference) rather
+        // than the full string.
+        let s = format!("{}", expr);
+        assert!(
+            s.contains("checked_add") || s.contains("+"),
+            "expected checked_add or '+' in {s}"
+        );
+        assert!(s.contains("a"), "expected column 'a' in {s}");
+        assert!(s.contains("1"), "expected literal 1 in {s}");
+        assert!(s.contains("5"), "expected literal 5 in {s}");
+        // Sanity: the outer-Eq structure should be visible.
+        assert!(
+            s.contains("=") || s.contains("eq"),
+            "expected eq operator in {s}"
+        );
     }
 
     /// Minus / Multiply / Divide remain residual until upstream Vortex exposes

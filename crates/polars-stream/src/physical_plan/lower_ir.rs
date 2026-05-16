@@ -20,6 +20,8 @@ use polars_plan::dsl::default_values::DefaultFieldValues;
 use polars_plan::dsl::deletion::DeletionFilesList;
 use polars_plan::dsl::{CallbackSinkType, ExtraColumnsPolicy, FileScanIR, SinkTypeIR};
 use polars_plan::plans::expr_ir::{ExprIR, OutputName};
+#[cfg(feature = "vortex")]
+use polars_plan::plans::predicates::vortex_convertor;
 use polars_plan::plans::{AExpr, FunctionIR, IR, IRAggExpr, LiteralValue, write_ir_non_recursive};
 use polars_plan::prelude::*;
 use polars_utils::arena::{Arena, Node};
@@ -777,10 +779,21 @@ pub fn lower_ir(
                         // `Arc<dyn PhysicalIoExpr>` survives). When the convertor returns
                         // `None` (unhandled AExpr shape), the streaming source falls back
                         // to the legacy path automatically.
-                        let aexpr_filter = if options.push_predicate {
+                        //
+                        // Hive guard (cycle-1 must-fix from gauntlet): `file_info.schema`
+                        // "Always includes all hive columns" (plans/schema.rs:43), so an
+                        // AExpr predicate may reference a hive-partition column that does
+                        // not exist in the Vortex file's data. Refuse pushdown entirely
+                        // when `hive_parts` is set; the legacy fast path is hive-safe
+                        // because it consumes the already-hive-stripped
+                        // `ScanIOPredicate::column_predicates` (built via
+                        // `create_scan_predicate`). A future PR can do a per-column hive
+                        // vs file split (mirroring `create_scan_predicate`'s
+                        // `hive_predicate` extraction) so hive-partitioned Vortex scans
+                        // still benefit from convertor pushdown.
+                        let aexpr_filter = if options.push_predicate && hive_parts.is_none() {
                             predicate.as_ref().and_then(|p| {
-                                use polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression;
-                                aexpr_to_vortex_expression(
+                                vortex_convertor::aexpr_to_vortex_expression(
                                     p.node(),
                                     expr_arena,
                                     Some(file_info.schema.as_ref()),
