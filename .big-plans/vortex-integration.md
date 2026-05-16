@@ -14,8 +14,8 @@ current_pr: PR-1.4
 pr_index: 5
 outstanding_must_fix: 0
 deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T16:10:00Z
-last_user_touchpoint_what: "phase-end reject (cycle 3) PR-1.4 fix 2/2 landed (README:244 back-compat phrase dropped); 0 must-fix remaining; ready for inner-loop 2-vote review"
+last_user_touchpoint: 2026-05-16T16:12:00Z
+last_user_touchpoint_what: "PR-1.4 reject-fixes complete; invoking inner-loop 2-vote gauntlet on c1aa9215b..HEAD"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 17
 review_cycles_this_pr: 0
