@@ -16,8 +16,8 @@ outstanding_must_fix: 0
 deferred_items_total: 6
 last_user_touchpoint: 2026-05-15T23:00:00Z
 last_user_touchpoint_what: "PR-1.3 reject-fix iteration complete; re-entering Phase 3 from Step 3.1 for cycle-2 phase-end review"
-subagent_invocations_this_pr: 0
-subagent_invocations_total: 12
+subagent_invocations_this_pr: 1
+subagent_invocations_total: 13
 review_cycles_this_pr: 0
 phase_entry_sha: 657c78c97
 phase_end_cycle: 1
