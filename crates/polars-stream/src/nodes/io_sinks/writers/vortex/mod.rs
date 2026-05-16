@@ -32,6 +32,7 @@ use polars_vortex::write::strategy::build_write_options;
 
 use crate::async_executor::{self, TaskPriority};
 use crate::async_primitives::connector;
+use crate::utils::tokio_handle_ext;
 use crate::nodes::io_sinks::components::sink_morsel::SinkMorsel;
 use crate::nodes::io_sinks::components::size::{
     NonZeroRowCountAndSize, RowCountAndSize, TakeableRowsProvider,
@@ -132,12 +133,18 @@ impl FileWriterStarter for VortexWriterStarter {
             let stream = ArrayStreamAdapter::new(top_dtype, chunk_rx);
             let write_opts = build_write_options(options.as_ref());
 
-            let write_handle = ASYNC.spawn(async move {
+            // Wrap in `AbortOnDropHandle` so the writer task is aborted (not orphaned)
+            // if the outer task fails before reaching the await site below. A bare
+            // `tokio::task::JoinHandle` would keep running after drop, see the dropped
+            // chunk channel as clean EOS, and finalize a truncated-but-valid Vortex
+            // file on disk. Mirrors the IPC sink pattern at
+            // `crates/polars-stream/src/nodes/io_sinks/writers/ipc/mod.rs:101`.
+            let write_handle = tokio_handle_ext::AbortOnDropHandle(ASYNC.spawn(async move {
                 write_opts
                     .write(sink, stream)
                     .await
                     .map_err(|e| polars_err!(ComputeError: "vortex sink write: {e}"))
-            });
+            }));
 
             // Wait for both the producer and writer.
             producer.await?;
