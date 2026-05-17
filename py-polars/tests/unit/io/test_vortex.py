@@ -114,8 +114,7 @@ def test_scan_with_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_arithmetic_filter(tmp_path: Path) -> None:
-    """PR-13.2 acceptance test: ``col + 1 == 5`` pushes down through the
-    AExpr-direct convertor.
+    """PR-13.2 acceptance: ``col + 1 == 5`` pushes down via the AExpr convertor.
 
     The legacy ``SpecializedColumnPredicate``-derived path cannot represent
     arithmetic on a column reference — only literal comparisons / IN-lists /
@@ -136,9 +135,7 @@ def test_scan_with_arithmetic_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_cast_filter(tmp_path: Path) -> None:
-    """PR-13.3 acceptance test: ``col.cast(Int64) > 100`` over an Int32
-    column pushes down through the AExpr-direct convertor's CAST arm
-    (PR-2.3).
+    """PR-13.3 acceptance: ``col.cast(Int64) > 100`` pushes down via the CAST arm.
 
     Convertor maps `AExpr::Cast { dtype: Int64, options: Strict }` →
     `vortex::expr::cast(child, DType::Primitive(I64, Nullable))` ONLY when the
@@ -157,9 +154,7 @@ def test_scan_with_cast_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_struct_field_filter(tmp_path: Path) -> None:
-    """PR-13.4 acceptance test: ``col.struct.field("inner") == "x"`` against a
-    Struct column pushes down through the AExpr-direct convertor's StructField
-    arm (PR-2.4).
+    """PR-13.4 acceptance: struct field access pushes down via the StructField arm.
 
     Convertor maps `AExpr::Function { StructExpr(FieldByName("inner")), .. }` →
     `vortex::expr::get_item("inner", inner_struct_expr)`. The legacy
@@ -187,8 +182,7 @@ def test_scan_with_struct_field_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_cross_kind_cast_filter(tmp_path: Path) -> None:
-    """PR-2.3 cycle-1 must-fix regression test: cross-kind CAST (Primitive →
-    Utf8) must NOT crash the scan.
+    """PR-2.3 cycle-1 must-fix: cross-kind CAST (Primitive → Utf8) must not crash.
 
     Pre-fix: convertor emitted `cast(get_item("a", root()), DType::Utf8(...))`,
     which Vortex's `Primitive::CastKernel` doesn't handle (returns
@@ -216,9 +210,9 @@ def test_scan_with_cross_kind_cast_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
-    """PR-2.2 cycle-1 must-fix M1 regression test (cycle-2 should-fix
-    F-SF-CYCLE2-006 / C2-003): hive-partitioned Vortex scans with a predicate
-    must not crash from the AExpr-direct convertor emitting
+    """PR-2.2 cycle-1 M1 regression: hive-partitioned scans with filter must not crash.
+
+    The convertor at lower_ir.rs would otherwise emit
     ``get_item(hive_col, root())`` references to columns that don't exist in
     the per-file Vortex data.
 
@@ -245,10 +239,12 @@ def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_row_index_and_filter(tmp_path: Path) -> None:
-    """PR-2.2 cycle-2 should-fix C2-001 regression test: ``row_index_name``
-    is a virtual column not present in the Vortex file's data. The cycle-1
-    hive-only guard at ``lower_ir.rs`` was extended in cycle-2 to also refuse
-    convertor pushdown when ``unified_scan_args.row_index.is_some()`` (and
+    """PR-2.2 cycle-2 C2-001 regression: row_index virtual col + filter must not crash.
+
+    ``row_index_name`` is a virtual column not present in the Vortex file's
+    data. The cycle-1 hive-only guard at ``lower_ir.rs`` was extended in
+    cycle-2 to also refuse convertor pushdown when
+    ``unified_scan_args.row_index.is_some()`` (and
     when ``include_file_paths.is_some()``), preventing the convertor from
     emitting a Vortex ``get_item('ri', root())`` reference to a column
     Vortex's data doesn't contain. A regression would surface as a

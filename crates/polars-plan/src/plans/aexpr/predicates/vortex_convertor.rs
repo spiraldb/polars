@@ -558,13 +558,8 @@ fn struct_field_exists(dtype: &DataType, name: &polars_utils::pl_str::PlSmallStr
 /// (which is the only mode we push down — the cycle-1 gate above).
 fn cast_kind_compatible(source: &DataType, target: &DataType) -> bool {
     use DataType::*;
-    let same_kind = matches!(
-        (source, target),
-        // Primitive → Primitive (Int*/UInt*/Float*).
-        (s, t) if is_vortex_numeric_dtype(s) && is_vortex_numeric_dtype(t)
-    ) || matches!((source, target), (Boolean, Boolean))
-        || matches!((source, target), (String, String));
-    same_kind
+    matches!((source, target), (Boolean, Boolean) | (String, String))
+        || (is_vortex_numeric_dtype(source) && is_vortex_numeric_dtype(target))
 }
 
 /// Schema-aware operand type check: determines whether `node`'s resolved dtype is
