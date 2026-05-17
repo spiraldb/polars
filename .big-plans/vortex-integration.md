@@ -13,7 +13,7 @@ phase_index: 2
 current_pr: null
 pr_index: 5
 outstanding_must_fix: 0
-deferred_items_total: 11
+deferred_items_total: 12
 last_user_touchpoint: 2026-05-16T20:40:00Z
 last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at lower_ir.rs:766 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
 subagent_invocations_this_pr: 2
@@ -413,6 +413,14 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 - **Deferred items**: 0 new (cumulative `deferred_items_total: 6` unchanged).
 - **Surprises during fix-application**:
   - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
+
+### PR-2.5: PR-13.5 Temporal extracts — SLIPPED to Deferred work (Vortex op unavailable at pinned SHA)
+
+- **Status**: Slipped per the PR-2.5 plan row's contingency clause ("if Vortex op unavailable at pinned SHA, this PR is moved to Deferred work with explicit rationale and Phase 2 still completes").
+- **Investigation**: `vortex-array 0.70.0`'s `scalar_fn/fns/` directory enumerates the publicly-exposed expr builders. The list at the pinned SHA is: `between`, `binary`, `cast`, `fill_null`, `like`, `list_contains`, `mask`, `not`, `zip`, `case_when`, `dynamic`, `get_item`, `is_not_null`, `is_null`, `literal`, `merge`, `operators`, `pack`, `root`. **None of `year` / `month` / `day` / `hour` / `minute` / `datetime_parts` / `date_part` is publicly exposed**. The `extension/datetime/` module defines `Date`/`Timestamp`/`Time`/`unit` types but no extract functions.
+- **Decision**: skip PR-2.5 implementation. Temporal extracts route to residual via the convertor's existing `_ => None` fallthrough for `IRFunctionExpr::TemporalExpr(..)` shapes. The multi-scan layer re-applies the full predicate post-decode so correctness is preserved; the only loss is perf (no pushdown for `col.dt.year() == 2024` queries).
+- **Deferred-work entry**: added below.
+- **Impact on Phase 2**: PR-2.5 was always conditional; Phase 2 still completes via PR-2.6 (the SpecializedColumnPredicate cutover). The phase exit criterion (b) "every row in the §5 pushdown coverage table implemented + tested OR documented as deliberately deferred" is satisfied by the explicit deferral.
 
 ### PR-2.4: PR-13.4 Struct field access + proactive Plus cross-PType + comparison cross-PType gates (2 PR-work commits, ending at `8245aaf48` — accepted cycle 2)
 
@@ -2029,6 +2037,8 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
 - **Vortex `wrapping_add` (or non-fallible add) public API** (PR-2.2 cycle-1 must-fix M2 — partial resolution): The current `Plus → checked_add` mapping has a semantic divergence with Polars's wrapping `+`: Vortex errors at scan-time on integer overflow while Polars wraps. For typical OLAP queries with small-int data this is rare, but `col + 1 == big_value` on a column near MAX errors out instead of producing wrapped-then-compared results. PR-2.2 documents this in the function doc-comment; the proper fix is for Vortex to expose `wrapping_add` (or similar) in `vortex::expr::*` so polars-vortex can prefer it for Polars Plus semantics. Tracking as an upstream-Vortex coordination item — file when polars-vortex hits a real-world user query that surfaces the divergence, or as part of PR-2.5 (which already coordinates Vortex's `datetime_parts` op). (Deferred from PR-2.2 cycle-1 must-fix M2 / F-MF-002, 2026-05-16.)
 
 - ~~**Plus convertor cross-PType supertype gate**~~ — **RESOLVED in PR-2.4** (commit `eed93c119` + cycle-2 `8245aaf48`): added pairwise-equal-PType gates to BOTH the Plus arm (commit 1, proactive per the cycle-2 H4 carry-forward) AND the comparison arms (cycle-2 should-fix F-COMPARE-CROSS-PTYPE-001, also surfaced via H4 sibling check). `resolve_inner_dtype` extended to handle Cast/Plus/Function-StructField for the gate's dtype resolution. Tests `shape_plus_cross_ptype_returns_none`, `shape_plus_int_plus_float_returns_none`, `shape_plus_uint_plus_int_returns_none`, `shape_eq_cross_ptype_returns_none`, `shape_lt_cross_ptype_returns_none` lock the refuse paths.
+
+- **Temporal-extract predicate pushdown (`col.dt.year() == 2024` etc.)** (PR-2.5 slip, 2026-05-16): Vortex 0.70.0 does not publicly expose `year` / `month` / `day` / `hour` / `minute` / `datetime_parts` / `date_part` builders in `vortex::expr::*` (the `scalar_fn/fns/` enumeration excludes them; the `extension/datetime/` module defines dtypes but no extract functions). Per the PR-2.5 plan row's contingency, the PR is deferred to a follow-up after Vortex exposes the relevant builders. Resolution paths: (a) wait for upstream Vortex to expose `datetime_parts` (file an issue / coordinate with Vortex maintainers), (b) bump the pinned Vortex version once a newer release ships the builders, OR (c) contribute the temporal-extract builders to upstream Vortex (out of scope for this branch per the plan's "no upstream Vortex API redesign" exclusion). Convertor's residual fallback handles `IRFunctionExpr::TemporalExpr(..)` shapes correctly via the existing `_ => None` arm; multi-scan re-applies post-decode so correctness is preserved. Perf-only deferral. (Slipped from PR-2.5, 2026-05-16.)
 
 - **Float16 (`PType::F16`) support in the convertor** (PR-2.3 cycle-2 perf-miss carry-forward): Vortex has `PType::F16` (`vortex-array/src/dtype/ptype.rs:54`); Polars added `DataType::Float16` (cf. polars-core/datatypes/dtype.rs:102). Neither `polars_dtype_to_vortex_dtype` nor `is_vortex_numeric_dtype` handles Float16, so `cast(f16_col, Float32)` refuses pushdown (conservative SOUND), Plus(f16, f16) also refuses. Perf-miss only — adding a Float16 arm to both helpers + corresponding Plus arm in `is_vortex_numeric_dtype` would enable Float16 pushdown. Modest scope (~6 LoC + 2 tests); defer until Float16 use cases surface in the Vortex integration. (Deferred from PR-2.3 cycle-2, 2026-05-16.)
 
