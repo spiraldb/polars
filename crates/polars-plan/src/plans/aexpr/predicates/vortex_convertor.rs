@@ -21,11 +21,11 @@
 //! re-export so the AnyValue→VortexScalar mapping has one canonical source of truth across
 //! both the SpecializedColumnPredicate path and this AExpr-direct path.)
 //!
-//! ## What this module covers (PR-2.1 foundation + PR-2.2 + PR-2.3 extensions)
+//! ## What this module covers (PR-2.1 foundation + PR-2.2 + PR-2.3 + PR-2.4 extensions)
 //!
-//! The 15 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
+//! The 16 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
 //! foundation + 1 from PR-2.2: `addition (numeric)` + 1 from PR-2.3: `cast (same-kind
-//! Primitive/Bool/Utf8 target)`.)
+//! Primitive/Bool/Utf8 target)` + 1 from PR-2.4: `struct field access`.)
 //!
 //! | Shape | AExpr matcher | Vortex builder |
 //! |---|---|---|
@@ -41,22 +41,24 @@
 //! | logical OR | `AExpr::BinaryExpr { op: Or \| LogicalOr, .. }` | `or` (schema-gated for `Or`) |
 //! | addition (numeric) | `AExpr::BinaryExpr { op: Plus, .. }` (PR-2.2) | `checked_add` (schema-gated to numeric) |
 //! | cast (same-kind) | `AExpr::Cast { dtype, options: Strict, .. }` (PR-2.3) | `cast` (kind-gated: Primitive↔Primitive, Bool↔Bool, Utf8↔Utf8) |
+//! | struct field access | `AExpr::Function { StructExpr(FieldByName(n)), .. }` (PR-2.4) | `get_item(n, inner)` (schema-gated to require the field) |
 //! | `is_null` | `AExpr::Function { Boolean(IsNull), .. }` | `is_null` |
 //! | `is_not_null` | `AExpr::Function { Boolean(IsNotNull), .. }` | `is_not_null` |
 //! | `not` | `AExpr::Function { Boolean(Not), .. }` | `not` (schema-gated) |
 //!
-//! ## What this module does NOT cover yet (PR-2.4-.5 follow-ups)
+//! ## What this module does NOT cover yet (PR-2.5 follow-ups)
 //!
 //! Remaining arithmetic (`Minus`/`Multiply`/divides/`Modulus`) → still residual; PR-2.2
 //! ships `Plus` only because `checked_add` is the only arithmetic builder publicly exposed
 //! in `vortex::expr::*` at the pinned SHA. Cross-kind CAST (Primitive↔Bool/Utf8) and
 //! `NonStrict`/`Overflowing` CAST options → still residual (PR-2.3 cycle-1 must-fix gates;
-//! Vortex's per-array `CastKernel` is strictly within-kind and fail-on-overflow). Struct
-//! field access (`StructField`) → PR-2.4. Temporal extracts (`AExpr::Function {
-//! IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5. Anything else (`Sort`, `Gather`,
-//! `Filter`, `Agg`, `Ternary`, `AnonymousFunction`, `Over`, `Rolling`, etc.) returns `None`
-//! and falls through as residual; the multi-scan layer re-applies the full predicate
-//! post-decode so dropping coverage is always SOUND, just suboptimal.
+//! Vortex's per-array `CastKernel` is strictly within-kind and fail-on-overflow). Other
+//! struct functions (`RenameFields`/`PrefixFields`/etc.) → not in predicate scope. Temporal
+//! extracts (`AExpr::Function { IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5. Anything
+//! else (`Sort`, `Gather`, `Filter`, `Agg`, `Ternary`, `AnonymousFunction`, `Over`,
+//! `Rolling`, etc.) returns `None` and falls through as residual; the multi-scan layer
+//! re-applies the full predicate post-decode so dropping coverage is always SOUND, just
+//! suboptimal.
 //!
 //! ## Wiring
 //!
@@ -82,6 +84,8 @@ use polars_vortex::vortex::expr::{
 
 use crate::dsl::Operator;
 use crate::plans::AExpr;
+#[cfg(feature = "dtype-struct")]
+use crate::plans::aexpr::function_expr::IRStructFunction;
 use crate::plans::aexpr::function_expr::{IRBooleanFunction, IRFunctionExpr};
 use crate::plans::lit::LiteralValue;
 
@@ -189,16 +193,34 @@ pub fn aexpr_to_vortex_expression(
                     return None;
                 }
             }
-            // Plus numeric gate (PR-2.2 cycle-1 must-fix): Vortex's `checked_add` is only
-            // valid on numeric primitives with matching dtypes
-            // (`vortex-array/src/scalar_fn/fns/binary/mod.rs:104-128`). Polars allows Plus
-            // on String (concat), Bool, Date+Duration, etc. — emitting `checked_add` on
-            // those would `vortex_bail!` at scan-time, violating the always-SAFE-fallback
-            // contract. Refuse when either operand is non-numeric or when the schema is
-            // unavailable (conservative).
+            // Plus numeric + pairwise-equal-PType gate (PR-2.2 cycle-1 must-fix + PR-2.4
+            // proactive fix for the cycle-2-surfaced sibling bug class):
+            //
+            // Vortex's `checked_add` requires `lhs.is_primitive() && lhs.eq_ignore_nullability(rhs)`
+            // (`vortex-array/src/scalar_fn/fns/binary/mod.rs:115-127` — `return_dtype`
+            // `vortex_bail!`s with "incompatible types for arithmetic operation" otherwise).
+            // Polars allows Plus on String (concat), Bool, Date+Duration, etc. — emitting
+            // `checked_add` on those (or on cross-PType operands like Int8+Int64) would
+            // bail at scan-time, violating the always-SAFE-fallback contract.
+            //
+            // In typical Polars usage, the TYPE_COERCION optimizer rule inserts a Cast
+            // BEFORE the Plus to align operand dtypes — so the Cast arm fires first and
+            // the outer Plus sees same-PType operands. When TYPE_COERCION is disabled (or
+            // an AExpr bypasses the optimizer), we still need to refuse pushdown. Two
+            // gates: (a) both operands are numeric (per `is_vortex_numeric_dtype`),
+            // (b) both operands resolve to the SAME numeric DataType. `resolve_inner_dtype`
+            // handles Column / Literal / Cast / comparisons; unresolvable shapes fall
+            // through to None → conservative refuse.
             if matches!(op, Operator::Plus) {
                 let Some(s) = schema else { return None };
                 if !operand_is_numeric(*left, arena, s) || !operand_is_numeric(*right, arena, s) {
+                    return None;
+                }
+                // Pairwise-equal-PType gate (PR-2.4 proactive fix; addresses PR-2.3
+                // cycle-2 H4 self-reinforcement finding).
+                let lhs_dt = resolve_inner_dtype(*left, arena, s)?;
+                let rhs_dt = resolve_inner_dtype(*right, arena, s)?;
+                if lhs_dt != rhs_dt {
                     return None;
                 }
             }
@@ -265,6 +287,36 @@ pub fn aexpr_to_vortex_expression(
                 // are not in the PR-2.1 foundation scope; PR-2.2..PR-2.5 may add some.
                 _ => None,
             }
+        },
+
+        // --- Struct field access (PR-2.4 / PR-13.4) ---
+        // `col.struct.field("inner") == "x"` against a struct column pushes down as
+        // `eq(get_item("inner", get_item("col", root())), lit("x"))`. The Polars AExpr
+        // shape is `Function { StructExpr(FieldByName(name)), input: [struct_col_expr] }`;
+        // mirrors vortex-duckdb's `TableFilterClass::StructExtract` precedent at
+        // `vortex-duckdb/src/convert/table_filter.rs:71-73`.
+        //
+        // Schema gate (cycle-2 process lesson from PR-2.3): Vortex's `GetItem.return_dtype`
+        // (`vortex-array/src/scalar_fn/fns/get_item.rs:94-96`) `vortex_err!`s at scan-time
+        // if the requested field name isn't in the struct's fields — same hostile-input
+        // class as the cycle-1 CAST cross-kind bug. Refuse pushdown when the schema is
+        // unavailable OR when the resolved inner dtype isn't a `Struct(fields)` containing
+        // the requested field.
+        #[cfg(feature = "dtype-struct")]
+        AExpr::Function {
+            input,
+            function: IRFunctionExpr::StructExpr(IRStructFunction::FieldByName(name)),
+            ..
+        } => {
+            let arg_node = input.first().map(|expr_ir| expr_ir.node())?;
+            // Schema-membership gate.
+            let s = schema?;
+            let inner_dtype = resolve_inner_dtype(arg_node, arena, s)?;
+            if !struct_field_exists(&inner_dtype, name) {
+                return None;
+            }
+            let inner = aexpr_to_vortex_expression(arg_node, arena, schema)?;
+            Some(get_item(name.as_str(), inner))
         },
 
         // --- CAST (PR-2.3 / PR-13.3) ---
@@ -381,7 +433,7 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
         AExpr::Cast {
             dtype: target_pl, ..
         } => Some(target_pl.clone()),
-        AExpr::BinaryExpr { op, .. } => match op {
+        AExpr::BinaryExpr { left, op, .. } => match op {
             Operator::Eq
             | Operator::NotEq
             | Operator::Lt
@@ -392,6 +444,11 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
             | Operator::NotEqValidity
             | Operator::LogicalAnd
             | Operator::LogicalOr => Some(DataType::Boolean),
+            // Plus output dtype matches the operand dtypes — but the Plus arm in the
+            // convertor enforces lhs == rhs (the pairwise-equal-PType gate), so it's
+            // safe to delegate to either side here. Recursive: nested Plus chains
+            // (a + b) + c resolve correctly.
+            Operator::Plus => resolve_inner_dtype(*left, arena, schema),
             _ => None,
         },
         AExpr::Function {
@@ -403,7 +460,40 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
             },
             _ => None,
         },
+        // Struct field access — resolve to the inner struct's field dtype.
+        // Used by the CAST source-kind gate when a Cast wraps a struct field access,
+        // and by the StructExpr arm's recursive gate to chain through nested structs.
+        #[cfg(feature = "dtype-struct")]
+        AExpr::Function {
+            input,
+            function: IRFunctionExpr::StructExpr(IRStructFunction::FieldByName(name)),
+            ..
+        } => {
+            let arg_node = input.first().map(|expr_ir| expr_ir.node())?;
+            let inner = resolve_inner_dtype(arg_node, arena, schema)?;
+            if let DataType::Struct(fields) = &inner {
+                fields
+                    .iter()
+                    .find(|f| f.name() == name)
+                    .map(|f| f.dtype().clone())
+            } else {
+                None
+            }
+        },
         _ => None,
+    }
+}
+
+/// Does `dtype` contain a struct field named `name`? Used by the PR-2.4 StructField gate.
+///
+/// Returns `false` for non-Struct dtypes. Conservatively returns `false` if the dtype
+/// isn't a Struct so the caller's None-fallback drops the StructField arm to residual.
+#[cfg(feature = "dtype-struct")]
+fn struct_field_exists(dtype: &DataType, name: &polars_utils::pl_str::PlSmallStr) -> bool {
+    if let DataType::Struct(fields) = dtype {
+        fields.iter().any(|f| f.name() == name)
+    } else {
+        false
     }
 }
 
@@ -509,6 +599,10 @@ fn operand_is_numeric(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> bool
             op: Operator::Plus,
             right,
         } => operand_is_numeric(*left, arena, schema) && operand_is_numeric(*right, arena, schema),
+        // CAST to a numeric target produces numeric output. This lets
+        // `Cast(int32_col, Int64) + lit_i64` push down (the inner Cast aligns the dtype
+        // for Vortex's same-PType `checked_add` requirement).
+        AExpr::Cast { dtype, .. } => is_vortex_numeric_dtype(dtype),
         _ => false,
     }
 }
@@ -953,6 +1047,47 @@ mod tests {
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
+    /// Plus on cross-PType operands `Int32 + Int64` — refused by the PR-2.4 proactive
+    /// pairwise-equal-PType gate (addresses PR-2.3 cycle-2 H4 self-reinforcement
+    /// finding). Without the gate, Vortex's `Binary::return_dtype` would `vortex_bail!`
+    /// at scan-time because `Int32.eq_ignore_nullability(Int64) == false`.
+    #[test]
+    fn shape_plus_cross_ptype_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a"); // Int32 per schema_a_b_int32
+        // Build an Int64 literal (PType differs from the Int32 column).
+        use polars_core::prelude::AnyValue;
+        let one_i64 = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(1),
+        ))));
+        let n = binop(&mut arena, a, Operator::Plus, one_i64);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Plus on same-PType operands wrapped through a CAST `Cast(col_int32, Int64) + lit_i64`
+    /// — passes the pairwise gate (resolve_inner_dtype follows the Cast). Verifies the
+    /// gate doesn't over-refuse when TYPE_COERCION did its job.
+    #[test]
+    fn shape_plus_cast_then_same_ptype_passes() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a"); // Int32 per schema_a_b_int32
+        let cast_a = arena.add(AExpr::Cast {
+            expr: a,
+            dtype: DataType::Int64,
+            options: CastOptions::Strict,
+        });
+        use polars_core::prelude::AnyValue;
+        let one_i64 = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(1),
+        ))));
+        let n = binop(&mut arena, cast_a, Operator::Plus, one_i64);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
     /// Structural assertion (cycle-1 must-fix from gauntlet — addresses the
     /// tautological-test concern carried forward from PR-2.1 cycle-1, for this PR's most
     /// load-bearing new shape). Verifies the Plus → `checked_add` mapping actually
@@ -1270,6 +1405,110 @@ mod tests {
         let n = binop(&mut arena, cast_node, Operator::Gt, l);
         let schema = schema_a_b_int32();
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    // === PR-2.4 / PR-13.4: Struct field access in predicates ===
+
+    /// Helper: build `AExpr::Function` for `IRStructFunction::FieldByName(name)`.
+    #[cfg(feature = "dtype-struct")]
+    fn struct_field(arena: &mut Arena<AExpr>, name: &str, arg: Node) -> Node {
+        let expr_ir = ExprIR::new(arg, OutputName::Alias(PlSmallStr::EMPTY));
+        arena.add(AExpr::Function {
+            input: vec![expr_ir],
+            function: IRFunctionExpr::StructExpr(IRStructFunction::FieldByName(PlSmallStr::from(
+                name,
+            ))),
+            options: Default::default(),
+        })
+    }
+
+    /// Helper: schema where `s` is `Struct { inner: String, count: Int32 }`.
+    #[cfg(feature = "dtype-struct")]
+    fn schema_struct() -> Schema {
+        use polars_core::prelude::Field;
+        let mut s = Schema::default();
+        let struct_dtype = DataType::Struct(vec![
+            Field::new(PlSmallStr::from("inner"), DataType::String),
+            Field::new(PlSmallStr::from("count"), DataType::Int32),
+        ]);
+        s.with_column(PlSmallStr::from("s"), struct_dtype);
+        s
+    }
+
+    /// PR-13.4 acceptance: `col.struct.field("inner") == "x"` against a
+    /// `Struct { inner: String, .. }` column pushes down.
+    #[cfg(feature = "dtype-struct")]
+    #[test]
+    fn shape_struct_field_then_compare() {
+        let mut arena = Arena::new();
+        let s = col(&mut arena, "s");
+        let field_node = struct_field(&mut arena, "inner", s);
+        // Literal "x" — use String scalar.
+        use polars_core::prelude::AnyValue;
+        let lit_node = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::String,
+            AnyValue::StringOwned(PlSmallStr::from("x")),
+        ))));
+        let n = binop(&mut arena, field_node, Operator::Eq, lit_node);
+        let schema = schema_struct();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Struct field access without schema → conservative refuse (the gate cannot
+    /// verify the field exists in the struct's dtype).
+    #[cfg(feature = "dtype-struct")]
+    #[test]
+    fn shape_struct_field_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let s = col(&mut arena, "s");
+        let n = struct_field(&mut arena, "inner", s);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// Struct field access referencing a non-existent field → refuse (Vortex
+    /// `GetItem.return_dtype` would `vortex_err!` at scan-time).
+    #[cfg(feature = "dtype-struct")]
+    #[test]
+    fn shape_struct_field_unknown_field_returns_none() {
+        let mut arena = Arena::new();
+        let s = col(&mut arena, "s");
+        let n = struct_field(&mut arena, "nonexistent", s);
+        let schema = schema_struct();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Struct field access on a non-struct column → refuse (struct_field_exists
+    /// returns false for non-Struct dtype).
+    #[cfg(feature = "dtype-struct")]
+    #[test]
+    fn shape_struct_field_on_int_column_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let n = struct_field(&mut arena, "inner", a);
+        let schema = schema_a_b_int32(); // `a` is Int32, not Struct
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Nested struct access `s.field("outer").field("inner")` — the convertor
+    /// recurses through resolve_inner_dtype's StructExpr arm.
+    #[cfg(feature = "dtype-struct")]
+    #[test]
+    fn shape_struct_field_nested() {
+        use polars_core::prelude::Field;
+        let mut arena = Arena::new();
+        let s = col(&mut arena, "s");
+        let outer = struct_field(&mut arena, "outer", s);
+        let inner = struct_field(&mut arena, "inner", outer);
+        // Schema: `s: Struct { outer: Struct { inner: String } }`.
+        let inner_struct = DataType::Struct(vec![Field::new(
+            PlSmallStr::from("inner"),
+            DataType::String,
+        )]);
+        let outer_struct =
+            DataType::Struct(vec![Field::new(PlSmallStr::from("outer"), inner_struct)]);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("s"), outer_struct);
+        assert!(aexpr_to_vortex_expression(inner, &arena, Some(&schema)).is_some());
     }
 
     #[test]

@@ -156,6 +156,36 @@ def test_scan_with_cast_filter(tmp_path: Path) -> None:
     assert out["a"].to_list() == [101, 200]
 
 
+def test_scan_with_struct_field_filter(tmp_path: Path) -> None:
+    """PR-13.4 acceptance test: ``col.struct.field("inner") == "x"`` against a
+    Struct column pushes down through the AExpr-direct convertor's StructField
+    arm (PR-2.4).
+
+    Convertor maps `AExpr::Function { StructExpr(FieldByName("inner")), .. }` →
+    `vortex::expr::get_item("inner", inner_struct_expr)`. The legacy
+    `SpecializedColumnPredicate` fast path cannot represent struct field access
+    on the column side. Schema-membership gate refuses pushdown when the field
+    doesn't exist in the struct's dtype (else Vortex's `GetItem.return_dtype`
+    `vortex_err!`s at scan-time).
+    """
+    path = tmp_path / "struct_filter.vortex"
+    df = pl.DataFrame(
+        {
+            "s": [
+                {"inner": "a", "count": 1},
+                {"inner": "x", "count": 2},
+                {"inner": "x", "count": 3},
+                {"inner": "z", "count": 4},
+            ]
+        }
+    )
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("s").struct.field("inner") == "x").collect()
+    assert out.shape == (2, 1)
+    assert out["s"].struct.field("count").to_list() == [2, 3]
+
+
 def test_scan_with_cross_kind_cast_filter(tmp_path: Path) -> None:
     """PR-2.3 cycle-1 must-fix regression test: cross-kind CAST (Primitive →
     Utf8) must NOT crash the scan.
