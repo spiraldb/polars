@@ -11,20 +11,20 @@ planning_sub_flow: null
 current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
 phase_index: 2
 current_pr: null
-pr_index: 3
+pr_index: 4
 outstanding_must_fix: 0
-deferred_items_total: 10
+deferred_items_total: 12
 last_user_touchpoint: 2026-05-16T20:40:00Z
 last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at lower_ir.rs:766 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
 subagent_invocations_this_pr: 4
-subagent_invocations_total: 27
+subagent_invocations_total: 31
 review_cycles_this_pr: 2
 phase_entry_sha: fc43d1b8d
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: d16b363c6
+last_commit: 96c384392
 ```
 
 ## Context
@@ -413,6 +413,37 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 - **Deferred items**: 0 new (cumulative `deferred_items_total: 6` unchanged).
 - **Surprises during fix-application**:
   - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
+
+### PR-2.3: PR-13.3 CAST in predicates (3 PR-work commits, ending at `96c384392` — accepted cycle 2)
+
+- **Scope shipped (commit 1 — `1f5f7159c`)**: added `AExpr::Cast { expr, dtype, options }` arm to the convertor, mapping to `vortex::expr::cast(child, polars_dtype_to_vortex_dtype(dtype))`. New `polars_dtype_to_vortex_dtype` helper covers `Boolean`, `Int8/16/32/64`, `UInt8/16/32/64`, `Float32/64`, `String` → Vortex `DType::{Bool, Primitive, Utf8}`. Decimal / Object / Categorical / Enum / temporal / collection types refuse via `_ => return None`. Widened `polars-vortex` re-export to include `dtype`. 5 new convertor tests + 1 Python e2e (`test_scan_with_cast_filter`).
+
+- **Cycle-1 review (2-vote `pr-2`, both REJECT high-confidence)** — 2 must-fix + 6 should-fix items. Full synthesizer output in commit `53c191682` body.
+
+  **Cycle-1 must-fix items resolved in `53c191682`**:
+  - **M1 (F-CAST-001 / FRESH-001 — source-dtype-kind gate)**: Vortex's per-array `CastKernel` impls are strictly within-kind (`Primitive::cast` returns `Ok(None)` for non-Primitive targets per `vortex-array/src/arrays/primitive/compute/cast.rs:62-64`; `Bool::cast` for non-Bool per `bool/compute/cast.rs:41-43`; `VarBinView::cast` for non-Utf8/Binary per `varbinview/compute/cast.rs:60-62`). When the kernel returns None, `cast/mod.rs:120` `vortex_bail!`s with "No CastKernel" at scan-time — propagating as a hard `ComputeError`. The convertor was emitting cross-kind cast expressions, causing user predicates like `pl.col(int_col).cast(pl.String) == "..."` to crash the scan instead of falling back to residual. **Same bug class as PR-2.2 cycle-1 M2 Plus dtype gate**. Fix: added `resolve_inner_dtype` (resolves the inner expression's output dtype) + `cast_kind_compatible` (verifies source/target are same Vortex kind). The CAST arm now requires schema + same-kind source/target.
+  - **M2 (F-CAST-002 — CastOptions::Strict only)**: Polars `CastOptions::{NonStrict, Overflowing}` silently diverge from Vortex's fail-on-overflow `Primitive::CastKernel` semantics (`vortex-array/src/arrays/primitive/compute/cast.rs:85-91 vortex_bail!`s on out-of-range values). Pushing non-Strict down would convert Polars's silent-or-null behavior into a scan-time `ComputeError`. Fix: the CAST arm now refuses non-Strict via `if !options.is_strict() { return None; }`.
+
+  **Cycle-1 should-fix items addressed inline in `53c191682`**:
+  - F-CAST-004/005/006 + FRESH-002 (H1 doc-drift sweep): updated module-level table to include the new `cast` row (15 shapes); changed "What this module does NOT cover yet" to remove the stale `CAST → PR-2.3` line and add cross-kind + non-Strict notes; replaced brittle `lower_ir.rs:780-791` line-range with a stable `FileScanIR::Vortex` anchor; rewrote the Decimal comment in `polars_dtype_to_vortex_dtype` to make the fall-through explicit (was ambiguously positioned as if describing an arm); added Int128/UInt128 exclusion rationale cross-referencing `is_vortex_numeric_dtype`.
+  - 9 new convertor tests (5 cross-kind refusals + 2 CastOptions refusals + 1 no-schema refuse + 1 nested CAST chain) + 1 new Python e2e (`test_scan_with_cross_kind_cast_filter`) — locks both M1 and M2 against regression.
+
+- **Cycle-2 review (2-vote `pr-2`, both ACCEPT high-confidence)** — zero must-fix, 5 should-fix items. Full reviewer JSON in commit `96c384392` body.
+
+  **Most-impactful cycle-2 finding**: H4 fix-attention surfaced a SIBLING bug class — the Plus arm's `operand_is_numeric` checks per-operand numeric-ness but not pairwise supertype existence. `Plus(Int8, Int64)` would emit `checked_add(int8, int64)`; Vortex's `Binary::coerce_args` computes `least_supertype(I8, I64) → I64` but `coerce_expression` does not appear auto-applied to filter expressions — `return_dtype` at `binary/mod.rs:119-127` requires `lhs.eq_ignore_nullability(rhs)` and would bail at scan-time. **Pre-existing from PR-2.2, NOT introduced by PR-2.3**. Carry-forward to PR-2.4+; new Deferred-work entry added.
+
+  **Other cycle-2 should-fix items applied inline in `96c384392`**:
+  - C2-CAST-001 (correctness): added `shape_cast_bool_to_string_returns_none` + `shape_cast_string_to_bool_returns_none` — completes the cross-kind refusal matrix.
+  - C2-CAST-002 (correctness): added function-level `# CAST semantic caveat` doc section, mirroring the existing `# Bitwise-vs-logical operator caveat` and `# Arithmetic semantic caveat` sections. Updated `schema` parameter doc to list all three gates (And/Or/Not + Plus + CAST).
+  - FS-CYCLE2-001 (fresh): stale internal cross-references — line 577 comment said `14 foundation + Plus` (omitted Cast); corrected to `13 foundation + Plus + Cast`. Lines 890/909 referenced absolute line numbers in `operand_is_numeric` that shifted; replaced with symbol references.
+
+- **Final test count**: 49 → 51 convertor unit tests (with `dtype-decimal`: 52). Python e2e: +2 (`test_scan_with_cast_filter` + `test_scan_with_cross_kind_cast_filter`).
+- **Final confidence**: high. Both cycle-2 reviewers accept with high confidence; cycle-1 must-fix items resolved with regression-test coverage; cycle-2 should-fix items addressed inline or formally deferred with rationale.
+- **Deferred items growth (cycle-1 + cycle-2 cumulative)**: 2 new Deferred-work entries (Plus cross-PType supertype gate — pre-existing from PR-2.2; Float16 dtype support — perf miss). Total `deferred_items_total: 12`.
+
+- **Surprises during implementation**:
+  - **Cycle-1 surfaced the SAME bug class as PR-2.2 cycle-1**: Vortex builder is fallible but convertor's contract says always-SAFE. The process lesson from PR-2.2 cycle-1 (every new shape needs a "what does Vortex do under hostile inputs" check) was DOCUMENTED but not APPLIED in PR-2.3's design. The cycle-1 review surfaced both gates the implementer missed (M1 source-kind, M2 CastOptions). **Process-lesson reinforcement**: future PR-2.4 (struct field access) and PR-2.5 (temporal extracts) MUST start the implementation with a written "Vortex builder hostile-input audit" — what does the Vortex builder do when given (a) source/target dtype mismatch, (b) NULL input, (c) overflow, (d) malformed input — and what's the convertor-side gate that closes each? The audit goes in the PR's design notes BEFORE any code is written. This is now embedded in the project's review discipline; tracked as a process improvement.
+  - **Cycle-2 H4 self-reinforcement found a Plus sibling bug**: the same "convertor doesn't check pairwise dtype compatibility" issue exists in Plus. Pre-existing from PR-2.2 but not detected during PR-2.2's reviews because the test data avoided the boundary case. The Deferred-work entry tracks a direct e2e test in PR-2.4 to confirm and a fix if needed.
 
 ### PR-2.2: PR-13.2 Wire AExpr convertor + arithmetic + bitwise-vs-logical schema gate (4 PR-work commits, ending at `d16b363c6` — accepted cycle 2)
 
@@ -1969,6 +2000,10 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
 - **Virtual-column-partitioned Vortex scans don't benefit from AExpr convertor pushdown** (PR-2.2 cycle-1 must-fix M1 + cycle-2 must-fix-extension C2-001 — partial resolution): `lower_ir.rs` now refuses convertor pushdown when ANY of `hive_parts.is_some()`, `unified_scan_args.row_index.is_some()`, or `unified_scan_args.include_file_paths.is_some()` (conservative; legacy `polars_to_vortex_predicate` fast path still fires via `begin_read`'s fallback). A future PR could thread a per-column file-vs-virtual split through `lower_ir`, mirroring `polars-mem-engine/src/scan_predicate/functions.rs`'s `create_scan_predicate` `hive_predicate` extraction (lines 42-90): split the AExpr into (virtual-only, file-only, mixed); push the file-only part through the convertor; let the virtual-only part flow through Polars's standard machinery (hive-partition pruning for hive, row-index materialization for row_index, etc.). Modest scope (~60 LoC after extending to cover all three virtual-column kinds); deferred because Phase 2's primary objective (PR-13 pushdown coverage) doesn't block on this and the conservative refuse is sound. Tracked for a Phase 4 polish PR or a follow-up. (Deferred from PR-2.2 cycle-1 must-fix M1, extended cycle-2 C2-001, 2026-05-16.)
 
 - **Vortex `wrapping_add` (or non-fallible add) public API** (PR-2.2 cycle-1 must-fix M2 — partial resolution): The current `Plus → checked_add` mapping has a semantic divergence with Polars's wrapping `+`: Vortex errors at scan-time on integer overflow while Polars wraps. For typical OLAP queries with small-int data this is rare, but `col + 1 == big_value` on a column near MAX errors out instead of producing wrapped-then-compared results. PR-2.2 documents this in the function doc-comment; the proper fix is for Vortex to expose `wrapping_add` (or similar) in `vortex::expr::*` so polars-vortex can prefer it for Polars Plus semantics. Tracking as an upstream-Vortex coordination item — file when polars-vortex hits a real-world user query that surfaces the divergence, or as part of PR-2.5 (which already coordinates Vortex's `datetime_parts` op). (Deferred from PR-2.2 cycle-1 must-fix M2 / F-MF-002, 2026-05-16.)
+
+- **Plus convertor cross-PType supertype gate** (PR-2.3 cycle-2 H4-self-reinforcement carry-forward; pre-existing from PR-2.2): the Plus arm's `operand_is_numeric` gate (PR-2.2 cycle-1 M2 fix) checks per-operand numeric-ness but NOT pairwise supertype existence. `Plus(Int8_col, lit_i64)` (or any cross-PType numeric pair) would emit `checked_add(int8_expr, lit_i64)`; Vortex's `Binary::coerce_args` (`vortex-array/src/scalar_fn/fns/binary/mod.rs:104-127`) computes `least_supertype(I8, I64) → I64` but the `return_dtype` precondition at lines 119-127 requires `lhs.is_primitive() && lhs.eq_ignore_nullability(rhs)` — Int8 vs Int64 fail `eq_ignore_nullability`. Vortex `coerce_expression` (`vortex-array/src/expr/transform/coerce.rs:21`) auto-inserts Casts to bridge the supertype but does not appear to be auto-applied to filter expressions in the scan path (no non-test callers found in vortex-array 0.70.0). Pushing `Plus(Int8, Int64)` would `vortex_bail!` at scan-time. **Pre-existing from PR-2.2** — not surfaced earlier because PR-2.2's test data used same-PType operands. Resolution path: PR-2.4 (or a follow-up) should add an e2e test for `pl.col(int8_col) + pl.lit(1i64)` to confirm the bug reproduces; if so, mirror the CAST kind-gate pattern with a numeric-supertype check in `operand_is_numeric`'s Plus arm (refuse when operand dtypes don't satisfy `eq_ignore_nullability`). Modest scope (~30 LoC + test). The same class likely applies to Eq/Lt/etc. comparison arms (no pairwise gate either) — verify in the same investigation. (Deferred from PR-2.3 cycle-2 H4 carry-forward, 2026-05-16.)
+
+- **Float16 (`PType::F16`) support in the convertor** (PR-2.3 cycle-2 perf-miss carry-forward): Vortex has `PType::F16` (`vortex-array/src/dtype/ptype.rs:54`); Polars added `DataType::Float16` (cf. polars-core/datatypes/dtype.rs:102). Neither `polars_dtype_to_vortex_dtype` nor `is_vortex_numeric_dtype` handles Float16, so `cast(f16_col, Float32)` refuses pushdown (conservative SOUND), Plus(f16, f16) also refuses. Perf-miss only — adding a Float16 arm to both helpers + corresponding Plus arm in `is_vortex_numeric_dtype` would enable Float16 pushdown. Modest scope (~6 LoC + 2 tests); defer until Float16 use cases surface in the Vortex integration. (Deferred from PR-2.3 cycle-2, 2026-05-16.)
 
 - **`POLARS_VORTEX_VERIFY_PUSHDOWN=1` debug-mode pushdown-engagement verification** (PR-2.2 cycle-1 escalation — partial resolution): The plan's PR-2.2 row originally specified `POLARS_VORTEX_VERIFY_PUSHDOWN=1` as a debug env-var that emits divergences between the AExpr-direct and legacy `SpecializedColumnPredicate` paths during the parallel window (PR-2.2-.5). PR-2.2 ships a NARROWER form: the structural-assertion unit test `shape_plus_arithmetic_structural` verifies the convertor produces the expected `checked_add` shape for the load-bearing Plus case. The Python-level e2e test `test_scan_with_arithmetic_filter` does NOT verify pushdown engagement (it would pass even if the convertor silently returned None, because the multi-scan layer reapplies post-decode). The full divergence-debug mode requires either (a) instrumenting `VortexFileReader::begin_read` to emit `POLARS_VERBOSE` lines showing which filter path fired, with a Python test asserting via `capfd`, or (b) exposing an `IOMetrics`-style counter for "AExpr-direct path engaged" vs "legacy path engaged" that the test can read. Either is ~30 LoC. Deferred to PR-2.5 entry (the last AExpr-shape PR before PR-2.6 cutover, where it's the natural debug-coverage anchor for the parallel-path window's final cycles). (Deferred from PR-2.2 cycle-1 C-002 / F-SF-001, 2026-05-16.)
 
