@@ -4,9 +4,11 @@
 //! `SpecializedColumnPredicate`-derived filter-pushdown path
 //! (`polars_to_vortex_predicate`, `convert_specialized`, `bytes_to_like_literal` for
 //! LIKE prefix/suffix). PR-2.6 deletes that path entirely — the AExpr-direct convertor
-//! at `polars_plan::plans::aexpr::predicates::vortex_convertor::aexpr_to_vortex_expression`
-//! (introduced in PR-2.1, wired at `polars-stream/src/physical_plan/lower_ir.rs` in
-//! PR-2.2) is the sole filter-pushdown path going forward.
+//! at `polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression`
+//! (the `aexpr` module is `pub(crate)`; the externally-resolvable path goes through
+//! the `pub use aexpr::*` re-export at `plans/mod.rs`; introduced in PR-2.1, wired at
+//! `polars-stream/src/physical_plan/lower_ir.rs` in PR-2.2) is the sole filter-pushdown
+//! path going forward.
 //!
 //! ## Coverage parity with the deleted legacy path
 //!

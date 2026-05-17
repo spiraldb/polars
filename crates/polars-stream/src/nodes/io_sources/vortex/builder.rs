@@ -26,7 +26,9 @@ pub struct VortexReaderBuilder {
     pub segment_cache: Option<VortexSegmentCacheRef>,
     /// AExpr-direct convertor result (PR-13.2, sole pushdown path as of PR-2.6): when
     /// the predicate translated cleanly via
-    /// `polars_plan::plans::aexpr::predicates::vortex_convertor::aexpr_to_vortex_expression`,
+    /// `polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression`
+    /// (the `aexpr` module is `pub(crate)`; the externally-resolvable path goes through
+    /// the `pub use aexpr::*` re-export at `plans/mod.rs`),
     /// the Vortex `Expression` is captured here at IR-build time (where we still have
     /// `expr_arena` access). `VortexFileReader::begin_read` uses it directly. The
     /// multi-scan layer reapplies the full predicate post-decode regardless (we
