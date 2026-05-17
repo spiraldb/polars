@@ -97,12 +97,14 @@ use crate::plans::lit::LiteralValue;
 ///
 /// - `root_node` — the AExpr root to convert. The convertor walks the tree rooted here.
 /// - `arena` — the [`AExpr`] arena. Borrowed immutably (no nodes added).
-/// - `schema` — the resolved [`Schema`] of the columns the AExpr references. Used by the
-///   And/Or/Not bitwise-vs-logical gate (which refuses pushdown on integer operands) and
-///   by the Plus arm's numeric gate (which refuses pushdown on non-numeric operands). When
-///   `None`, the convertor conservatively refuses And/Or/Not AND Plus pushdown. Production
-///   wire-up (`physical_plan::lower_ir`) always supplies `Some`; `None` is exposed only
-///   to keep ad-hoc unit-test construction ergonomic.
+/// - `schema` — the resolved [`Schema`] of the columns the AExpr references. Used by
+///   three gates: (a) the And/Or/Not bitwise-vs-logical gate (refuses pushdown on
+///   integer operands); (b) the Plus arm's numeric gate (refuses pushdown on non-numeric
+///   operands); (c) the CAST arm's source-kind gate (refuses cross-kind casts that
+///   Vortex's per-array `CastKernel` rejects). When `None`, the convertor conservatively
+///   refuses And/Or/Not AND Plus AND CAST pushdown. Production wire-up
+///   (`physical_plan::lower_ir`) always supplies `Some`; `None` is exposed only to keep
+///   ad-hoc unit-test construction ergonomic.
 ///
 /// # Returns
 ///
@@ -137,6 +139,32 @@ use crate::plans::lit::LiteralValue;
 /// the user observes
 /// a scan-time error instead of Polars' wrapping behavior. This is a known semantic
 /// divergence; see Deferred work (`Vortex wrapping_add public API`).
+///
+/// # CAST semantic caveat (PR-2.3 / PR-13.3)
+///
+/// Polars `AExpr::Cast` is mapped to Vortex's `cast` builder under **two gates** to
+/// preserve the always-SAFE-fallback contract:
+///
+/// 1. **`CastOptions::Strict` only.** Polars `NonStrict` (overflow→null) and
+///    `Overflowing` (wrap) diverge from Vortex's `Primitive::CastKernel` fail-on-overflow
+///    semantics (`vortex-array/src/arrays/primitive/compute/cast.rs:85-91`
+///    `vortex_bail!`s on values exceeding target range). Pushing non-Strict down would
+///    convert Polars' silent-or-null behavior into a hard scan-time `ComputeError`.
+///    Refuse for any non-Strict option.
+///
+/// 2. **Same-kind source/target only**, via `cast_kind_compatible`. Vortex's per-array
+///    `CastKernel` impls are strictly within-kind: `Primitive::cast` returns `Ok(None)`
+///    for non-Primitive targets (`primitive/compute/cast.rs:62-64`); `Bool::cast` for
+///    non-Bool targets (`bool/compute/cast.rs:41-43`); `VarBinView::cast` for
+///    non-Utf8/Binary (`varbinview/compute/cast.rs:60-62`). Cross-kind casts cause
+///    `cast/mod.rs:120` to `vortex_bail!("No CastKernel ...")` at scan-time. Refuse
+///    when source and target are in different kinds (Primitive ↔ Primitive, Bool ↔ Bool,
+///    Utf8 ↔ Utf8 only).
+///
+/// Together: cross-kind CAST (Int → String, Bool → Int, etc.) and non-Strict CAST fall
+/// through to residual via `?`-propagation. Within-kind Strict CAST near boundary values
+/// (e.g., `cast(Int64, Int8)` on overflow) WILL still scan-time-error — consistent with
+/// Polars Strict semantics.
 pub fn aexpr_to_vortex_expression(
     root_node: Node,
     arena: &Arena<AExpr>,
@@ -574,7 +602,7 @@ mod tests {
         })
     }
 
-    // === Shape coverage tests (15 shapes: 14 foundation + Plus) ===
+    // === Shape coverage tests (15 shapes: 13 foundation + Plus + Cast) ===
 
     #[test]
     fn shape_column() {
@@ -887,7 +915,8 @@ mod tests {
     }
 
     /// Nested Plus `(a + b) + c` — `operand_is_numeric` recurses through the inner Plus
-    /// (lines 308-312 in vortex_convertor) so all three Int32 columns pass the gate.
+    /// (the `Operator::Plus` arm of `operand_is_numeric`) so all three Int32 columns pass
+    /// the gate.
     #[test]
     fn shape_plus_nested_numeric_passes() {
         let mut arena = Arena::new();
@@ -906,9 +935,9 @@ mod tests {
     /// Plus with a non-Plus BinaryExpr operand `(a * b) + c` — the inner Multiply
     /// is not yet supported by the convertor (returns None at the outer level via the
     /// Plus arm's `?`-propagation on `lhs`), but the gate ALSO refuses because
-    /// `operand_is_numeric` only recurses on the inner `Plus` arm (lines 308-312); any
-    /// other BinaryExpr op returns false. Both layers refuse: the gate is the first
-    /// line of defense, the unsupported Multiply arm is the second.
+    /// `operand_is_numeric` only recurses on the inner `Plus` arm; any other BinaryExpr
+    /// op returns false. Both layers refuse: the gate is the first line of defense, the
+    /// unsupported Multiply arm is the second.
     #[test]
     fn shape_plus_with_multiply_operand_returns_none() {
         let mut arena = Arena::new();
@@ -1129,6 +1158,34 @@ mod tests {
         let n = arena.add(AExpr::Cast {
             expr: c,
             dtype: DataType::Int64,
+            options: CastOptions::Strict,
+        });
+        let schema = schema_a_b_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST Bool → String (cross-kind) — refused (PR-2.3 cycle-2 C2-CAST-001).
+    #[test]
+    fn shape_cast_bool_to_string_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::String,
+            options: CastOptions::Strict,
+        });
+        let schema = schema_a_bool();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST String → Bool (cross-kind) — refused (PR-2.3 cycle-2 C2-CAST-001).
+    #[test]
+    fn shape_cast_string_to_bool_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Boolean,
             options: CastOptions::Strict,
         });
         let schema = schema_a_b_string();
