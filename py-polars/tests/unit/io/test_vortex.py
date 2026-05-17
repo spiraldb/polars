@@ -140,10 +140,12 @@ def test_scan_with_cast_filter(tmp_path: Path) -> None:
     column pushes down through the AExpr-direct convertor's CAST arm
     (PR-2.3).
 
-    Convertor maps `AExpr::Cast { dtype: Int64 }` →
-    `vortex::expr::cast(child, DType::Primitive(I64, Nullable))`. The legacy
-    `SpecializedColumnPredicate` fast path cannot represent a CAST on the
-    column side, so without PR-2.3 this would fall back to no-pushdown.
+    Convertor maps `AExpr::Cast { dtype: Int64, options: Strict }` →
+    `vortex::expr::cast(child, DType::Primitive(I64, Nullable))` ONLY when the
+    source dtype is in the same Vortex kind (Primitive↔Primitive, here Int32
+    → Int64 is Primitive→Primitive). The legacy `SpecializedColumnPredicate`
+    fast path cannot represent a CAST on the column side, so without PR-2.3
+    this would fall back to no-pushdown.
     """
     path = tmp_path / "cast_filter.vortex"
     df = pl.DataFrame({"a": pl.Series([1, 50, 101, 200], dtype=pl.Int32)})
@@ -152,6 +154,35 @@ def test_scan_with_cast_filter(tmp_path: Path) -> None:
     out = pl.scan_vortex(path).filter(pl.col("a").cast(pl.Int64) > 100).collect()
     assert out.shape == (2, 1)
     assert out["a"].to_list() == [101, 200]
+
+
+def test_scan_with_cross_kind_cast_filter(tmp_path: Path) -> None:
+    """PR-2.3 cycle-1 must-fix regression test: cross-kind CAST (Primitive →
+    Utf8) must NOT crash the scan.
+
+    Pre-fix: convertor emitted `cast(get_item("a", root()), DType::Utf8(...))`,
+    which Vortex's `Primitive::CastKernel` doesn't handle (returns
+    `Ok(None)` for non-Primitive targets), causing `cast/mod.rs:120` to
+    `vortex_bail!("No CastKernel ...")` at scan-time — propagating as a
+    hard `ComputeError`.
+
+    Post-fix: `cast_kind_compatible` refuses the convertor pushdown so the
+    legacy `polars_to_vortex_predicate` fallback handles the predicate
+    (which also can't represent the cast — falls through to no-pushdown).
+    Polars post-decode reapply produces the correct results.
+
+    A regression dropping the source-dtype-kind gate would surface here as
+    a Vortex scan-time error.
+    """
+    path = tmp_path / "cross_kind_cast.vortex"
+    df = pl.DataFrame({"a": pl.Series([1, 50, 101, 200], dtype=pl.Int32)})
+    df.write_vortex(path)
+
+    # Int32 → String CAST then string equality. Must not crash; Polars
+    # post-decode handles correctly.
+    out = pl.scan_vortex(path).filter(pl.col("a").cast(pl.String) == "101").collect()
+    assert out.shape == (1, 1)
+    assert out["a"].to_list() == [101]
 
 
 def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:

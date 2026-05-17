@@ -21,10 +21,11 @@
 //! re-export so the AnyValue→VortexScalar mapping has one canonical source of truth across
 //! both the SpecializedColumnPredicate path and this AExpr-direct path.)
 //!
-//! ## What this module covers (PR-2.1 foundation + PR-2.2 extensions)
+//! ## What this module covers (PR-2.1 foundation + PR-2.2 + PR-2.3 extensions)
 //!
-//! The 14 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
-//! foundation + 1 from PR-2.2: `addition (numeric)`.)
+//! The 15 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
+//! foundation + 1 from PR-2.2: `addition (numeric)` + 1 from PR-2.3: `cast (same-kind
+//! Primitive/Bool/Utf8 target)`.)
 //!
 //! | Shape | AExpr matcher | Vortex builder |
 //! |---|---|---|
@@ -39,16 +40,19 @@
 //! | logical AND | `AExpr::BinaryExpr { op: And \| LogicalAnd, .. }` | `and` (schema-gated for `And`) |
 //! | logical OR | `AExpr::BinaryExpr { op: Or \| LogicalOr, .. }` | `or` (schema-gated for `Or`) |
 //! | addition (numeric) | `AExpr::BinaryExpr { op: Plus, .. }` (PR-2.2) | `checked_add` (schema-gated to numeric) |
+//! | cast (same-kind) | `AExpr::Cast { dtype, options: Strict, .. }` (PR-2.3) | `cast` (kind-gated: Primitive↔Primitive, Bool↔Bool, Utf8↔Utf8) |
 //! | `is_null` | `AExpr::Function { Boolean(IsNull), .. }` | `is_null` |
 //! | `is_not_null` | `AExpr::Function { Boolean(IsNotNull), .. }` | `is_not_null` |
 //! | `not` | `AExpr::Function { Boolean(Not), .. }` | `not` (schema-gated) |
 //!
-//! ## What this module does NOT cover yet (PR-2.3-.5 follow-ups)
+//! ## What this module does NOT cover yet (PR-2.4-.5 follow-ups)
 //!
 //! Remaining arithmetic (`Minus`/`Multiply`/divides/`Modulus`) → still residual; PR-2.2
 //! ships `Plus` only because `checked_add` is the only arithmetic builder publicly exposed
-//! in `vortex::expr::*` at the pinned SHA. CAST → PR-2.3. Struct field access
-//! (`StructField`) → PR-2.4. Temporal extracts (`AExpr::Function {
+//! in `vortex::expr::*` at the pinned SHA. Cross-kind CAST (Primitive↔Bool/Utf8) and
+//! `NonStrict`/`Overflowing` CAST options → still residual (PR-2.3 cycle-1 must-fix gates;
+//! Vortex's per-array `CastKernel` is strictly within-kind and fail-on-overflow). Struct
+//! field access (`StructField`) → PR-2.4. Temporal extracts (`AExpr::Function {
 //! IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5. Anything else (`Sort`, `Gather`,
 //! `Filter`, `Agg`, `Ternary`, `AnonymousFunction`, `Over`, `Rolling`, etc.) returns `None`
 //! and falls through as residual; the multi-scan layer re-applies the full predicate
@@ -56,15 +60,17 @@
 //!
 //! ## Wiring
 //!
-//! Wired at `crates/polars-stream/src/physical_plan/lower_ir.rs:780-791` (inside the
-//! `FileScanIR::Vortex` branch of `lower_ir`), where the [`AExpr`] arena is live alongside
-//! the predicate `ExprIR`. The resulting `Expression` is attached to the Vortex
-//! `VortexReaderBuilder.aexpr_filter` field via a Vortex-specific side channel (parallel
-//! to how `FileScanIR::Vortex::metadata` and the (PR-2.0) `segment_cache` thread).
-//! `VortexFileReader::begin_read` prefers `aexpr_filter` over the legacy
+//! Wired inside the `FileScanIR::Vortex` match arm of
+//! `crates/polars-stream/src/physical_plan/lower_ir.rs::lower_ir` (search for
+//! `FileScanIR::Vortex` — the line range shifts across cleanup PRs), where the [`AExpr`]
+//! arena is live alongside the predicate `ExprIR`. The resulting `Expression` is attached
+//! to the Vortex `VortexReaderBuilder.aexpr_filter` field via a Vortex-specific side
+//! channel (parallel to how `FileScanIR::Vortex::metadata` and the (PR-2.0) `segment_cache`
+//! thread). `VortexFileReader::begin_read` prefers `aexpr_filter` over the legacy
 //! `polars_to_vortex_predicate` path; PR-2.6 will delete the legacy path once the
 //! convertor is a strict superset of `SpecializedColumnPredicate` coverage.
 
+use polars_core::chunked_array::cast::CastOptions;
 use polars_core::prelude::DataType;
 use polars_core::schema::Schema;
 use polars_utils::arena::{Arena, Node};
@@ -236,16 +242,43 @@ pub fn aexpr_to_vortex_expression(
         // --- CAST (PR-2.3 / PR-13.3) ---
         // `col.cast(Int64) > 100` against an Int32 column pushes down as
         // `gt(cast(get_item("col", root()), DType::Primitive(I64, Nullable)), lit(100i64))`.
-        // The target dtype is materialized via `polars_dtype_to_vortex_dtype`; unsupported
-        // targets (Decimal — scale/precision interactions; Object — opaque; Categorical /
-        // Enum — string-encoded; Date/Time/Datetime/Duration — Extension types beyond
-        // Vortex's PType/Bool/Utf8 set) fall through to residual via `?`-propagation.
+        //
+        // Two gates protect the convertor's always-SAFE-fallback contract (PR-2.3
+        // cycle-1 must-fix from gauntlet; same bug class as PR-2.2 cycle-1 M2 Plus):
+        //
+        // 1. `CastOptions::Strict` only. Polars `NonStrict` (overflow→null) and
+        //    `Overflowing` (wrap) silently diverge from Vortex's fail-on-overflow
+        //    `checked_add`-style cast semantics — pushing those down would convert
+        //    Polars's silent-or-null behavior into a scan-time `ComputeError`.
+        //    The user's query semantics must dominate; refuse pushdown so the
+        //    legacy path / post-decode reapply handles non-Strict.
+        // 2. Source-dtype-kind compatibility check via `cast_kind_compatible`.
+        //    Vortex's per-array `CastKernel` impls (verified in
+        //    `vortex-array/src/arrays/{primitive,bool,varbinview}/compute/cast.rs`)
+        //    are **strictly within-kind**: Primitive↔Primitive only, Bool↔Bool
+        //    only, Utf8↔Utf8 only (also Binary↔Binary). Cross-kind casts return
+        //    `Ok(None)` from the kernel, which `cast/mod.rs:120` then
+        //    `vortex_bail!`s on with "No CastKernel". The convertor refuses
+        //    cross-kind so the legacy path / post-decode reapply handles them.
+        //
+        // The `?`-propagation on both gates yields None for any unsupported
+        // shape — always SAFE.
         AExpr::Cast {
             expr: inner,
-            dtype,
-            options: _,
+            dtype: target_pl,
+            options,
         } => {
-            let target = polars_dtype_to_vortex_dtype(dtype)?;
+            if !options.is_strict() {
+                return None;
+            }
+            let target = polars_dtype_to_vortex_dtype(target_pl)?;
+            // Source-dtype-kind gate. Requires schema; without schema we cannot
+            // resolve the inner expression's dtype, so conservatively refuse.
+            let s = schema?;
+            let source_pl = resolve_inner_dtype(*inner, arena, s)?;
+            if !cast_kind_compatible(&source_pl, target_pl) {
+                return None;
+            }
             let child = aexpr_to_vortex_expression(*inner, arena, schema)?;
             Some(cast(child, target))
         },
@@ -285,13 +318,95 @@ fn polars_dtype_to_vortex_dtype(dt: &DataType) -> Option<DType> {
         Float32 => DType::Primitive(PType::F32, nullable),
         Float64 => DType::Primitive(PType::F64, nullable),
         String => DType::Utf8(nullable),
-        // Decimal — Vortex `DType::Decimal(DecimalDType(precision, scale), nullable)`
-        // requires usize ↔ u8 narrow + validation per the project BAN against `as` casts
-        // on Vortex Decimal precision/scale. Deferred to a future PR.
-        // Object/Categorical/Enum/Date/Datetime/Time/Duration/Binary/List/Struct/Array/
-        // Null/Unknown — not in PR-2.3 scope.
+        // All other dtypes fall through to None via the catch-all. Notably:
+        // - Decimal: deliberately NOT given an explicit arm even with the `dtype-decimal`
+        //   feature enabled. Vortex `DType::Decimal(DecimalDType(precision, scale), nullable)`
+        //   requires usize ↔ u8 narrow + validation per the project BAN against `as` casts
+        //   on Vortex Decimal precision/scale; deferred until polars-vortex validates
+        //   `vortex::expr::cast` interactions for Decimal scale/precision.
+        // - Int128/UInt128: NOT in the numeric set because Vortex's `PType` ceiling is
+        //   I64/U64/F64 and `polars_scalar_to_vortex` has no Int128/UInt128 literal arms
+        //   (mirrors `is_vortex_numeric_dtype`'s exclusion for the same reason).
+        // - Object / Categorical / Enum / Date / Datetime / Time / Duration / Binary /
+        //   List / Struct / Array / Null / Unknown: not in PR-2.3 scope; PR-2.4/.5 may
+        //   add some (e.g., struct field access in PR-2.4).
         _ => return None,
     })
+}
+
+/// Resolve the Polars [`DataType`] of `node` for CAST source-dtype gating.
+///
+/// Returns `None` for AExpr shapes we cannot trivially type-check (nested CAST
+/// chains, expressions producing dtype-dependent output, AnonymousFunction, etc.) —
+/// the CAST arm's `?`-propagation then drops the cast to residual, which is always
+/// SAFE.
+///
+/// Supports the shapes the convertor's own CAST arm cares about: `Column`,
+/// `Literal(Scalar)`, and `Cast` (recursive — the cast's output dtype is its target).
+/// Comparisons (Eq/Lt/etc.) and Boolean-function outputs (IsNull/IsNotNull/Not)
+/// produce Boolean output. Plus produces output matching its operands' numeric type
+/// (delegate to the recursive operand_is_numeric machinery).
+fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Option<DataType> {
+    match arena.get(node) {
+        AExpr::Column(name) => schema.get(name).cloned(),
+        AExpr::Literal(LiteralValue::Scalar(s)) => Some(s.dtype().clone()),
+        AExpr::Cast {
+            dtype: target_pl, ..
+        } => Some(target_pl.clone()),
+        AExpr::BinaryExpr { op, .. } => match op {
+            Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq
+            | Operator::EqValidity
+            | Operator::NotEqValidity
+            | Operator::LogicalAnd
+            | Operator::LogicalOr => Some(DataType::Boolean),
+            _ => None,
+        },
+        AExpr::Function {
+            function: IRFunctionExpr::Boolean(bf),
+            ..
+        } => match bf {
+            IRBooleanFunction::IsNull | IRBooleanFunction::IsNotNull | IRBooleanFunction::Not => {
+                Some(DataType::Boolean)
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Is the (source, target) CAST pair representable by Vortex's per-array
+/// `CastKernel` impls? Verified against vortex-array 0.70.0:
+///
+/// - `Primitive::cast` returns `Ok(None)` for non-Primitive targets
+///   (`arrays/primitive/compute/cast.rs:62-64`)
+/// - `Bool::cast` returns `Ok(None)` for non-Bool targets
+///   (`arrays/bool/compute/cast.rs:41-43`)
+/// - `VarBinView::cast` returns `Ok(None)` unless source AND target are both Utf8
+///   (or both Binary) (`arrays/varbinview/compute/cast.rs:60-62`)
+///
+/// Cross-kind casts (Primitive→Bool, Bool→Utf8, Utf8→Primitive, etc.) cause
+/// `cast/mod.rs:120` to `vortex_bail!("No CastKernel to cast canonical array {} from
+/// {} to {}")` at scan-time, which propagates as a hard `ComputeError`. The
+/// convertor refuses cross-kind so the residual / legacy path handles them.
+///
+/// Same-kind narrowing (Int32→Int8, Int64→Int32) is allowed; Vortex's
+/// `values_fit_in` check at `cast.rs:85-91` produces a scan-time `vortex_bail!` on
+/// out-of-range values. This is acceptable under `CastOptions::Strict` semantics
+/// (which is the only mode we push down — the cycle-1 gate above).
+fn cast_kind_compatible(source: &DataType, target: &DataType) -> bool {
+    use DataType::*;
+    let same_kind = matches!(
+        (source, target),
+        // Primitive → Primitive (Int*/UInt*/Float*).
+        (s, t) if is_vortex_numeric_dtype(s) && is_vortex_numeric_dtype(t)
+    ) || matches!((source, target), (Boolean, Boolean))
+        || matches!((source, target), (String, String));
+    same_kind
 }
 
 /// Schema-aware operand type check: determines whether `node`'s resolved dtype is
@@ -897,8 +1012,16 @@ mod tests {
 
     // === PR-2.3 / PR-13.3: CAST in predicates ===
 
-    /// CAST to a supported primitive (Int64) ships in PR-2.3 — was pre-PR-2.3 None,
-    /// now Some.
+    /// Helper: schema with String columns `a` and `b` for cross-kind CAST tests.
+    fn schema_a_b_string() -> Schema {
+        let mut s = Schema::default();
+        s.with_column(PlSmallStr::from("a"), DataType::String);
+        s.with_column(PlSmallStr::from("b"), DataType::String);
+        s
+    }
+
+    /// CAST Int32 → Int64 (same kind: Primitive → Primitive) ships in PR-2.3 —
+    /// was pre-PR-2.3 None, now Some with schema.
     #[test]
     fn shape_cast_to_int64_ships_in_pr_2_3() {
         let mut arena = Arena::new();
@@ -908,10 +1031,11 @@ mod tests {
             dtype: DataType::Int64,
             options: CastOptions::Strict,
         });
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
-    /// CAST to Float64 — supported.
+    /// CAST Int32 → Float64 (same kind: Primitive → Primitive) — supported.
     #[test]
     fn shape_cast_to_float64() {
         let mut arena = Arena::new();
@@ -921,12 +1045,13 @@ mod tests {
             dtype: DataType::Float64,
             options: CastOptions::Strict,
         });
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
-    /// CAST to Boolean — supported.
+    /// CAST Boolean → Boolean (degenerate same-kind: validity widening) — supported.
     #[test]
-    fn shape_cast_to_bool() {
+    fn shape_cast_bool_to_bool() {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let n = arena.add(AExpr::Cast {
@@ -934,12 +1059,13 @@ mod tests {
             dtype: DataType::Boolean,
             options: CastOptions::Strict,
         });
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_bool();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
-    /// CAST to String — supported.
+    /// CAST String → String (degenerate same-kind: validity widening) — supported.
     #[test]
-    fn shape_cast_to_string() {
+    fn shape_cast_string_to_string() {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let n = arena.add(AExpr::Cast {
@@ -947,11 +1073,117 @@ mod tests {
             dtype: DataType::String,
             options: CastOptions::Strict,
         });
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
-    /// CAST to Decimal — refused (Vortex Decimal scale/precision interactions are NOT
-    /// validated at the polars-vortex layer; tracked in the function doc as deferred).
+    /// CAST Int32 → Boolean (cross-kind: Primitive → Bool) — refused (PR-2.3
+    /// cycle-1 must-fix). Vortex's `Primitive::CastKernel` returns `Ok(None)` for
+    /// non-Primitive targets and `cast/mod.rs:120` then `vortex_bail!`s.
+    #[test]
+    fn shape_cast_int_to_bool_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Boolean,
+            options: CastOptions::Strict,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST Int32 → String (cross-kind: Primitive → Utf8) — refused.
+    #[test]
+    fn shape_cast_int_to_string_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::String,
+            options: CastOptions::Strict,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST Bool → Int (cross-kind) — refused.
+    #[test]
+    fn shape_cast_bool_to_int_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Int64,
+            options: CastOptions::Strict,
+        });
+        let schema = schema_a_bool();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST String → Int (cross-kind) — refused.
+    #[test]
+    fn shape_cast_string_to_int_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Int64,
+            options: CastOptions::Strict,
+        });
+        let schema = schema_a_b_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST without schema → conservative refuse (cycle-1 must-fix: the
+    /// source-dtype gate cannot resolve without schema).
+    #[test]
+    fn shape_cast_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Int64,
+            options: CastOptions::Strict,
+        });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// CAST with `CastOptions::NonStrict` — refused (PR-2.3 cycle-1 must-fix).
+    /// Polars NonStrict overflow → null differs from Vortex's fail-on-overflow;
+    /// pushing down would convert Polars's null-on-overflow into a scan error.
+    #[test]
+    fn shape_cast_non_strict_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Int64,
+            options: CastOptions::NonStrict,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST with `CastOptions::Overflowing` — refused (PR-2.3 cycle-1 must-fix).
+    /// Polars Overflowing wraps on overflow; Vortex errors. Same divergence as
+    /// the NonStrict case.
+    #[test]
+    fn shape_cast_overflowing_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let n = arena.add(AExpr::Cast {
+            expr: c,
+            dtype: DataType::Int64,
+            options: CastOptions::Overflowing,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// CAST to Decimal — refused at the dtype-mapper level (Vortex Decimal
+    /// scale/precision interactions are NOT validated at the polars-vortex layer;
+    /// tracked in the function doc as deferred).
     #[cfg(feature = "dtype-decimal")]
     #[test]
     fn shape_cast_to_decimal_returns_none() {
@@ -962,7 +1194,8 @@ mod tests {
             dtype: DataType::Decimal(10, 2),
             options: CastOptions::Strict,
         });
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
     /// CAST nested in a comparison — `col.cast(Int64) > 100` per the plan's PR-13.3
@@ -978,7 +1211,8 @@ mod tests {
         });
         let l = lit_i32(&mut arena, 100);
         let n = binop(&mut arena, cast_node, Operator::Gt, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
