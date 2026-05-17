@@ -20,7 +20,6 @@ use polars_utils::slice_enum::Slice;
 use polars_vortex::read::array_bridge::{
     ArrowUpstreamSchema, arrow_dtypes_from_schema, record_batch_to_dataframe,
 };
-use polars_vortex::read::predicate::polars_to_vortex_predicate;
 use polars_vortex::read::read_at::local_file_read_at;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::session;
@@ -53,12 +52,11 @@ pub struct VortexFileReader {
     pub segment_cache: Option<polars_vortex::read::VortexSegmentCacheRef>,
     /// AExpr-direct convertor result threaded from IR-build (`FileScanIR::Vortex` →
     /// `VortexReaderBuilder::aexpr_filter` → here). When `Some`, `begin_read` uses this
-    /// Vortex `Expression` directly instead of dispatching through
-    /// `polars_to_vortex_predicate` (the `SpecializedColumnPredicate`-derived fast path).
-    /// The fast path remains as a fallback for shapes the convertor returns `None` for
-    /// (e.g., the predicate didn't translate cleanly because of an unhandled AExpr shape,
-    /// or `push_predicate` is off — though `push_predicate=false` is handled at the
-    /// IR-build call site, so by here `Some` implies the user opted in).
+    /// Vortex `Expression` directly. PR-2.6 (Option B → A cutover) deleted the legacy
+    /// `polars_to_vortex_predicate` fallback — the AExpr-direct convertor is now the
+    /// sole filter-pushdown path. When `None` (unhandled AExpr shape, or
+    /// `push_predicate=false`), no filter pushes down; the multi-scan layer reapplies
+    /// the predicate post-decode (we advertise `PARTIAL_FILTER`).
     pub aexpr_filter: Option<polars_vortex::vortex::expr::Expression>,
     pub io_metrics: OptIOMetrics,
 
@@ -257,26 +255,18 @@ impl FileReader for VortexFileReader {
             }
         });
 
-        // Translate the pushable bits of args.predicate into a Vortex `Expression`. We
-        // advertise `PARTIAL_FILTER` capability, so the multi-scan layer keeps the
-        // original predicate around to apply post-decode — pushing only what we can
-        // convert is safe (over-conservative pushdown would drop rows incorrectly).
+        // Use the AExpr-direct convertor result computed at IR-build time
+        // (`physical_plan::lower_ir`). We advertise `PARTIAL_FILTER` capability so the
+        // multi-scan layer keeps the original predicate around to apply post-decode —
+        // pushing only what we can convert is safe.
         //
-        // Preference order:
-        //   1. `self.aexpr_filter` — AExpr-direct convertor result computed at IR-build
-        //      time (`physical_plan::lower_ir`). Covers everything the new convertor
-        //      handles, including arithmetic / CAST / struct shapes that the legacy fast
-        //      path cannot represent.
-        //   2. `polars_to_vortex_predicate(args.predicate)` — legacy
-        //      `SpecializedColumnPredicate`-derived path; takes over when the convertor
-        //      returns `None` (unhandled shape) so we still benefit from the per-column
-        //      fast-path coverage that PR-13 hasn't yet supplanted.
-        // PR-13.6 (Phase 2 final) will delete the fallback once the convertor is a strict
-        // superset of the fast path.
+        // PR-2.6 (Option B → A cutover) deleted the legacy `polars_to_vortex_predicate`
+        // (`SpecializedColumnPredicate`-derived) fallback path; the AExpr-direct
+        // convertor is now the sole filter-pushdown path. When `aexpr_filter` is `None`
+        // (unhandled AExpr shape, or `push_predicate=false`), no filter pushes down and
+        // the multi-scan reapply handles correctness.
         let filter_expr = if self.options.push_predicate {
-            self.aexpr_filter
-                .clone()
-                .or_else(|| args.predicate.as_ref().and_then(polars_to_vortex_predicate))
+            self.aexpr_filter.clone()
         } else {
             None
         };

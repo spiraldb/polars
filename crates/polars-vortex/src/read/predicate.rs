@@ -1,156 +1,42 @@
-//! Polars predicate → Vortex `Expression` convertor (filter pushdown).
+//! Polars `Scalar` → Vortex `VortexScalar` conversion (filter pushdown literal helper).
 //!
-//! **TODO(PR-2.6)**: this entire fast path is SCAFFOLDING for the PR-13 Option B → A
-//! trajectory. The AExpr-direct convertor at `read/aexpr_predicate.rs` (introduced in PR-2.1
-//! through PR-2.5) supersedes this `SpecializedColumnPredicate`-based fast path; PR-2.6 deletes
-//! this file (or reduces it to scalar+LIKE helpers absorbed into `aexpr_predicate.rs`) and
-//! switches the call site at `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:242` to
-//! the AExpr-direct path. Tracked: `.big-plans/vortex-integration.md` PR-2.6 row + Accepted
-//! tradeoffs entry on the SpecializedColumnPredicate fast path.
+//! **PR-2.6 Option B → A cutover (2026-05-16)**: this module USED to host the legacy
+//! `SpecializedColumnPredicate`-derived filter-pushdown path (`polars_to_vortex_predicate`,
+//! `convert_specialized`, `bytes_to_like_literal` for LIKE prefix/suffix). PR-2.6 deletes
+//! that path entirely — the AExpr-direct convertor at
+//! `polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression`
+//! (introduced in PR-2.1, wired at `polars-stream/src/physical_plan/lower_ir.rs` in
+//! PR-2.2) is now the sole filter-pushdown path. The convertor handles every shape the
+//! legacy path handled (Eq / Lt / Gt / Between via `Lt + Gt + And` / EqualOneOf via
+//! `Eq` + `Or` / StartsWith and EndsWith are NOT YET in the convertor — see Deferred
+//! work) plus everything the legacy path did not (multi-column predicates, arithmetic,
+//! CAST, struct field access).
 //!
-//! We translate the structured pieces of [`polars_io::predicates::ScanIOPredicate`] into a
-//! Vortex `Expression` to hand to `ScanBuilder::with_filter`. What we can't translate stays
-//! as a residual filter, which the multi-scan layer applies post-decode (the streaming
-//! reader advertises `PARTIAL_FILTER` capability so the multi-scan layer knows to keep the
-//! original predicate around).
+//! ## What this module still does
 //!
-//! ## What we translate
-//!
-//! The high-leverage path is [`ColumnPredicates`]: the Polars optimizer already extracts
-//! single-column predicates into [`SpecializedColumnPredicate`] variants (Equal / Between /
-//! EqualOneOf / StartsWith / EndsWith / RegexMatch). Each maps to a Vortex expression node
-//! cleanly. We collect all per-column predicates and `and`-collect them into a single
-//! filter.
-//!
-//! Multi-column predicates, arithmetic, struct field access, and `RegexMatch` stay as
-//! residual for now (tracked under PR-13 — aggressive AExpr-based pushdown). They're
-//! correct because the multi-scan layer always applies the original
-//! `predicate.predicate` post-decode.
+//! Hosts [`polars_scalar_to_vortex`] — the canonical `polars_core::scalar::Scalar` →
+//! [`VortexScalar`] mapping. The AExpr-direct convertor calls into this for
+//! `AExpr::Literal(LiteralValue::Scalar(s))` shapes (single source of truth for the
+//! `AnyValue` → `VortexScalar` mapping; same `pub` visibility established in PR-2.1).
+//! Temporal (Date / Datetime / Time) and Decimal arms live in the `temporal` submodule
+//! so they can be feature-gated cleanly on polars-core's `dtype-*` features.
 
 use polars_core::prelude::AnyValue;
-use polars_io::predicates::{ScanIOPredicate, SpecializedColumnPredicate};
-use polars_utils::pl_str::PlSmallStr;
 use vortex::array::scalar::Scalar as VortexScalar;
 use vortex::dtype::Nullability;
-use vortex::expr::{
-    Expression, and_collect, eq, get_item, gt_eq, like, lit, lt_eq, or_collect, root,
-};
 
-/// Convert what we can of `scan_predicate` into a single Vortex filter expression. The
-/// returned expression should be passed to `ScanBuilder::with_filter`; the multi-scan
-/// layer is responsible for the residual (full `predicate.predicate` is re-applied to
-/// emitted morsels).
-///
-/// Returns `None` when nothing pushable was found.
-///
-/// Conjuncts are emitted in column-name sorted order so the resulting Vortex
-/// `Expression` is deterministic — `ColumnPredicates::predicates` is a hash map
-/// whose iteration order varies, and Vortex's pruning evaluator may short-circuit
-/// left-to-right, so the order matters for both reproducibility and (potentially)
-/// pruning effectiveness.
-pub fn polars_to_vortex_predicate(scan_predicate: &ScanIOPredicate) -> Option<Expression> {
-    let mut per_column_pairs: Vec<(&PlSmallStr, &SpecializedColumnPredicate)> = scan_predicate
-        .column_predicates
-        .predicates
-        .iter()
-        .filter_map(|(name, (_, specialized_opt))| specialized_opt.as_ref().map(|s| (name, s)))
-        .collect();
-    per_column_pairs.sort_by_key(|(name, _)| name.as_str());
-
-    let per_column: Vec<Expression> = per_column_pairs
-        .into_iter()
-        .filter_map(|(name, specialized)| convert_specialized(name, specialized))
-        .collect();
-    and_collect(per_column)
-}
-
-fn convert_specialized(
-    column_name: &PlSmallStr,
-    specialized: &SpecializedColumnPredicate,
-) -> Option<Expression> {
-    let col = get_item(column_name.as_str(), root());
-
-    Some(match specialized {
-        SpecializedColumnPredicate::Equal(scalar) => eq(col, lit(polars_scalar_to_vortex(scalar)?)),
-        SpecializedColumnPredicate::Between(low, high) => {
-            let lo = lit(polars_scalar_to_vortex(low)?);
-            let hi = lit(polars_scalar_to_vortex(high)?);
-            // Closed range: low <= col <= high.
-            vortex::expr::and(gt_eq(col.clone(), lo), lt_eq(col, hi))
-        },
-        SpecializedColumnPredicate::EqualOneOf(scalars) => {
-            let terms: Vec<Expression> = scalars
-                .iter()
-                .filter_map(|s| Some(eq(col.clone(), lit(polars_scalar_to_vortex(s)?))))
-                .collect();
-            // If every scalar in the IN-list converted, push the OR; if some failed we
-            // could still push the partial set + leave a residual, but for safety we
-            // require all-or-nothing here (otherwise the pushed filter is *narrower*
-            // than the user's actual predicate, which would drop rows incorrectly).
-            if terms.len() != scalars.len() {
-                return None;
-            }
-            or_collect(terms)?
-        },
-        SpecializedColumnPredicate::StartsWith(bytes) => {
-            let prefix = bytes_to_like_literal(bytes)?;
-            // `prefix%`
-            let pattern = format!("{prefix}%");
-            like(
-                col,
-                lit(VortexScalar::utf8(pattern, Nullability::NonNullable)),
-            )
-        },
-        SpecializedColumnPredicate::EndsWith(bytes) => {
-            let suffix = bytes_to_like_literal(bytes)?;
-            // `%suffix`
-            let pattern = format!("%{suffix}");
-            like(
-                col,
-                lit(VortexScalar::utf8(pattern, Nullability::NonNullable)),
-            )
-        },
-        // No native regex in Vortex's `like`; let the multi-scan residual handle it.
-        SpecializedColumnPredicate::RegexMatch(_) => return None,
-    })
-}
-
-/// Validate that `bytes` is valid UTF-8 and free of SQL-LIKE special characters
-/// (`%`, `_`, `\`). Returns the borrowed `&str` so the caller can build a pattern.
-/// Returning `None` falls back to the residual filter, which is always correct.
-///
-/// We refuse pushdown when the bytes contain `%` or `_` because LIKE would interpret
-/// those as wildcards, *widening* the predicate. Widening is still correct (the
-/// multi-scan residual filter trims the extra rows), but it defeats the perf win
-/// of pushdown — so we'd rather not push than push wastefully. Backslash is the
-/// LIKE escape character; same reasoning.
-fn bytes_to_like_literal(bytes: &[u8]) -> Option<&str> {
-    let s = std::str::from_utf8(bytes).ok()?;
-    if s.contains('%') || s.contains('_') || s.contains('\\') {
-        return None;
-    }
-    Some(s)
-}
-
-/// Convert a Polars `Scalar` into a Vortex `Scalar` for the common types.
-/// Returns `None` for variants we don't yet translate (extension types we don't have
-/// a Vortex analogue for, nested types, etc.) — the caller treats this as "not
-/// pushable" and falls back to the residual filter.
-///
-/// Scalars are constructed with `Nullability::Nullable` since the optimizer's
-/// `SpecializedColumnPredicate` doesn't carry the column's nullability. Vortex's
-/// type system unifies nullability when comparing against a `NonNullable` column,
-/// so this is correct but may reduce pruning effectiveness if Vortex's pruning
-/// evaluator is stricter than its comparison evaluator.
 /// Convert a Polars [`polars_core::scalar::Scalar`] into a Vortex [`VortexScalar`].
 ///
-/// `pub` because the PR-13 AExpr-direct convertor at
-/// `polars_plan::plans::aexpr::predicates::vortex_convertor` (added in PR-2.1) reuses this
-/// mapping for `AExpr::Literal(LiteralValue::Scalar(s))` shapes. Single source of truth for
-/// the `AnyValue` → `VortexScalar` mapping across both convertor paths; once PR-2.6 deletes
-/// this `predicate` module's [`polars_to_vortex_predicate`], the helper either migrates to
-/// the AExpr-direct path or stays here as a standalone scalar-conversion utility (it's not
-/// coupled to the specialized-predicate translation).
+/// Returns `None` for variants we don't yet translate (Duration — no Vortex extension
+/// dtype analogue; nested types; extension dtypes without a Vortex equivalent). The
+/// AExpr-direct convertor's `?`-propagation drops the enclosing predicate to residual on
+/// `None`.
+///
+/// Scalars are constructed with `Nullability::Nullable`. The optimizer's per-column
+/// predicates don't carry the column's nullability; Vortex's type system unifies
+/// nullability when comparing against a `NonNullable` column, so this is correct but
+/// may reduce pruning effectiveness if Vortex's pruning evaluator is stricter than its
+/// comparison evaluator.
 pub fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<VortexScalar> {
     let nul = Nullability::Nullable;
     Some(match scalar.value() {
@@ -277,29 +163,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn like_literal_safe_strings() {
-        assert_eq!(bytes_to_like_literal(b"hello"), Some("hello"));
-        assert_eq!(bytes_to_like_literal(b""), Some(""));
-        assert_eq!(bytes_to_like_literal(b"a.b-c@d"), Some("a.b-c@d"));
-    }
-
-    #[test]
-    fn like_literal_refuses_wildcards() {
-        // SQL-LIKE special chars must NOT be pushed — they'd widen the predicate.
-        assert_eq!(bytes_to_like_literal(b"hello%world"), None);
-        assert_eq!(bytes_to_like_literal(b"foo_bar"), None);
-        assert_eq!(bytes_to_like_literal(b"a\\b"), None);
-        assert_eq!(bytes_to_like_literal(b"%"), None);
-        assert_eq!(bytes_to_like_literal(b"_"), None);
-        assert_eq!(bytes_to_like_literal(b"\\"), None);
-    }
-
-    #[test]
-    fn like_literal_refuses_invalid_utf8() {
-        assert_eq!(bytes_to_like_literal(&[0xff, 0xfe]), None);
-    }
-
-    #[test]
     fn scalar_primitive_types_convert() {
         use polars_core::prelude::DataType;
         use polars_core::scalar::Scalar;
@@ -391,11 +254,11 @@ mod tests {
 
     #[cfg(feature = "dtype-decimal")]
     #[test]
-    fn decimal_scalar_roundtrips_precision_and_scale() {
+    fn decimal_scalar_round_trip() {
         use vortex::dtype::DType;
-
+        // Polars Decimal(10, 2) — small precision/scale, fits in u8/i8 easily.
         let s =
-            temporal::decimal_scalar(12_345, 10, 2, Nullability::Nullable).expect("decimal scalar");
+            temporal::decimal_scalar(12345, 10, 2, Nullability::Nullable).expect("decimal scalar");
         match s.dtype() {
             DType::Decimal(dec, _) => {
                 assert_eq!(dec.precision(), 10);
@@ -407,112 +270,9 @@ mod tests {
 
     #[cfg(feature = "dtype-decimal")]
     #[test]
-    fn decimal_scalar_rejects_overflowing_precision_and_scale() {
-        // u8::MAX is 255; usize::try_into::<u8> fails for 256.
+    fn decimal_scalar_overflow_returns_none() {
+        // precision > 38 OR scale > i8::MAX would overflow the Vortex types; refuse.
         assert!(temporal::decimal_scalar(0, 256, 0, Nullability::Nullable).is_none());
-        // i8::MAX is 127; usize::try_into::<i8> fails for 128.
-        assert!(temporal::decimal_scalar(0, 10, 128, Nullability::Nullable).is_none());
-    }
-
-    #[cfg(feature = "dtype-date")]
-    #[test]
-    fn convertor_returns_pushable_for_date_predicate() {
-        use polars_core::prelude::DataType;
-        use polars_core::scalar::Scalar;
-        use polars_io::predicates::SpecializedColumnPredicate;
-
-        let scalar = Scalar::new(DataType::Date, AnyValue::Date(19_000));
-        let pred = SpecializedColumnPredicate::Equal(scalar);
-        let expr = convert_specialized(&"d".into(), &pred);
-        assert!(
-            expr.is_some(),
-            "Date equality should be pushable when dtype-date is on"
-        );
-    }
-
-    // ========================================================================
-    // Per-variant pushdown-engagement tests: each `SpecializedColumnPredicate`
-    // variant we claim to support should produce a non-None Vortex expression.
-    // ========================================================================
-
-    fn int32_scalar(v: i32) -> polars_core::scalar::Scalar {
-        use polars_core::prelude::DataType;
-        use polars_core::scalar::Scalar;
-        Scalar::new(DataType::Int32, AnyValue::Int32(v))
-    }
-
-    #[test]
-    fn equal_predicate_is_pushable() {
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::Equal(int32_scalar(42));
-        assert!(convert_specialized(&"a".into(), &pred).is_some());
-    }
-
-    #[test]
-    fn between_predicate_is_pushable() {
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::Between(int32_scalar(1), int32_scalar(10));
-        assert!(convert_specialized(&"a".into(), &pred).is_some());
-    }
-
-    #[test]
-    fn equal_one_of_predicate_is_pushable() {
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::EqualOneOf(
-            vec![int32_scalar(1), int32_scalar(2), int32_scalar(3)].into_boxed_slice(),
-        );
-        assert!(convert_specialized(&"a".into(), &pred).is_some());
-    }
-
-    #[test]
-    fn starts_with_predicate_is_pushable_for_safe_bytes() {
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::StartsWith(b"hello".to_vec().into_boxed_slice());
-        assert!(convert_specialized(&"s".into(), &pred).is_some());
-    }
-
-    #[test]
-    fn starts_with_predicate_refuses_unsafe_bytes() {
-        // Wildcard chars trigger the safety check — return None so the residual
-        // filter handles it correctly.
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::StartsWith(b"hello%".to_vec().into_boxed_slice());
-        assert!(convert_specialized(&"s".into(), &pred).is_none());
-    }
-
-    #[test]
-    fn ends_with_predicate_is_pushable_for_safe_bytes() {
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::EndsWith(b"world".to_vec().into_boxed_slice());
-        assert!(convert_specialized(&"s".into(), &pred).is_some());
-    }
-
-    #[test]
-    fn regex_match_predicate_falls_back_to_residual() {
-        // RegexMatch is documented as residual-only.
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let regex = regex::bytes::Regex::new("^foo").unwrap();
-        let pred = SpecializedColumnPredicate::RegexMatch(regex);
-        assert!(convert_specialized(&"s".into(), &pred).is_none());
-    }
-
-    #[test]
-    fn equal_one_of_with_partial_failure_returns_none() {
-        // Documented behavior: if any scalar in the IN-list fails to convert
-        // (e.g., AnyValue::Null), the whole predicate falls back to residual
-        // — pushing a partial set would be narrower than the user's actual
-        // predicate, which would silently drop rows.
-        use polars_core::prelude::DataType;
-        use polars_core::scalar::Scalar;
-        use polars_io::predicates::SpecializedColumnPredicate;
-        let pred = SpecializedColumnPredicate::EqualOneOf(
-            vec![
-                int32_scalar(1),
-                Scalar::new(DataType::Int32, AnyValue::Null),
-                int32_scalar(3),
-            ]
-            .into_boxed_slice(),
-        );
-        assert!(convert_specialized(&"a".into(), &pred).is_none());
+        assert!(temporal::decimal_scalar(0, 0, 256, Nullability::Nullable).is_none());
     }
 }

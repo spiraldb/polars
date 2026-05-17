@@ -43,10 +43,17 @@ uses _all_ of these properties — not just "Vortex as another Parquet".
 
 What this looks like in practice:
 
-- **Filter pushdown**: predicates that the optimizer extracts as `SpecializedColumnPredicate` (Equal
-  / Between / EqualOneOf / StartsWith / EndsWith) are translated to Vortex `Expression`s and handed
-  to `ScanBuilder::with_filter`. Inside Vortex, `LayoutReader::pruning_evaluation` consults per-zone
-  statistics and skips chunks that can't satisfy the predicate — _without decompressing them_.
+- **Filter pushdown**: an AExpr-direct convertor walks the predicate's `Arena<AExpr>` and emits Vortex
+  `Expression`s for the shapes Vortex can represent — column references, scalar literals, the six
+  comparison operators (`Eq`/`NotEq`/`Lt`/`LtEq`/`Gt`/`GtEq`), boolean combinators (`And`/`Or`/`Not`),
+  null checks (`IsNull`/`IsNotNull`), numeric addition (`Plus → checked_add`), same-kind `CAST`
+  (`Primitive↔Primitive` / `Bool↔Bool` / `Utf8↔Utf8` under `Strict` options), and struct field access
+  (`col.struct.field("inner")`). The Expression is handed to `ScanBuilder::with_filter`; inside
+  Vortex, `LayoutReader::pruning_evaluation` consults per-zone statistics and skips chunks that can't
+  satisfy the predicate — _without decompressing them_. Multiple type-safety gates (bitwise-vs-logical,
+  numeric-only Plus, kind-compatible CAST, same-PType comparison) refuse pushdown for shapes Vortex
+  would scan-time-error on; the multi-scan layer always re-applies the full predicate post-decode so
+  partial pushdown is always _safe_.
 - **Negative slice pushdown**: `lf.tail(N)` becomes `ScanBuilder::with_row_range(...)`, not "decode
   everything and take the last N". The file's row count comes from the footer (free).
 - **Segment cache reuse**: second and subsequent scans of the same file skip decompression for any
@@ -73,7 +80,10 @@ LazyFrame::scan_vortex(path, args)
                 │      with IOMetrics + with_concurrency_budget)
                 └─ begin_read(args):
                     projection  → vortex::expr::pack(get_item(...))
-                    predicate   → polars_to_vortex_predicate (ColumnPredicates)
+                    predicate   → builder.aexpr_filter (AExpr-direct convertor result
+                                  computed at IR-build time in lower_ir.rs; PR-2.6
+                                  cutover deleted the legacy
+                                  SpecializedColumnPredicate path)
                     pre_slice   → ScanBuilder::with_row_range
                     .into_array_stream() → Stream<ArrayRef>
                     for each chunk:
@@ -141,28 +151,34 @@ impl) → morsels are converted to Vortex `ArrayRef`s by the reverse C-ABI bridg
    so all `CloudOptions` semantics (auth, retry, region overrides, credential providers) are honored
    — the same way Parquet's cloud reads work. No buffer copy.
 
-4. **Filter pushdown via `SpecializedColumnPredicate`** ([`read/predicate.rs`]) — the Polars
-   optimizer already extracts single-column predicates into structured form:
-   `ColumnPredicates::predicates: PlHashMap<PlSmallStr, (PhysicalIoExpr, Option<SpecializedColumnPredicate>)>`.
-   We pattern-match on the specialized variant and emit Vortex `Expression`s:
+4. **AExpr-direct filter pushdown** (
+   [`polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs`](../polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs))
+   — walks the predicate's `Arena<AExpr>` at IR-build time in
+   [`polars-stream/src/physical_plan/lower_ir.rs`](../polars-stream/src/physical_plan/lower_ir.rs)
+   (the `FileScanIR::Vortex` arm). The resulting Vortex `Expression` (or `None`) is attached to
+   `VortexReaderBuilder.aexpr_filter` and consumed by `VortexFileReader::begin_read` →
+   `ScanBuilder::with_filter`. Coverage:
 
-   | Polars `SpecializedColumnPredicate` | Vortex `Expression`                                |
-   | ----------------------------------- | -------------------------------------------------- |
-   | `Equal(scalar)`                     | `eq(get_item(col, root()), lit(scalar))`           |
-   | `Between(lo, hi)`                   | `and(gt_eq(col, lo), lt_eq(col, hi))`              |
-   | `EqualOneOf(scalars)`               | `or_collect` of `eq(col, lit(s))` (all-or-nothing) |
-   | `StartsWith(bytes)`                 | `like(col, lit("prefix%"))` (wildcard-safe)        |
-   | `EndsWith(bytes)`                   | `like(col, lit("%suffix"))` (wildcard-safe)        |
-   | `RegexMatch(...)`                   | not pushed (Vortex `like` doesn't do regex)        |
+   | Polars `AExpr` shape                                | Vortex `Expression`                       | Gates                              |
+   | --------------------------------------------------- | ----------------------------------------- | ---------------------------------- |
+   | `Column(name)`                                      | `get_item(name, root())`                  | virtual-column refuse in lower_ir |
+   | `Literal(Scalar)`                                   | `lit(polars_scalar_to_vortex(...))`       | none                               |
+   | comparisons (Eq/NotEq/Lt/LtEq/Gt/GtEq)              | `eq`/`not_eq`/`lt`/`lt_eq`/`gt`/`gt_eq`   | pairwise-equal-PType + schema       |
+   | logical AND/OR (And/Or/LogicalAnd/LogicalOr)        | `and`/`or`                                | bitwise-vs-logical schema gate      |
+   | numeric addition (Plus)                             | `checked_add`                             | numeric + pairwise-equal-PType      |
+   | same-kind CAST (Strict only)                        | `cast(child, vortex_dtype)`               | source-kind + Strict-options gates  |
+   | struct field access (`col.struct.field("inner")`)   | `get_item(field_name, struct_expr)`       | schema-membership gate              |
+   | `IsNull` / `IsNotNull`                              | `is_null` / `is_not_null`                 | none                                |
+   | `Not`                                               | `not`                                     | boolean-only schema gate            |
 
-   `EqualOneOf` requires _every_ scalar in the IN-list to convert successfully — otherwise we leave
-   the whole predicate as residual. This prevents accidentally pushing a narrower predicate than the
-   user wrote.
-
-   Anything we can't push (multi-column predicates, arithmetic, regex, struct field access, etc.)
-   stays as a residual filter. The reader advertises `ReaderCapabilities::PARTIAL_FILTER`, so
-   Polars' multi-scan layer always re-applies the original full predicate post-decode. Result:
-   pushdown is always _safe_, just sometimes _partial_.
+   Pushdown is refused (returns `None` → residual) for unhandled shapes (Sort, Gather, Filter,
+   Agg, Ternary, AnonymousFunction, Over, Rolling, temporal extracts, etc.), for non-Strict
+   `CastOptions`, for cross-kind CAST, for cross-PType arithmetic/comparison, and for predicates
+   referencing hive partition columns or virtual columns (row_index, include_file_paths) at the
+   `lower_ir.rs` guard. The reader advertises `ReaderCapabilities::PARTIAL_FILTER`, so Polars'
+   multi-scan layer always re-applies the original full predicate post-decode. Result: pushdown
+   is always _safe_, just sometimes _partial_. Historical note: PR-2.6 deleted the previous
+   `SpecializedColumnPredicate`-derived path (a parallel fast path during PR-13.1–.5).
 
 ## Cargo features
 

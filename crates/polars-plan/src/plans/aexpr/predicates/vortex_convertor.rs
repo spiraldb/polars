@@ -1,12 +1,15 @@
 //! AExpr-direct convertor for Polars predicates → Vortex `Expression` (PR-13 path).
 //!
 //! Translates Polars [`AExpr`] trees into Vortex [`Expression`] trees for filter pushdown,
-//! walking the `Arena<AExpr>` directly instead of going through the pre-optimized
-//! [`polars_io::predicates::SpecializedColumnPredicate`] shapes that
-//! [`polars_vortex::read::predicate::polars_to_vortex_predicate`] consumes. This lets us
-//! handle predicates the optimizer doesn't pre-extract — multi-column comparisons,
-//! arithmetic in predicates, CAST in predicates, struct field access in predicates,
-//! temporal extracts — which today fall through as residual.
+//! walking the `Arena<AExpr>` directly. As of PR-2.6 (Option B → A cutover) this is the
+//! SOLE filter-pushdown path for Vortex scans; the legacy
+//! `polars_vortex::read::predicate::polars_to_vortex_predicate` (which consumed
+//! pre-extracted [`polars_io::predicates::SpecializedColumnPredicate`] shapes) was
+//! deleted in PR-2.6. The AExpr-direct path handles everything the legacy path handled
+//! plus shapes the optimizer doesn't pre-extract — multi-column comparisons, arithmetic
+//! in predicates, CAST in predicates, struct field access in predicates. Temporal
+//! extracts remain residual until upstream Vortex exposes the relevant builders (see
+//! plan Deferred work).
 //!
 //! ## Why this lives in `polars-plan` (not `polars-vortex`)
 //!
@@ -68,9 +71,9 @@
 //! arena is live alongside the predicate `ExprIR`. The resulting `Expression` is attached
 //! to the Vortex `VortexReaderBuilder.aexpr_filter` field via a Vortex-specific side
 //! channel (parallel to how `FileScanIR::Vortex::metadata` and the (PR-2.0) `segment_cache`
-//! thread). `VortexFileReader::begin_read` prefers `aexpr_filter` over the legacy
-//! `polars_to_vortex_predicate` path; PR-2.6 will delete the legacy path once the
-//! convertor is a strict superset of `SpecializedColumnPredicate` coverage.
+//! thread). `VortexFileReader::begin_read` uses `aexpr_filter` directly. PR-2.6 deleted
+//! the legacy `polars_to_vortex_predicate` (`SpecializedColumnPredicate`-derived) path;
+//! the AExpr-direct convertor is now the sole filter-pushdown path.
 
 use polars_core::chunked_array::cast::CastOptions;
 use polars_core::prelude::DataType;

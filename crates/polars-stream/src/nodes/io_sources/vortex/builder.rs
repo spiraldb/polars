@@ -24,14 +24,14 @@ pub struct VortexReaderBuilder {
     /// streaming source falls back to `options.segment_cache.resolve()` (e.g., user-supplied
     /// schema path where no postscript read happened at IR-build).
     pub segment_cache: Option<VortexSegmentCacheRef>,
-    /// AExpr-direct convertor result (PR-13.2): when the predicate translated cleanly via
-    /// `polars_plan::plans::aexpr::predicates::vortex_convertor::aexpr_to_vortex_expression`,
+    /// AExpr-direct convertor result (PR-13.2, sole pushdown path as of PR-2.6): when
+    /// the predicate translated cleanly via
+    /// `polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression`,
     /// the Vortex `Expression` is captured here at IR-build time (where we still have
-    /// `expr_arena` access). At `begin_read` time we prefer this over the
-    /// `polars_to_vortex_predicate` (`SpecializedColumnPredicate`-derived) path so
-    /// arithmetic/CAST/struct predicates that the legacy fast path cannot represent still
-    /// push down. The multi-scan layer reapplies the full predicate post-decode regardless
-    /// (we advertise `PARTIAL_FILTER`), so it is safe to push only a subset.
+    /// `expr_arena` access). `VortexFileReader::begin_read` uses it directly. The
+    /// multi-scan layer reapplies the full predicate post-decode regardless (we
+    /// advertise `PARTIAL_FILTER`), so it is safe to push only a subset; shapes the
+    /// convertor returns `None` for fall through to no-pushdown + post-decode reapply.
     pub aexpr_filter: Option<VortexExpression>,
     pub io_metrics: std::sync::OnceLock<Arc<IOMetrics>>,
 }
@@ -52,9 +52,12 @@ impl FileReaderBuilder for VortexReaderBuilder {
     fn reader_capabilities(&self) -> ReaderCapabilities {
         use ReaderCapabilities as RC;
         // The multi-scan layer reapplies the full predicate post-decode, so PARTIAL_FILTER
-        // is always safe; FULL_FILTER would require the convertor to consume every shape
-        // it sees (out-of-scope while we lean on `SpecializedColumnPredicate`).
-        // EXTERNAL_FILTER_MASK would need Vortex `Selection` bitmap plumbing.
+        // is always safe; FULL_FILTER would require the AExpr-direct convertor to be a
+        // strict superset of every AExpr predicate Polars constructs (still out of scope:
+        // the convertor returns None for unhandled shapes — Sort/Gather/Filter/Agg/Ternary/
+        // AnonymousFunction/Over/Rolling/temporal extracts/etc. — and the multi-scan
+        // reapply handles them). EXTERNAL_FILTER_MASK would need Vortex `Selection` bitmap
+        // plumbing.
         RC::ROW_INDEX
             | RC::PRE_SLICE
             | RC::NEGATIVE_PRE_SLICE
@@ -88,10 +91,10 @@ impl FileReaderBuilder for VortexReaderBuilder {
             // Threaded resolved cache for the data read; `None` triggers fallback resolve()
             // inside `VortexFileReader::initialize`. Same pattern as `footer` above.
             segment_cache: self.segment_cache.clone(),
-            // AExpr-direct convertor result; preferred over `polars_to_vortex_predicate` in
-            // `begin_read`. Shared across all sources in a multi-source scan — the
-            // convertor result is purely a function of the (predicate, schema) pair, both
-            // of which are constant across the scan's sources.
+            // AExpr-direct convertor result (sole pushdown path as of PR-2.6). Shared
+            // across all sources in a multi-source scan — the convertor result is
+            // purely a function of the (predicate, schema) pair, both of which are
+            // constant across the scan's sources.
             aexpr_filter: self.aexpr_filter.clone(),
             io_metrics: OptIOMetrics(self.io_metrics.get().cloned()),
             init_data: None,
