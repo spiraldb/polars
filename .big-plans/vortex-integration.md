@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: executing
+status: phase-boundary
 branch: vortex-integration
 planning_sub_flow: null
 current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
 phase_index: 2
 current_pr: null
-pr_index: 5
+pr_index: 7
 outstanding_must_fix: 0
 deferred_items_total: 13
 last_user_touchpoint: 2026-05-16T20:40:00Z
 last_user_touchpoint_what: "started PR-2.2 (PR-13.2 — wire convertor at lower_ir.rs:766 + arithmetic ops + bitwise-vs-logical schema gate per cycle-1 should-fix)"
-subagent_invocations_this_pr: 2
-subagent_invocations_total: 33
-review_cycles_this_pr: 1
+subagent_invocations_this_pr: 4
+subagent_invocations_total: 37
+review_cycles_this_pr: 2
 phase_entry_sha: fc43d1b8d
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 8245aaf48
+last_commit: 3fe829c42
 ```
 
 ## Context
@@ -413,6 +413,78 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
 - **Deferred items**: 0 new (cumulative `deferred_items_total: 6` unchanged).
 - **Surprises during fix-application**:
   - **The dirty edits the prior session left behind WERE the rustfmt fix** — auto-classifier UI-language ("cosmetic formatter changes") obscured their load-bearing role; the resumption session initially discarded them before checking CI, then had to re-derive via `cargo fmt --all`. Process lesson: at any phase-boundary resume, check `gh pr checks` BEFORE proposing to discard a prior session's uncommitted edits. The same-shape recovery this time was trivial (`cargo fmt` restored byte-for-byte) but the framing mistake is the bug to learn from.
+
+### PR-2.6: PR-13.6 Delete SpecializedColumnPredicate fast path (Option B → A cutover) (3 PR-work commits, ending at `3fe829c42` — accepted cycle 2)
+
+- **Scope shipped (commit 1 — `3956f17c5`)**: deleted the legacy
+  `polars_to_vortex_predicate` + `convert_specialized` + `bytes_to_like_literal`
+  functions from `crates/polars-vortex/src/read/predicate.rs` (~244 net LoC removed:
+  310 deletions, 66 insertions). Preserved `polars_scalar_to_vortex` + the `temporal`
+  submodule + their unit tests. Removed the fallback call in `polars-stream/src/nodes/
+  io_sources/vortex/mod.rs::begin_read` so `aexpr_filter` is now the sole pushdown
+  source. Updated `builder.rs` doc-comments. Doc-swept the convertor's module-level
+  block and the polars-vortex README. Added 2 new Decimal regression tests (round-trip
+  + overflow). Test count: 8 predicate.rs tests (was 11; -3 LIKE tests deleted +
+  2 Decimal added net -1); 58 convertor unit tests (unchanged); `cargo check -p polars
+  --features vortex` clean.
+
+- **Cycle-1 review (2-vote `pr-2`, both REJECT high-confidence)**: silent
+  pushdown coverage regression for 4 shapes the deleted legacy path handled —
+  `is_between(lo, hi)`, `is_in([...])`, `str.starts_with(prefix)`,
+  `str.ends_with(suffix)`. The AExpr-direct convertor returns `None` for these
+  via the `_ => None` arm; correctness preserved via `PARTIAL_FILTER` reapply but
+  perf regression on the lost-zone-pruning path. 5 must-fix items: MF-001 (IsIn),
+  MF-002 (StartsWith/EndsWith), MF-003 (IsBetween), MF-004 (README contradictions),
+  MF-005 (lower_ir.rs stale comments).
+
+- **Cycle-1 must-fix items addressed in commit 2 — `c213ebe4c`** (documentation-and-defer path):
+  - **MF-001/002/003**: formal Deferred-work entry "PR-2.6 cutover-lost pushdown
+    shapes" enumerates the 4 shapes with AExpr matchers + LoC estimates (~65 LoC
+    total + tests) + resolution path. The deferral rationale: PR-2.6's scope is
+    deletion, not new arm work; the lost shapes belong in a follow-up PR.
+    `deferred_items_total: 13` (was 12).
+  - **MF-002 (README)**: coordinated sweep — coverage table rebuilt around
+    AExpr-direct shapes (`==`/`!=`/`<`/etc. + `and/or/not` + `is_null/is_not_null`
+    + Plus arithmetic + same-kind CAST + struct field access ✅; is_between/is_in/
+    starts_with/ends_with/temporal-extracts/non-Strict-CAST/cross-kind-CAST
+    ❌ residual). "What works today" + "Known limits" sections updated to agree
+    with the new table. "Crate layout" block: predicate.rs's role updated to
+    "polars_scalar_to_vortex (Scalar → VortexScalar)".
+  - **MF-004 (predicate.rs doc-block)**: replaced internally-contradictory
+    "handles every shape the legacy path handled (...StartsWith/EndsWith NOT YET...)"
+    paragraph with an explicit "Coverage parity" section.
+  - **MF-005 (lower_ir.rs)**: rewrote in-arm comment block to describe current
+    runtime (no fallback exists; convertor's `None` means no pushdown +
+    multi-scan reapply).
+
+- **Cycle-2 review (2-vote `pr-2`, both ACCEPT high-confidence)** — zero
+  must-fix, 2 nits. Cycle-2 verdict: **ACCEPT**.
+
+- **Cycle-2 N-CYCLE2-001 (path-regression nit, applied in commit 3 — `3fe829c42`)**:
+  the cycle-1 fix's "canonical path" change actually regressed — `aexpr` module
+  is `pub(crate)`, the externally-resolvable path is via the `pub use aexpr::*`
+  glob re-export at `plans/mod.rs:31`. Reverted both occurrences in builder.rs
+  and predicate.rs doc-comments + added a 1-line clarification.
+
+- **Cycle-2 N-CYCLE2-002 (4 sentinel refuse-tests for deferred shapes)**:
+  deferred per reviewer recommendation — belongs in the follow-up PR that ships
+  the actual arms.
+
+- **Final test count**: 63 convertor unit tests + 8 polars-vortex predicate tests
+  (was 11 pre-PR-2.6; -3 LIKE tests + 2 Decimal regression tests = net -1).
+  No new Python e2e tests.
+- **Final confidence**: high. Cycle-2 reviewers accept high-confidence; Phase 2
+  exit criterion (b) "documented as deliberately deferred" satisfied by the new
+  Deferred-work entry.
+- **Surprises during implementation**:
+  - **The cycle-1 reviewers caught a real Phase-2-exit-criterion issue via H4**:
+    deletion PRs can silently regress coverage. The fix-attention pattern surfaced
+    this; the cycle-1 reject was correct.
+  - **Cycle-2 caught my own cycle-1 "fix" regression**: I inserted `aexpr::` into
+    doc-comments thinking it was the canonical path, but it's `pub(crate)`. The
+    pre-fix path WAS correct via the re-export. Process lesson: when "fixing" a
+    canonical-path doc-comment, verify the cited path actually resolves from
+    external crates (e.g., grep for an existing `use` of the path).
 
 ### PR-2.5: PR-13.5 Temporal extracts — SLIPPED to Deferred work (Vortex op unavailable at pinned SHA)
 
