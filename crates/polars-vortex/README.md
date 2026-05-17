@@ -230,15 +230,22 @@ Standard Polars `storage_options=` — credentials, retry config, endpoint overr
 | Projection (column subset)                             | ✅                              | `polars Projection` → `vortex::expr::pack(get_item(...))`                              |
 | Slice (positive)                                       | ✅                              | `Slice::Positive` → `ScanBuilder::with_row_range`                                      |
 | Slice (negative, e.g. `.tail(N)`)                      | ✅                              | `restrict_to_bounds(row_count)` (footer-cached row count)                              |
-| Filter — `==`, `Between`, `is_in`                      | ✅                              | `SpecializedColumnPredicate` → Vortex `Expression`                                     |
-| Filter — `starts_with`, `ends_with`                    | ✅                              | LIKE pattern (wildcard-safe)                                                           |
-| Filter — temporal (`Date`, `Datetime`, `Time`) scalars | ✅ (when `dtype-*` features on) | Vortex Date/Time/Timestamp extension scalars                                           |
-| Filter — `Decimal` scalars                             | ✅ (when `dtype-decimal` on)    | Vortex `DecimalValue::I128`                                                            |
+| Filter — `==` / `!=` / `<` / `<=` / `>` / `>=`         | ✅                              | AExpr-direct convertor → `eq`/`not_eq`/`lt`/`lt_eq`/`gt`/`gt_eq` (pairwise-PType gate) |
+| Filter — `and` / `or` / `not`                          | ✅                              | AExpr-direct convertor → `and`/`or`/`not` (bitwise-vs-logical schema gate)             |
+| Filter — `is_null` / `is_not_null`                     | ✅                              | AExpr-direct convertor → `is_null`/`is_not_null`                                       |
+| Filter — arithmetic (`col + 1 > 5`)                    | ✅                              | AExpr-direct convertor → `checked_add` (numeric + pairwise-PType gate)                 |
+| Filter — `CAST(col, target)` (Strict, same-kind)       | ✅                              | AExpr-direct convertor → `cast` (Primitive↔Primitive, Bool↔Bool, Utf8↔Utf8)            |
+| Filter — struct field access                           | ✅                              | AExpr-direct convertor → `get_item(field, struct_expr)` (schema-membership gate)       |
+| Filter — `is_between(lo, hi)`                          | ❌ residual                     | Deferred — PR-2.6 cutover-lost shape; see Deferred work in `.big-plans/`               |
+| Filter — `is_in([...])`                                | ❌ residual                     | Deferred — PR-2.6 cutover-lost shape; see Deferred work in `.big-plans/`               |
+| Filter — `starts_with` / `ends_with`                   | ❌ residual                     | Deferred — PR-2.6 cutover-lost shape; see Deferred work in `.big-plans/`               |
+| Filter — temporal extracts (`col.dt.year()`)           | ❌ residual                     | Deferred (PR-2.5 slip) — Vortex `datetime_parts` op unavailable at pinned SHA          |
+| Filter — non-Strict CAST (`NonStrict` / `Overflowing`) | ❌ residual                     | Polars overflow→null/wrap diverges from Vortex fail-on-overflow                         |
+| Filter — cross-kind CAST (Primitive↔Utf8 etc.)         | ❌ residual                     | Vortex per-array `CastKernel` is strictly within-kind                                  |
+| Filter — temporal scalar literals (Date/Datetime/Time) | ✅ (when `dtype-*` features on) | Vortex Date/Time/Timestamp extension scalars                                           |
+| Filter — `Decimal` scalar literals                     | ✅ (when `dtype-decimal` on)    | Vortex `DecimalValue::I128`                                                            |
 | Filter — `Duration` scalars                            | ❌ residual                     | Vortex has no Duration extension dtype yet                                             |
 | Filter — regex                                         | ❌ residual                     | Vortex `like` doesn't do regex                                                         |
-| Filter — arithmetic (`col + 1 > 5`)                    | ❌ residual                     | AExpr traversal not yet wired (PR-13)                                                  |
-| Filter — `CAST(col, ...)`                              | ❌ residual                     | AExpr traversal (PR-13)                                                                |
-| Filter — struct field access                           | ❌ residual                     | AExpr traversal (PR-13)                                                                |
 | Zone-level pruning                                     | ✅                              | Vortex's `LayoutReader::pruning_evaluation` when given any filter                      |
 | Hive partitioning                                      | ✅ (free)                       | `UnifiedScanArgs::hive_options`                                                        |
 | Schema evolution                                       | ✅ (free)                       | `UnifiedScanArgs::{cast_columns_policy, missing_columns_policy, extra_columns_policy}` |
@@ -261,7 +268,7 @@ crates/polars-vortex/
     │   ├── options.rs               # VortexScanOptions, VortexCacheMode (with resolve())
     │   ├── schema.rs                # Vortex DType → polars-arrow ArrowSchema walker
     │   ├── read_at.rs               # PolarsInstrumentedVortexReadAt decorator
-    │   ├── predicate.rs             # ColumnPredicates → Vortex Expression
+    │   ├── predicate.rs             # polars_scalar_to_vortex (Scalar → VortexScalar)
     │   └── array_bridge.rs          # upstream RecordBatch → DataFrame via C-ABI
     └── write/
         ├── mod.rs
@@ -372,9 +379,12 @@ pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
 - ✅ `pl.scan_vortex(...).tail(N).collect()` — negative slice pushed via the footer's row count
 - ✅ `df.write_vortex(path)` and `lf.sink_vortex(path)` (local AND `s3://`/`gs://`/`az://`)
 - ✅ `lf.sink_vortex(pl.PartitionBy("base/", by=[...]))` — partitioned writes
-- ✅ Filter pushdown for Equal / Between / EqualOneOf / StartsWith / EndsWith, and (when built with
-  `dtype-date` / `dtype-datetime` / `dtype-time` / `dtype-decimal`) for Date / Datetime / Time /
-  Decimal scalar literals.
+- ✅ Filter pushdown for the comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), boolean
+  combinators (`and`/`or`/`not`), null checks (`is_null`/`is_not_null`), Plus arithmetic
+  (`col + 1`), same-kind `CAST` (Strict only), and struct field access — all via the AExpr-direct
+  convertor (`polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs`). Multi-column
+  predicates compose freely. (When built with `dtype-date` / `dtype-datetime` / `dtype-time` /
+  `dtype-decimal`, Date / Datetime / Time / Decimal scalar literals work as comparison operands.)
 - ✅ Multiple Vortex files in one scan (multi-file glob) via `UnifiedScanArgs`
 - ✅ Hive partitioning on read via `UnifiedScanArgs::hive_options`
 - ✅ Process-global decompressed-segment cache with `pl.set_vortex_cache_bytes(N)`
@@ -383,9 +393,19 @@ pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
 
 ## Known limits / pending follow-ups
 
-- **Aggressive predicate pushdown** (arithmetic, CAST, struct field access, temporal extracts) is
-  not yet wired — these stay as residual filters. Implementing them requires walking AExpr at
-  IR-build time instead of relying on `SpecializedColumnPredicate`.
+- **Cutover-lost pushdown shapes** (PR-2.6 Option B → A cutover): `is_between(lo, hi)`,
+  `is_in([...])`, `str.starts_with(prefix)`, and `str.ends_with(suffix)` were handled by the
+  deleted legacy `SpecializedColumnPredicate`-derived path but are not yet in the AExpr-direct
+  convertor. They fall through to residual; correctness preserved via `PARTIAL_FILTER` reapply,
+  but no zone-pruning benefit. Tracked in Deferred work; reasonable next-PR scope.
+- **Temporal extracts** (`col.dt.year()`, `col.dt.month()`, etc.) — Vortex 0.70.0 doesn't expose
+  `datetime_parts` / `year` / `month` / `day` builders in its public expr API. PR-2.5 slipped to
+  Deferred work; reasonable to revisit when upstream Vortex exposes them or when polars-vortex
+  bumps its pinned version.
+- **`Duration` scalar literals** — Vortex has no Duration extension dtype.
+- **Non-Strict CAST** (`CastOptions::NonStrict` / `Overflowing`) and **cross-kind CAST**
+  (Primitive↔Bool/Utf8) — Vortex's per-array `CastKernel` semantics don't match Polars's
+  silent-or-null overflow behavior; convertor refuses to preserve always-safe-fallback contract.
 - **File-level optimizer stats** (whole-file pruning at IR time) are not wired. Vortex's zone-level
   pruning already runs inside the scan, so this is a modest optimization — useful mainly for very
   large multi-file scans where opening every file at IR time is acceptable.

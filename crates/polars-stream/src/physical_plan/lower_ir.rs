@@ -770,33 +770,34 @@ pub fn lower_ir(
                         metadata: first_metadata,
                         segment_cache,
                     } => {
-                        // PR-13.2 AExpr-direct pushdown: when a predicate exists and
-                        // `push_predicate` is on, try the convertor. The result rides on
-                        // the builder so `VortexFileReader::begin_read` can prefer it
-                        // over the legacy `SpecializedColumnPredicate` path. We are still
-                        // at IR-build time here, so we have `expr_arena` access — which
-                        // we lose by the time `begin_read` runs (where only
-                        // `Arc<dyn PhysicalIoExpr>` survives). When the convertor returns
-                        // `None` (unhandled AExpr shape), the streaming source falls back
-                        // to the legacy path automatically.
+                        // PR-13.2 AExpr-direct pushdown (sole pushdown path as of PR-2.6):
+                        // when a predicate exists and `push_predicate` is on, try the
+                        // convertor. The result rides on the builder; `VortexFileReader::
+                        // begin_read` uses it directly. We are still at IR-build time
+                        // here, so we have `expr_arena` access — which we lose by the
+                        // time `begin_read` runs (where only `Arc<dyn PhysicalIoExpr>`
+                        // survives). When the convertor returns `None` (unhandled AExpr
+                        // shape), `aexpr_filter` stays `None` and no filter pushes down;
+                        // the multi-scan layer reapplies the predicate post-decode via
+                        // the `PARTIAL_FILTER` capability so correctness is preserved.
                         //
-                        // Virtual-column guard (cycle-1 must-fix M1 from gauntlet, extended
-                        // for cycle-2 C2-001): `file_info.schema` "Does not include logical
-                        // columns like `include_file_path` and row index" but DOES include
-                        // hive columns (plans/schema.rs:42-43). The convertor's `AExpr::Column`
-                        // arm emits a bare `get_item(name, root())` with no schema-membership
-                        // check, so a predicate referencing a hive column / row_index /
-                        // include_file_paths would emit a Vortex reference to a column that
-                        // doesn't exist in the Vortex file's data — Vortex bails at
-                        // `into_array_stream`. Refuse convertor pushdown entirely when ANY of
-                        // these are in play; the legacy `polars_to_vortex_predicate` fast
-                        // path is virtual-column-safe because it consumes the already-
-                        // virtual-stripped `ScanIOPredicate::column_predicates` (built via
-                        // `polars-mem-engine/scan_predicate/functions::create_scan_predicate`).
-                        // A future PR can do a per-column file-vs-virtual split (mirroring
-                        // `create_scan_predicate`'s `hive_predicate` extraction) so
-                        // hive-partitioned / row-indexed Vortex scans still benefit from
-                        // convertor pushdown — see Deferred-work.
+                        // Virtual-column guard (PR-2.2 cycle-1 must-fix M1 + PR-2.2
+                        // cycle-2 C2-001 extension): `file_info.schema` "Does not include
+                        // logical columns like `include_file_path` and row index" but
+                        // DOES include hive columns (plans/schema.rs:42-43). The
+                        // convertor's `AExpr::Column` arm emits a bare `get_item(name,
+                        // root())` with no schema-membership check, so a predicate
+                        // referencing a hive column / row_index / include_file_paths
+                        // would emit a Vortex reference to a column not in the file's
+                        // data — Vortex bails at `into_array_stream`. Refuse convertor
+                        // pushdown entirely when ANY of these are in play; the multi-scan
+                        // reapply handles correctness for the no-pushdown path. A future
+                        // PR can do a per-column file-vs-virtual split (mirroring
+                        // `polars-mem-engine/scan_predicate/functions::create_scan_predicate`'s
+                        // `hive_predicate` extraction) so hive-partitioned / row-indexed
+                        // Vortex scans still benefit from convertor pushdown — see
+                        // Deferred work entry "Virtual-column-partitioned Vortex scans
+                        // don't benefit from AExpr convertor pushdown".
                         let aexpr_filter = if options.push_predicate
                             && hive_parts.is_none()
                             && unified_scan_args.row_index.is_none()

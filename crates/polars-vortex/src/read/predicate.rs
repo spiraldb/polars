@@ -1,16 +1,34 @@
 //! Polars `Scalar` → Vortex `VortexScalar` conversion (filter pushdown literal helper).
 //!
-//! **PR-2.6 Option B → A cutover (2026-05-16)**: this module USED to host the legacy
-//! `SpecializedColumnPredicate`-derived filter-pushdown path (`polars_to_vortex_predicate`,
-//! `convert_specialized`, `bytes_to_like_literal` for LIKE prefix/suffix). PR-2.6 deletes
-//! that path entirely — the AExpr-direct convertor at
-//! `polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression`
+//! **PR-2.6 Option B → A cutover**: this module USED to host the legacy
+//! `SpecializedColumnPredicate`-derived filter-pushdown path
+//! (`polars_to_vortex_predicate`, `convert_specialized`, `bytes_to_like_literal` for
+//! LIKE prefix/suffix). PR-2.6 deletes that path entirely — the AExpr-direct convertor
+//! at `polars_plan::plans::aexpr::predicates::vortex_convertor::aexpr_to_vortex_expression`
 //! (introduced in PR-2.1, wired at `polars-stream/src/physical_plan/lower_ir.rs` in
-//! PR-2.2) is now the sole filter-pushdown path. The convertor handles every shape the
-//! legacy path handled (Eq / Lt / Gt / Between via `Lt + Gt + And` / EqualOneOf via
-//! `Eq` + `Or` / StartsWith and EndsWith are NOT YET in the convertor — see Deferred
-//! work) plus everything the legacy path did not (multi-column predicates, arithmetic,
-//! CAST, struct field access).
+//! PR-2.2) is the sole filter-pushdown path going forward.
+//!
+//! ## Coverage parity with the deleted legacy path
+//!
+//! The AExpr-direct convertor handles:
+//! - Scalar comparisons (Eq / NotEq / Lt / LtEq / Gt / GtEq) — direct mapping
+//! - Boolean combinators (And / Or / Not / IsNull / IsNotNull) — direct mapping
+//! - Plus arithmetic (numeric, same-PType only)
+//! - CAST (same-kind: Primitive↔Primitive, Bool↔Bool, Utf8↔Utf8; Strict only)
+//! - Struct field access (`col.struct.field("inner")`)
+//! - Multi-column predicates (everything composable via the above)
+//!
+//! Shapes the legacy path covered that the AExpr-direct convertor does NOT yet handle:
+//! - `is_between(lo, hi)` (`AExpr::Function::Boolean(IsBetween)`)
+//! - `is_in([...])` (`AExpr::Function::Boolean(IsIn)`)
+//! - `str.starts_with(prefix)` / `str.ends_with(suffix)` (`AExpr::Function::StringExpr(...)`)
+//!
+//! These four shapes are tracked as Deferred work items
+//! (`.big-plans/vortex-integration.md` — "PR-2.6 cutover-lost pushdown shapes"). They
+//! correctly fall through to residual via the convertor's `_ => None` arm; correctness
+//! is preserved because the multi-scan layer reapplies the full predicate post-decode
+//! (`PARTIAL_FILTER` capability). The loss is a **perf regression only** — these
+//! predicates produce correct results but don't benefit from Vortex zone-pruning.
 //!
 //! ## What this module still does
 //!
@@ -32,11 +50,12 @@ use vortex::dtype::Nullability;
 /// AExpr-direct convertor's `?`-propagation drops the enclosing predicate to residual on
 /// `None`.
 ///
-/// Scalars are constructed with `Nullability::Nullable`. The optimizer's per-column
-/// predicates don't carry the column's nullability; Vortex's type system unifies
-/// nullability when comparing against a `NonNullable` column, so this is correct but
-/// may reduce pruning effectiveness if Vortex's pruning evaluator is stricter than its
-/// comparison evaluator.
+/// Scalars are constructed with `Nullability::Nullable`. The AExpr-direct convertor's
+/// caller (`AExpr::Literal(LiteralValue::Scalar(_))`) doesn't track which column the
+/// literal will be compared against, so we cannot specialize on the column's
+/// nullability. Vortex's type system unifies nullability when comparing against a
+/// `NonNullable` column, so this is correct but may reduce pruning effectiveness if
+/// Vortex's pruning evaluator is stricter than its comparison evaluator.
 pub fn polars_scalar_to_vortex(scalar: &polars_core::scalar::Scalar) -> Option<VortexScalar> {
     let nul = Nullability::Nullable;
     Some(match scalar.value() {
