@@ -224,6 +224,38 @@ pub fn aexpr_to_vortex_expression(
                     return None;
                 }
             }
+            // Comparison pairwise-equal-PType gate (PR-2.4 cycle-2 should-fix
+            // F-COMPARE-CROSS-PTYPE-001 — same bug class as the Plus gate above;
+            // surfaced by the cycle-1 fresh reviewer applying H4 to find the sibling).
+            //
+            // Vortex's `Binary::return_dtype` (`vortex-array/src/scalar_fn/fns/binary/mod.rs:130-136`)
+            // `vortex_bail!`s with "Cannot compare different DTypes" for comparison ops
+            // when `!lhs.eq_ignore_nullability(rhs) && !lhs.is_extension() &&
+            // !rhs.is_extension()`. Extension types (Date, Datetime, Time, Duration) are
+            // exempt — Vortex permits Date<->Datetime comparison and similar. For
+            // non-extension cross-PType operands (Int32 vs Int64, etc.) we refuse
+            // pushdown to preserve the always-SAFE-fallback contract. TYPE_COERCION
+            // normally inserts a Cast that aligns dtypes; this gate covers the
+            // type_coercion-off path. Note: extension-type Polars dtypes aren't in
+            // `is_vortex_numeric_dtype` and don't currently route through this gate's
+            // dtype-resolution shapes anyway, so we don't need to special-case extension
+            // here.
+            if matches!(
+                op,
+                Operator::Eq
+                    | Operator::NotEq
+                    | Operator::Lt
+                    | Operator::LtEq
+                    | Operator::Gt
+                    | Operator::GtEq
+            ) {
+                let Some(s) = schema else { return None };
+                let lhs_dt = resolve_inner_dtype(*left, arena, s)?;
+                let rhs_dt = resolve_inner_dtype(*right, arena, s)?;
+                if lhs_dt != rhs_dt {
+                    return None;
+                }
+            }
             let lhs = aexpr_to_vortex_expression(*left, arena, schema)?;
             let rhs = aexpr_to_vortex_expression(*right, arena, schema)?;
             Some(match op {
@@ -364,9 +396,9 @@ pub fn aexpr_to_vortex_expression(
         },
 
         // --- unsupported shapes (residual) ---
-        // StructField → PR-2.4. Other Function variants (temporal etc.) → PR-2.5.
-        // Sort/Gather/Filter/Agg/Ternary/AnonymousFunction/Over/Rolling etc. all fall
-        // through to residual unconditionally.
+        // Other Function variants (temporal etc.) → PR-2.5. Sort/Gather/Filter/Agg/
+        // Ternary/AnonymousFunction/Over/Rolling etc. all fall through to residual
+        // unconditionally.
         _ => None,
     }
 }
@@ -433,7 +465,7 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
         AExpr::Cast {
             dtype: target_pl, ..
         } => Some(target_pl.clone()),
-        AExpr::BinaryExpr { left, op, .. } => match op {
+        AExpr::BinaryExpr { left, op, right } => match op {
             Operator::Eq
             | Operator::NotEq
             | Operator::Lt
@@ -444,11 +476,16 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
             | Operator::NotEqValidity
             | Operator::LogicalAnd
             | Operator::LogicalOr => Some(DataType::Boolean),
-            // Plus output dtype matches the operand dtypes — but the Plus arm in the
-            // convertor enforces lhs == rhs (the pairwise-equal-PType gate), so it's
-            // safe to delegate to either side here. Recursive: nested Plus chains
-            // (a + b) + c resolve correctly.
-            Operator::Plus => resolve_inner_dtype(*left, arena, schema),
+            // Plus output dtype matches the operand dtypes. Self-contained verification
+            // (PR-2.4 cycle-2 should-fix F-RESOLVE-PLUS-LHS-DELEGATION-001): don't rely
+            // on the convertor's Plus arm gate having fired — verify lhs == rhs here so
+            // any future caller of `resolve_inner_dtype` gets a trustworthy answer.
+            // Recursive: nested Plus chains `(a + b) + c` resolve correctly.
+            Operator::Plus => {
+                let l = resolve_inner_dtype(*left, arena, schema)?;
+                let r = resolve_inner_dtype(*right, arena, schema)?;
+                if l == r { Some(l) } else { None }
+            },
             _ => None,
         },
         AExpr::Function {
@@ -712,13 +749,20 @@ mod tests {
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
     }
 
+    // The comparison tests below pass `Some(&schema_a_b_int32())` because the
+    // PR-2.4 cycle-2 should-fix F-COMPARE-CROSS-PTYPE-001 added a comparison
+    // pairwise-equal-PType gate: comparisons require schema to verify operand
+    // dtypes match (mirroring the Plus gate's discipline). Without schema, the
+    // gate conservatively refuses — see `shape_eq_without_schema_returns_none`.
+
     #[test]
     fn shape_eq() {
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::Eq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -727,7 +771,8 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::NotEq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -736,7 +781,8 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::Lt, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -745,7 +791,8 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::LtEq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -754,7 +801,8 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::Gt, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -763,7 +811,51 @@ mod tests {
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
         let n = binop(&mut arena, c, Operator::GtEq, l);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Comparison without schema → conservative refuse (PR-2.4 cycle-2 comparison
+    /// pairwise-equal-PType gate from F-COMPARE-CROSS-PTYPE-001).
+    #[test]
+    fn shape_eq_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a");
+        let l = lit_i32(&mut arena, 42);
+        let n = binop(&mut arena, c, Operator::Eq, l);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// Comparison on cross-PType operands (`Int32 == Int64`) — refused by the
+    /// pairwise-equal-PType gate. Without the gate, Vortex's `Binary::return_dtype`
+    /// would `vortex_bail!` at scan-time. PR-2.4 cycle-2 F-COMPARE-CROSS-PTYPE-001.
+    #[test]
+    fn shape_eq_cross_ptype_returns_none() {
+        use polars_core::prelude::AnyValue;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a"); // Int32
+        let l = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(42),
+        ))));
+        let n = binop(&mut arena, c, Operator::Eq, l);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Comparison on cross-PType (`Int32 < Float64`) — refused by the gate.
+    #[test]
+    fn shape_lt_cross_ptype_returns_none() {
+        use polars_core::prelude::AnyValue;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "a"); // Int32
+        let l = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Float64,
+            AnyValue::Float64(1.0),
+        ))));
+        let n = binop(&mut arena, c, Operator::Lt, l);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
     /// Helper: build a small schema with Int32 columns `a` and `b` for And/Or tests.
@@ -842,6 +934,8 @@ mod tests {
     fn shape_logical_and() {
         // LogicalAnd is the short-circuit form Polars uses internally for boolean
         // simplification; it should map to vortex::expr::and same as Operator::And.
+        // Inner Eq/Lt comparisons fire the PR-2.4 cycle-2 comparison gate, so schema
+        // is required.
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let l = lit_i32(&mut arena, 42);
@@ -850,7 +944,8 @@ mod tests {
         let l2 = lit_i32(&mut arena, 7);
         let right = binop(&mut arena, c2, Operator::Lt, l2);
         let n = binop(&mut arena, left, Operator::LogicalAnd, right);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -863,7 +958,8 @@ mod tests {
         let l2 = lit_i32(&mut arena, 7);
         let right = binop(&mut arena, c2, Operator::Lt, l2);
         let n = binop(&mut arena, left, Operator::LogicalOr, right);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     #[test]
@@ -1063,6 +1159,37 @@ mod tests {
         ))));
         let n = binop(&mut arena, a, Operator::Plus, one_i64);
         let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Plus on Int + Float — both numeric, different PType. Refused by pairwise gate.
+    /// (PR-2.4 cycle-2 should-fix F-PLUS-CROSS-FLOAT-INT-TEST-001.)
+    #[test]
+    fn shape_plus_int_plus_float_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a"); // Int32
+        use polars_core::prelude::AnyValue;
+        let one_f64 = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Float64,
+            AnyValue::Float64(1.0),
+        ))));
+        let n = binop(&mut arena, a, Operator::Plus, one_f64);
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Plus on UInt + Int — both numeric, different signedness. Refused by pairwise gate.
+    /// (PR-2.4 cycle-2 nit N2.)
+    #[test]
+    fn shape_plus_uint_plus_int_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a"); // UInt32 per this test's schema
+        use polars_core::prelude::AnyValue;
+        let one_i32 = lit_i32(&mut arena, 1);
+        let n = binop(&mut arena, a, Operator::Plus, one_i32);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::UInt32);
+        let _ = AnyValue::UInt32(1); // explicit construction of the literal type checked elsewhere
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
@@ -1391,9 +1518,12 @@ mod tests {
     }
 
     /// CAST nested in a comparison — `col.cast(Int64) > 100` per the plan's PR-13.3
-    /// acceptance test.
+    /// acceptance test. The literal is `lit_i64` (not `lit_i32`) to mirror the
+    /// post-TYPE_COERCION shape that production AExpr produces; the PR-2.4 cycle-2
+    /// comparison pairwise gate would refuse if the operand dtypes differed.
     #[test]
     fn shape_cast_then_compare() {
+        use polars_core::prelude::AnyValue;
         let mut arena = Arena::new();
         let c = col(&mut arena, "a");
         let cast_node = arena.add(AExpr::Cast {
@@ -1401,7 +1531,10 @@ mod tests {
             dtype: DataType::Int64,
             options: CastOptions::Strict,
         });
-        let l = lit_i32(&mut arena, 100);
+        let l = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(100),
+        ))));
         let n = binop(&mut arena, cast_node, Operator::Gt, l);
         let schema = schema_a_b_int32();
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
