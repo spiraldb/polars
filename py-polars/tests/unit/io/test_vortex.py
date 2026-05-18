@@ -176,7 +176,9 @@ def test_scan_with_struct_field_filter(tmp_path: Path) -> None:
     )
     df.write_vortex(path)
 
-    out = pl.scan_vortex(path).filter(pl.col("s").struct.field("inner") == "x").collect()
+    out = (
+        pl.scan_vortex(path).filter(pl.col("s").struct.field("inner") == "x").collect()
+    )
     assert out.shape == (2, 1)
     assert out["s"].struct.field("count").to_list() == [2, 3]
 
@@ -253,11 +255,7 @@ def test_scan_with_row_index_and_filter(tmp_path: Path) -> None:
     path = tmp_path / "ri.vortex"
     pl.DataFrame({"x": list(range(20))}).write_vortex(path)
 
-    out = (
-        pl.scan_vortex(path, row_index_name="ri")
-        .filter(pl.col("ri") > 10)
-        .collect()
-    )
+    out = pl.scan_vortex(path, row_index_name="ri").filter(pl.col("ri") > 10).collect()
     assert out["ri"].to_list() == list(range(11, 20))
 
 

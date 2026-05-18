@@ -191,7 +191,7 @@ pub fn aexpr_to_vortex_expression(
             // boolean. `LogicalAnd`/`LogicalOr` are skipped — the IR-level "logical" form
             // is by construction boolean-typed.
             if matches!(op, Operator::And | Operator::Or) {
-                let Some(s) = schema else { return None };
+                let s = schema?;
                 if !operand_is_bool(*left, arena, s) || !operand_is_bool(*right, arena, s) {
                     return None;
                 }
@@ -215,7 +215,7 @@ pub fn aexpr_to_vortex_expression(
             // handles Column / Literal / Cast / comparisons; unresolvable shapes fall
             // through to None → conservative refuse.
             if matches!(op, Operator::Plus) {
-                let Some(s) = schema else { return None };
+                let s = schema?;
                 if !operand_is_numeric(*left, arena, s) || !operand_is_numeric(*right, arena, s) {
                     return None;
                 }
@@ -252,7 +252,7 @@ pub fn aexpr_to_vortex_expression(
                     | Operator::Gt
                     | Operator::GtEq
             ) {
-                let Some(s) = schema else { return None };
+                let s = schema?;
                 let lhs_dt = resolve_inner_dtype(*left, arena, s)?;
                 let rhs_dt = resolve_inner_dtype(*right, arena, s)?;
                 if lhs_dt != rhs_dt {
@@ -308,7 +308,7 @@ pub fn aexpr_to_vortex_expression(
             // `dtype.is_bool()` guard. IsNull/IsNotNull accept any dtype and produce
             // boolean output, so no gate.
             if matches!(boolean_fn, IRBooleanFunction::Not) {
-                let Some(s) = schema else { return None };
+                let s = schema?;
                 if !operand_is_bool(arg_node, arena, s) {
                     return None;
                 }
@@ -492,14 +492,14 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
             _ => None,
         },
         AExpr::Function {
-            function: IRFunctionExpr::Boolean(bf),
+            function:
+                IRFunctionExpr::Boolean(
+                    IRBooleanFunction::IsNull
+                    | IRBooleanFunction::IsNotNull
+                    | IRBooleanFunction::Not,
+                ),
             ..
-        } => match bf {
-            IRBooleanFunction::IsNull | IRBooleanFunction::IsNotNull | IRBooleanFunction::Not => {
-                Some(DataType::Boolean)
-            },
-            _ => None,
-        },
+        } => Some(DataType::Boolean),
         // Struct field access — resolve to the inner struct's field dtype.
         // Used by the CAST source-kind gate when a Cast wraps a struct field access,
         // and by the StructExpr arm's recursive gate to chain through nested structs.

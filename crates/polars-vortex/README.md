@@ -43,17 +43,17 @@ uses _all_ of these properties — not just "Vortex as another Parquet".
 
 What this looks like in practice:
 
-- **Filter pushdown**: an AExpr-direct convertor walks the predicate's `Arena<AExpr>` and emits Vortex
-  `Expression`s for the shapes Vortex can represent — column references, scalar literals, the six
-  comparison operators (`Eq`/`NotEq`/`Lt`/`LtEq`/`Gt`/`GtEq`), boolean combinators (`And`/`Or`/`Not`),
-  null checks (`IsNull`/`IsNotNull`), numeric addition (`Plus → checked_add`), same-kind `CAST`
-  (`Primitive↔Primitive` / `Bool↔Bool` / `Utf8↔Utf8` under `Strict` options), and struct field access
-  (`col.struct.field("inner")`). The Expression is handed to `ScanBuilder::with_filter`; inside
-  Vortex, `LayoutReader::pruning_evaluation` consults per-zone statistics and skips chunks that can't
-  satisfy the predicate — _without decompressing them_. Multiple type-safety gates (bitwise-vs-logical,
-  numeric-only Plus, kind-compatible CAST, same-PType comparison) refuse pushdown for shapes Vortex
-  would scan-time-error on; the multi-scan layer always re-applies the full predicate post-decode so
-  partial pushdown is always _safe_.
+- **Filter pushdown**: an AExpr-direct convertor walks the predicate's `Arena<AExpr>` and emits
+  Vortex `Expression`s for the shapes Vortex can represent — column references, scalar literals, the
+  six comparison operators (`Eq`/`NotEq`/`Lt`/`LtEq`/`Gt`/`GtEq`), boolean combinators
+  (`And`/`Or`/`Not`), null checks (`IsNull`/`IsNotNull`), numeric addition (`Plus → checked_add`),
+  same-kind `CAST` (`Primitive↔Primitive` / `Bool↔Bool` / `Utf8↔Utf8` under `Strict` options), and
+  struct field access (`col.struct.field("inner")`). The Expression is handed to
+  `ScanBuilder::with_filter`; inside Vortex, `LayoutReader::pruning_evaluation` consults per-zone
+  statistics and skips chunks that can't satisfy the predicate — _without decompressing them_.
+  Multiple type-safety gates (bitwise-vs-logical, numeric-only Plus, kind-compatible CAST,
+  same-PType comparison) refuse pushdown for shapes Vortex would scan-time-error on; the multi-scan
+  layer always re-applies the full predicate post-decode so partial pushdown is always _safe_.
 - **Negative slice pushdown**: `lf.tail(N)` becomes `ScanBuilder::with_row_range(...)`, not "decode
   everything and take the last N". The file's row count comes from the footer (free).
 - **Segment cache reuse**: second and subsequent scans of the same file skip decompression for any
@@ -159,25 +159,25 @@ impl) → morsels are converted to Vortex `ArrayRef`s by the reverse C-ABI bridg
    `VortexReaderBuilder.aexpr_filter` and consumed by `VortexFileReader::begin_read` →
    `ScanBuilder::with_filter`. Coverage:
 
-   | Polars `AExpr` shape                                | Vortex `Expression`                       | Gates                              |
-   | --------------------------------------------------- | ----------------------------------------- | ---------------------------------- |
-   | `Column(name)`                                      | `get_item(name, root())`                  | virtual-column refuse in lower_ir |
-   | `Literal(Scalar)`                                   | `lit(polars_scalar_to_vortex(...))`       | none                               |
-   | comparisons (Eq/NotEq/Lt/LtEq/Gt/GtEq)              | `eq`/`not_eq`/`lt`/`lt_eq`/`gt`/`gt_eq`   | pairwise-equal-PType + schema       |
-   | logical AND/OR (And/Or/LogicalAnd/LogicalOr)        | `and`/`or`                                | bitwise-vs-logical schema gate      |
-   | numeric addition (Plus)                             | `checked_add`                             | numeric + pairwise-equal-PType      |
-   | same-kind CAST (Strict only)                        | `cast(child, vortex_dtype)`               | source-kind + Strict-options gates  |
-   | struct field access (`col.struct.field("inner")`)   | `get_item(field_name, struct_expr)`       | schema-membership gate              |
-   | `IsNull` / `IsNotNull`                              | `is_null` / `is_not_null`                 | none                                |
-   | `Not`                                               | `not`                                     | boolean-only schema gate            |
+   | Polars `AExpr` shape                              | Vortex `Expression`                     | Gates                              |
+   | ------------------------------------------------- | --------------------------------------- | ---------------------------------- |
+   | `Column(name)`                                    | `get_item(name, root())`                | virtual-column refuse in lower_ir  |
+   | `Literal(Scalar)`                                 | `lit(polars_scalar_to_vortex(...))`     | none                               |
+   | comparisons (Eq/NotEq/Lt/LtEq/Gt/GtEq)            | `eq`/`not_eq`/`lt`/`lt_eq`/`gt`/`gt_eq` | pairwise-equal-PType + schema      |
+   | logical AND/OR (And/Or/LogicalAnd/LogicalOr)      | `and`/`or`                              | bitwise-vs-logical schema gate     |
+   | numeric addition (Plus)                           | `checked_add`                           | numeric + pairwise-equal-PType     |
+   | same-kind CAST (Strict only)                      | `cast(child, vortex_dtype)`             | source-kind + Strict-options gates |
+   | struct field access (`col.struct.field("inner")`) | `get_item(field_name, struct_expr)`     | schema-membership gate             |
+   | `IsNull` / `IsNotNull`                            | `is_null` / `is_not_null`               | none                               |
+   | `Not`                                             | `not`                                   | boolean-only schema gate           |
 
-   Pushdown is refused (returns `None` → residual) for unhandled shapes (Sort, Gather, Filter,
-   Agg, Ternary, AnonymousFunction, Over, Rolling, temporal extracts, etc.), for non-Strict
+   Pushdown is refused (returns `None` → residual) for unhandled shapes (Sort, Gather, Filter, Agg,
+   Ternary, AnonymousFunction, Over, Rolling, temporal extracts, etc.), for non-Strict
    `CastOptions`, for cross-kind CAST, for cross-PType arithmetic/comparison, and for predicates
    referencing hive partition columns or virtual columns (row_index, include_file_paths) at the
    `lower_ir.rs` guard. The reader advertises `ReaderCapabilities::PARTIAL_FILTER`, so Polars'
-   multi-scan layer always re-applies the original full predicate post-decode. Result: pushdown
-   is always _safe_, just sometimes _partial_. Historical note: PR-2.6 deleted the previous
+   multi-scan layer always re-applies the original full predicate post-decode. Result: pushdown is
+   always _safe_, just sometimes _partial_. Historical note: PR-2.6 deleted the previous
    `SpecializedColumnPredicate`-derived path (a parallel fast path during PR-13.1–.5).
 
 ## Cargo features
@@ -240,7 +240,7 @@ Standard Polars `storage_options=` — credentials, retry config, endpoint overr
 | Filter — `is_in([...])`                                | ❌ residual                     | Deferred — PR-2.6 cutover-lost shape; see Deferred work in `.big-plans/`               |
 | Filter — `starts_with` / `ends_with`                   | ❌ residual                     | Deferred — PR-2.6 cutover-lost shape; see Deferred work in `.big-plans/`               |
 | Filter — temporal extracts (`col.dt.year()`)           | ❌ residual                     | Deferred (PR-2.5 slip) — Vortex `datetime_parts` op unavailable at pinned SHA          |
-| Filter — non-Strict CAST (`NonStrict` / `Overflowing`) | ❌ residual                     | Polars overflow→null/wrap diverges from Vortex fail-on-overflow                         |
+| Filter — non-Strict CAST (`NonStrict` / `Overflowing`) | ❌ residual                     | Polars overflow→null/wrap diverges from Vortex fail-on-overflow                        |
 | Filter — cross-kind CAST (Primitive↔Utf8 etc.)         | ❌ residual                     | Vortex per-array `CastKernel` is strictly within-kind                                  |
 | Filter — temporal scalar literals (Date/Datetime/Time) | ✅ (when `dtype-*` features on) | Vortex Date/Time/Timestamp extension scalars                                           |
 | Filter — `Decimal` scalar literals                     | ✅ (when `dtype-decimal` on)    | Vortex `DecimalValue::I128`                                                            |
@@ -382,9 +382,9 @@ pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
 - ✅ Filter pushdown for the comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), boolean
   combinators (`and`/`or`/`not`), null checks (`is_null`/`is_not_null`), Plus arithmetic
   (`col + 1`), same-kind `CAST` (Strict only), and struct field access — all via the AExpr-direct
-  convertor (`polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs`). Multi-column
-  predicates compose freely. (When built with `dtype-date` / `dtype-datetime` / `dtype-time` /
-  `dtype-decimal`, Date / Datetime / Time / Decimal scalar literals work as comparison operands.)
+  convertor (`polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs`). Multi-column predicates
+  compose freely. (When built with `dtype-date` / `dtype-datetime` / `dtype-time` / `dtype-decimal`,
+  Date / Datetime / Time / Decimal scalar literals work as comparison operands.)
 - ✅ Multiple Vortex files in one scan (multi-file glob) via `UnifiedScanArgs`
 - ✅ Hive partitioning on read via `UnifiedScanArgs::hive_options`
 - ✅ Process-global decompressed-segment cache with `pl.set_vortex_cache_bytes(N)`
@@ -394,14 +394,14 @@ pl.set_vortex_cache_bytes(byte_budget: int)  # 0 = disable; default 512 MiB
 ## Known limits / pending follow-ups
 
 - **Cutover-lost pushdown shapes** (PR-2.6 Option B → A cutover): `is_between(lo, hi)`,
-  `is_in([...])`, `str.starts_with(prefix)`, and `str.ends_with(suffix)` were handled by the
-  deleted legacy `SpecializedColumnPredicate`-derived path but are not yet in the AExpr-direct
-  convertor. They fall through to residual; correctness preserved via `PARTIAL_FILTER` reapply,
-  but no zone-pruning benefit. Tracked in Deferred work; reasonable next-PR scope.
+  `is_in([...])`, `str.starts_with(prefix)`, and `str.ends_with(suffix)` were handled by the deleted
+  legacy `SpecializedColumnPredicate`-derived path but are not yet in the AExpr-direct convertor.
+  They fall through to residual; correctness preserved via `PARTIAL_FILTER` reapply, but no
+  zone-pruning benefit. Tracked in Deferred work; reasonable next-PR scope.
 - **Temporal extracts** (`col.dt.year()`, `col.dt.month()`, etc.) — Vortex 0.70.0 doesn't expose
   `datetime_parts` / `year` / `month` / `day` builders in its public expr API. PR-2.5 slipped to
-  Deferred work; reasonable to revisit when upstream Vortex exposes them or when polars-vortex
-  bumps its pinned version.
+  Deferred work; reasonable to revisit when upstream Vortex exposes them or when polars-vortex bumps
+  its pinned version.
 - **`Duration` scalar literals** — Vortex has no Duration extension dtype.
 - **Non-Strict CAST** (`CastOptions::NonStrict` / `Overflowing`) and **cross-kind CAST**
   (Primitive↔Bool/Utf8) — Vortex's per-array `CastKernel` semantics don't match Polars's
