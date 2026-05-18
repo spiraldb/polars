@@ -419,9 +419,9 @@ cargo bench -p polars --features vortex,cloud,parquet,dtype-full,strings \
 ```
 
 The harness ships three benches (`vortex_scan/no_filter`, `vortex_scan/filter_lt`,
-`vortex_scan/filter_arithmetic`); the third is the key Phase 1 → Phase 2 measurement
-(`col + 1 == N` — Phase 1 falls back to residual+post-decode reapply, Phase 2 pushes
-arithmetic through Vortex's zone pruning via `checked_add`).
+`vortex_scan/filter_arithmetic`); the third is the key Phase 1 → Phase 2 measurement (`col + 1 == N`
+— Phase 1 falls back to residual+post-decode reapply, Phase 2 pushes arithmetic through Vortex's
+zone pruning via `checked_add`).
 
 ## Pointers — reading the source
 
