@@ -309,13 +309,23 @@ pub fn aexpr_to_vortex_expression(
         // `Between` kernel lowers internally to the same comparison-pair, so pruning
         // effectiveness is preserved.
         //
-        // Schema-gated only transitively: the recursive `aexpr_to_vortex_expression`
-        // calls inherit the existing comparison pairwise-PType gate (BinaryExpr arm),
-        // so cross-PType bounds (Int8 col vs Int64 literal) refuse pushdown via
-        // `?`-propagation through the BinaryExpr resolve_inner_dtype check. **Must
-        // come BEFORE the general Boolean(boolean_fn) arm below** — pattern matching
-        // is order-sensitive and the catchall would otherwise match first and return
-        // None via its inner `_ => None`.
+        // **Explicit pairwise-PType gate (PR-2.7 cycle-1 must-fix #1).** The arm
+        // constructs Vortex `gt`/`gt_eq`/`lt`/`lt_eq` builders DIRECTLY rather than
+        // re-entering the `BinaryExpr` arm, so the BinaryExpr arm's pairwise-PType
+        // gate would NEVER fire transitively. Cross-PType bounds (e.g., Int32 col
+        // with Int64 literal bounds when TYPE_COERCION is off) would `vortex_bail!`
+        // at scan-time in Vortex's `Binary::return_dtype`
+        // (`vortex-array/src/scalar_fn/fns/binary/mod.rs:130-136` — "Cannot compare
+        // different DTypes"), violating the always-SAFE-fallback contract. Same bug
+        // class as PR-2.3 cycle-1 CAST cross-kind and PR-2.4 cycle-2 comparison
+        // pairwise-PType must-fixes. Refuse pushdown when the col / lo / hi dtypes
+        // disagree; recursion through `aexpr_to_vortex_expression` is unsafe without
+        // this explicit guard.
+        //
+        // **Match-arm ordering**: must come BEFORE the general
+        // `Boolean(boolean_fn)` arm below — pattern matching is order-sensitive and
+        // the catchall would otherwise match first and return None via its inner
+        // `_ => None`.
         #[cfg(feature = "is_between")]
         AExpr::Function {
             input,
@@ -323,6 +333,13 @@ pub fn aexpr_to_vortex_expression(
             ..
         } => {
             if input.len() != 3 {
+                return None;
+            }
+            let s = schema?;
+            let col_dt = resolve_inner_dtype(input[0].node(), arena, s)?;
+            let lo_dt = resolve_inner_dtype(input[1].node(), arena, s)?;
+            let hi_dt = resolve_inner_dtype(input[2].node(), arena, s)?;
+            if col_dt != lo_dt || col_dt != hi_dt {
                 return None;
             }
             let col = aexpr_to_vortex_expression(input[0].node(), arena, schema)?;
@@ -1946,6 +1963,109 @@ mod tests {
         });
         let schema = schema_x_int32();
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// is_between with `ClosedInterval::Right` — `(col > lo) AND (col <= hi)`.
+    /// Closes ClosedInterval coverage gap (PR-2.7 cycle-1 should-fix #6d).
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_right_inclusive() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Right,
+            }),
+            options: FunctionOptions::default(),
+        });
+        let schema = schema_x_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// is_between with `ClosedInterval::None` — `(col > lo) AND (col < hi)`.
+    /// Closes ClosedInterval coverage gap (PR-2.7 cycle-1 should-fix #6d).
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_none_exclusive() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::None,
+            }),
+            options: FunctionOptions::default(),
+        });
+        let schema = schema_x_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// is_between on cross-PType bounds (Int32 col, Int64 bounds) refuses pushdown
+    /// per the explicit pairwise-PType gate (PR-2.7 cycle-1 must-fix #1). Without
+    /// the gate, Vortex's `Binary::return_dtype` would `vortex_bail!` at scan-time.
+    /// Mirrors the existing `shape_eq_cross_ptype_returns_none` discipline.
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_cross_ptype_returns_none() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x"); // Int32 per schema_x_int32
+        let lo = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(10),
+        ))));
+        let hi = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(20),
+        ))));
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Both,
+            }),
+            options: FunctionOptions::default(),
+        });
+        let schema = schema_x_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// is_between without schema → conservative refuse (the explicit gate at the
+    /// arm's top consults `schema?`).
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_without_schema_returns_none() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Both,
+            }),
+            options: FunctionOptions::default(),
+        });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 
     #[cfg(feature = "strings")]
