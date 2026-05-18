@@ -485,6 +485,16 @@ pub fn aexpr_to_vortex_expression(
         // (Vortex returns a superset, then Polars trims), but it defeats the
         // pushdown's perf win. Same reasoning as the deleted legacy convertor at
         // `polars-vortex/src/read/predicate.rs` (pre-PR-2.6 `bytes_to_like_literal`).
+        //
+        // **Utf8 input gate (PR-2.7 cycle-1 must-fix #3).** Vortex's `Like` kernel
+        // (`vortex-array/src/scalar_fn/fns/like/mod.rs:124-132 return_dtype`)
+        // `vortex_bail!`s with "Cannot apply 'like' to non-Utf8 input" at scan-time
+        // if `input[0]` isn't Utf8 (Vortex's String dtype). Non-String column inputs
+        // (e.g., a struct field access producing Int32, or a Cast whose source
+        // isn't String) would silently push a `like(<non-utf8>, <utf8-pattern>)`
+        // that fails at scan-time, violating the always-SAFE-fallback contract.
+        // Same bug class as PR-2.3 cycle-1 CAST cross-kind. Refuse pushdown when
+        // the resolved column dtype isn't `DataType::String`.
         #[cfg(feature = "strings")]
         AExpr::Function {
             input,
@@ -492,6 +502,13 @@ pub fn aexpr_to_vortex_expression(
             ..
         } => {
             if input.len() != 2 {
+                return None;
+            }
+            // Utf8 input gate (must-fix #3) — refuse non-String column inputs
+            // BEFORE doing any needle extraction or pattern construction work.
+            let s = schema?;
+            let col_dt = resolve_inner_dtype(input[0].node(), arena, s)?;
+            if col_dt != DataType::String {
                 return None;
             }
             // Extract the literal needle string. Only direct Scalar literals are
@@ -2101,6 +2118,25 @@ mod tests {
         arena.add(AExpr::Literal(LiteralValue::Scalar(scalar)))
     }
 
+    /// String column schema for the StringExpr tests (PR-2.7 cycle-1 must-fix #3
+    /// adds a Utf8 input gate that requires schema to resolve `col`'s dtype).
+    #[cfg(feature = "strings")]
+    fn schema_s_string() -> Schema {
+        let mut s = Schema::default();
+        s.with_column(PlSmallStr::from("s"), DataType::String);
+        s
+    }
+
+    /// Schema with both a String column `s` and an Int32 column `i`, for the
+    /// StringExpr non-String-column refusal test.
+    #[cfg(feature = "strings")]
+    fn schema_s_string_i_int32() -> Schema {
+        let mut s = Schema::default();
+        s.with_column(PlSmallStr::from("s"), DataType::String);
+        s.with_column(PlSmallStr::from("i"), DataType::Int32);
+        s
+    }
+
     #[cfg(feature = "strings")]
     fn string_function(
         arena: &mut Arena<AExpr>,
@@ -2125,7 +2161,8 @@ mod tests {
         let c = col(&mut arena, "s");
         let needle = lit_str(&mut arena, "prefix");
         let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     /// starts_with with a `%` in the needle — refuse (would change LIKE semantics).
@@ -2136,6 +2173,59 @@ mod tests {
         let mut arena = Arena::new();
         let c = col(&mut arena, "s");
         let needle = lit_str(&mut arena, "100%");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// starts_with with `_` in the needle — refuse (same `bytes_to_like_literal`
+    /// guard). Closes the cycle-1 should-fix #6e and nit #11 coverage gap.
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_underscore_in_needle_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "foo_bar");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// starts_with with `\` (backslash) in the needle — refuse (LIKE's escape
+    /// character; same `bytes_to_like_literal` guard).
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_backslash_in_needle_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "foo\\bar");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// starts_with on a non-String column (Int32) — refuses pushdown per the
+    /// explicit Utf8 input gate (PR-2.7 cycle-1 must-fix #3). Without the gate,
+    /// Vortex's `Like::return_dtype` would `vortex_bail!` at scan-time.
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_on_int_column_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "i"); // Int32 per schema_s_string_i_int32
+        let needle = lit_str(&mut arena, "prefix");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        let schema = schema_s_string_i_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// StringExpr without schema → conservative refuse (the Utf8 gate consults
+    /// `schema?`).
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "prefix");
         let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
@@ -2148,7 +2238,8 @@ mod tests {
         let c = col(&mut arena, "s");
         let needle = lit_str(&mut arena, "suffix");
         let n = string_function(&mut arena, IRStringFunction::EndsWith, c, needle);
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     /// contains{literal:true} positive — `col.str.contains("sub", literal=True)`
@@ -2168,7 +2259,8 @@ mod tests {
             c,
             needle,
         );
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     /// contains{literal:false} — regex pattern; Vortex LIKE doesn't support regex;
@@ -2189,7 +2281,8 @@ mod tests {
             c,
             needle,
         );
-        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+        let schema = schema_s_string();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 
     /// Ternary positive — `when(a == 1).then(a).otherwise(b)` →
