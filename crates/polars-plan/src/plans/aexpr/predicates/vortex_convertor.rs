@@ -76,19 +76,26 @@
 //! the AExpr-direct convertor is now the sole filter-pushdown path.
 
 use polars_core::chunked_array::cast::CastOptions;
-use polars_core::prelude::DataType;
+use polars_core::prelude::{AnyValue, DataType};
+#[cfg(feature = "is_in")]
+use polars_core::scalar::Scalar;
 use polars_core::schema::Schema;
+#[cfg(feature = "is_between")]
+use polars_ops::series::ClosedInterval;
 use polars_utils::arena::{Arena, Node};
+use polars_vortex::vortex::array::scalar::Scalar as VortexScalar;
 use polars_vortex::vortex::dtype::{DType, Nullability, PType};
 use polars_vortex::vortex::expr::{
-    Expression, and, cast, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null, lit, lt,
-    lt_eq, not, not_eq, or, root,
+    Expression, and, case_when, cast, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null,
+    like, lit, lt, lt_eq, not, not_eq, or, or_collect, root,
 };
 
 use crate::dsl::Operator;
 use crate::plans::AExpr;
 #[cfg(feature = "dtype-struct")]
 use crate::plans::aexpr::function_expr::IRStructFunction;
+#[cfg(feature = "strings")]
+use crate::plans::aexpr::function_expr::IRStringFunction;
 use crate::plans::aexpr::function_expr::{IRBooleanFunction, IRFunctionExpr};
 use crate::plans::lit::LiteralValue;
 
@@ -293,6 +300,95 @@ pub fn aexpr_to_vortex_expression(
             })
         },
 
+        // --- is_between (PR-2.7) ---
+        // `col.is_between(lo, hi, closed)` decomposed to
+        // `(col >= lo) AND (col <= hi)` (or strict variants per `closed`).
+        // Manual decomposition avoids the need to import Vortex's `BetweenOptions`,
+        // which lives in `vortex::scalar_fn::*` (outside polars-vortex's narrowed
+        // re-export — see `polars-vortex/src/lib.rs:24` `pub mod vortex`). Vortex's
+        // `Between` kernel lowers internally to the same comparison-pair, so pruning
+        // effectiveness is preserved.
+        //
+        // Schema-gated only transitively: the recursive `aexpr_to_vortex_expression`
+        // calls inherit the existing comparison pairwise-PType gate (BinaryExpr arm),
+        // so cross-PType bounds (Int8 col vs Int64 literal) refuse pushdown via
+        // `?`-propagation through the BinaryExpr resolve_inner_dtype check. **Must
+        // come BEFORE the general Boolean(boolean_fn) arm below** — pattern matching
+        // is order-sensitive and the catchall would otherwise match first and return
+        // None via its inner `_ => None`.
+        #[cfg(feature = "is_between")]
+        AExpr::Function {
+            input,
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween { closed }),
+            ..
+        } => {
+            if input.len() != 3 {
+                return None;
+            }
+            let col = aexpr_to_vortex_expression(input[0].node(), arena, schema)?;
+            let lo = aexpr_to_vortex_expression(input[1].node(), arena, schema)?;
+            let hi = aexpr_to_vortex_expression(input[2].node(), arena, schema)?;
+            let lower = match closed {
+                ClosedInterval::Both | ClosedInterval::Left => gt_eq(col.clone(), lo),
+                ClosedInterval::Right | ClosedInterval::None => gt(col.clone(), lo),
+            };
+            let upper = match closed {
+                ClosedInterval::Both | ClosedInterval::Right => lt_eq(col, hi),
+                ClosedInterval::Left | ClosedInterval::None => lt(col, hi),
+            };
+            Some(and(lower, upper))
+        },
+
+        // --- is_in (PR-2.7) ---
+        // `col.is_in([v1, v2, ...])` decomposed to `(col == v1) OR (col == v2) OR ...`.
+        // Reuses the polars-plan-internal `try_extract_is_in_haystack` helper (per
+        // `super::column_expr.rs:218`'s same pattern) so the haystack extraction
+        // logic (constant-eval, list/array dispatch, null-drop) stays consistent
+        // across the SpecializedColumnPredicate path (deleted in PR-2.6) and this
+        // AExpr-direct path. Refuses pushdown when `nulls_equal=true` AND the
+        // haystack contained nulls — pushing requires emitting a `null` scalar into
+        // the OR, which `polars_scalar_to_vortex` doesn't support (it returns None
+        // for `AnyValue::Null`); safer to refuse than narrow the predicate. Refuses
+        // if ANY haystack element fails Polars→Vortex scalar conversion (the pushed
+        // filter must NOT be narrower than the user's predicate — would drop rows
+        // incorrectly). **Must come BEFORE the general Boolean(boolean_fn) arm.**
+        #[cfg(feature = "is_in")]
+        AExpr::Function {
+            input,
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsIn { nulls_equal }),
+            ..
+        } => {
+            if input.len() != 2 {
+                return None;
+            }
+            let s = schema?;
+            let column_dtype = resolve_inner_dtype(input[0].node(), arena, s)?;
+            let (haystack, had_nulls) = super::try_extract_is_in_haystack(
+                input[1].node(),
+                arena,
+                s,
+                &column_dtype,
+                usize::MAX,
+            )?;
+            if *nulls_equal && had_nulls {
+                return None;
+            }
+            let col_expr = aexpr_to_vortex_expression(input[0].node(), arena, schema)?;
+            let n_values = haystack.len();
+            let terms: Vec<Expression> = haystack
+                .iter()
+                .filter_map(|av| {
+                    let scalar = Scalar::new(column_dtype.clone(), av.into_static());
+                    let vs = polars_vortex::read::predicate::polars_scalar_to_vortex(&scalar)?;
+                    Some(eq(col_expr.clone(), lit(vs)))
+                })
+                .collect();
+            if terms.len() != n_values {
+                return None;
+            }
+            or_collect(terms)
+        },
+
         // --- unary boolean functions (IsNull / IsNotNull / Not) ---
         AExpr::Function {
             input,
@@ -354,6 +450,65 @@ pub fn aexpr_to_vortex_expression(
             Some(get_item(name.as_str(), inner))
         },
 
+        // --- string LIKE-based predicates (PR-2.7): starts_with / ends_with / contains ---
+        // `col.str.starts_with(p)` → `like(col, lit("p%"))`.
+        // `col.str.ends_with(s)`   → `like(col, lit("%s"))`.
+        // `col.str.contains{literal:true, ..}(sub)` → `like(col, lit("%sub%"))`.
+        //
+        // `contains` with `literal: false` is a regex pattern; Vortex's `like` is
+        // SQL-LIKE-style (only `%` / `_` wildcards), not regex, so we refuse that
+        // shape. Other StringExpr variants (Lowercase/Uppercase/Slice/Strptime/...)
+        // either don't return Boolean or have no Vortex equivalent — refuse via the
+        // inner `_ => return None`.
+        //
+        // The needle is escaped via `bytes_to_like_literal` which refuses if the
+        // bytes contain SQL-LIKE special characters (`%`, `_`, `\`) since those
+        // would change the LIKE semantics — *widening* the predicate. Widening is
+        // technically SOUND under the multi-scan PARTIAL_FILTER post-decode reapply
+        // (Vortex returns a superset, then Polars trims), but it defeats the
+        // pushdown's perf win. Same reasoning as the deleted legacy convertor at
+        // `polars-vortex/src/read/predicate.rs` (pre-PR-2.6 `bytes_to_like_literal`).
+        #[cfg(feature = "strings")]
+        AExpr::Function {
+            input,
+            function: IRFunctionExpr::StringExpr(string_fn),
+            ..
+        } => {
+            if input.len() != 2 {
+                return None;
+            }
+            // Extract the literal needle string. Only direct Scalar literals are
+            // handled here; folded expressions (e.g., `lit("a") + lit("b")`) would
+            // need `constant_evaluate` — out of scope for the foundation port.
+            let needle_str: String = match arena.get(input[1].node()) {
+                AExpr::Literal(LiteralValue::Scalar(scalar)) => match scalar.value() {
+                    AnyValue::String(s) => s.to_string(),
+                    AnyValue::StringOwned(s) => s.to_string(),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let escaped = bytes_to_like_literal(needle_str.as_bytes())?;
+            let pattern = match string_fn {
+                IRStringFunction::StartsWith => format!("{escaped}%"),
+                IRStringFunction::EndsWith => format!("%{escaped}"),
+                #[cfg(feature = "regex")]
+                IRStringFunction::Contains {
+                    literal: true,
+                    strict: _,
+                } => format!("%{escaped}%"),
+                // Contains { literal: false, .. } → regex, not LIKE; refuse.
+                // Other StringExpr variants (Lowercase, Slice, Strptime, etc.) →
+                // not in this predicate-pushdown scope; refuse.
+                _ => return None,
+            };
+            let col_expr = aexpr_to_vortex_expression(input[0].node(), arena, schema)?;
+            Some(like(
+                col_expr,
+                lit(VortexScalar::utf8(pattern, Nullability::NonNullable)),
+            ))
+        },
+
         // --- CAST (PR-2.3 / PR-13.3) ---
         // `col.cast(Int64) > 100` against an Int32 column pushes down as
         // `gt(cast(get_item("col", root()), DType::Primitive(I64, Nullable)), lit(100i64))`.
@@ -398,10 +553,28 @@ pub fn aexpr_to_vortex_expression(
             Some(cast(child, target))
         },
 
+        // --- Ternary (PR-2.7) ---
+        // `when(predicate).then(truthy).otherwise(falsy)` maps to Vortex's
+        // `case_when(condition, then_value, else_value)`. All three children recurse
+        // through `aexpr_to_vortex_expression`; any unsupported subtree fails
+        // closed via `?`-propagation. Vortex's `CaseWhen` is type-checked at builder
+        // time (then/else must have a unified return dtype); the recursion's
+        // existing CAST/Plus pairwise-PType gates protect against mismatched arms.
+        AExpr::Ternary {
+            predicate,
+            truthy,
+            falsy,
+        } => {
+            let condition = aexpr_to_vortex_expression(*predicate, arena, schema)?;
+            let then_value = aexpr_to_vortex_expression(*truthy, arena, schema)?;
+            let else_value = aexpr_to_vortex_expression(*falsy, arena, schema)?;
+            Some(case_when(condition, then_value, else_value))
+        },
+
         // --- unsupported shapes (residual) ---
-        // Other Function variants (temporal etc.) → PR-2.5. Sort/Gather/Filter/Agg/
-        // Ternary/AnonymousFunction/Over/Rolling etc. all fall through to residual
-        // unconditionally.
+        // Other Function variants (temporal etc.) → PR-2.5 (slipped to Deferred).
+        // Sort / Gather / Filter / Agg / AnonymousFunction / Over / Rolling etc. all
+        // fall through to residual unconditionally.
         _ => None,
     }
 }
@@ -677,6 +850,28 @@ fn convert_literal(lv: &LiteralValue) -> Option<Expression> {
         // Series / Range aren't valid predicate literals.
         _ => None,
     }
+}
+
+/// Validate that `bytes` is valid UTF-8 and free of SQL-LIKE special characters
+/// (`%`, `_`, `\`). Returns the borrowed `&str` so the caller can build a pattern.
+/// Returning `None` falls back to the residual filter, which is always correct.
+///
+/// Refuses pushdown when bytes contain `%` or `_` because Vortex's LIKE would
+/// interpret those as wildcards — *widening* the predicate. Widening is sound
+/// under the multi-scan `PARTIAL_FILTER` post-decode reapply (Vortex returns a
+/// superset, then Polars trims), but defeats the perf win of pushing down.
+/// Backslash is LIKE's escape character; same reasoning.
+///
+/// Resurrected verbatim from the legacy
+/// `polars-vortex/src/read/predicate.rs::bytes_to_like_literal` (deleted in
+/// PR-2.6's Option B → A cutover); the PR-2.7 amend re-introduces it inline in
+/// the convertor so polars-plan owns its own LIKE-pattern escaping.
+fn bytes_to_like_literal(bytes: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    if s.contains('%') || s.contains('_') || s.contains('\\') {
+        return None;
+    }
+    Some(s)
 }
 
 #[cfg(test)]
@@ -1689,5 +1884,205 @@ mod tests {
         let five = lit_i32(&mut arena, 5);
         let n = binop(&mut arena, a_minus_1, Operator::Eq, five);
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    // === PR-2.7 amend tests: cutover-lost pushdown shapes ===
+    //
+    // is_between, is_in (covered by e2e Python tests; arena-level Series literal
+    // construction is awkward, so unit coverage stays at e2e), starts_with,
+    // ends_with, contains{literal:true|false}, Ternary. Each new shape gets at
+    // least one positive test (returns Some) and, where applicable, a negative
+    // test exercising the refuse path (returns None) — same discipline as the
+    // PR-2.1 foundation shape tests above.
+
+    #[cfg(feature = "is_between")]
+    fn schema_x_int32() -> Schema {
+        let mut s = Schema::default();
+        s.with_column(PlSmallStr::from("x"), DataType::Int32);
+        s
+    }
+
+    /// is_between with `ClosedInterval::Both` — `(col >= lo) AND (col <= hi)`.
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_both_inclusive() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Both,
+            }),
+            options: FunctionOptions::default(),
+        });
+        let schema = schema_x_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// is_between with `ClosedInterval::Left` — `(col >= lo) AND (col < hi)`.
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_left_inclusive() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Left,
+            }),
+            options: FunctionOptions::default(),
+        });
+        let schema = schema_x_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    #[cfg(feature = "strings")]
+    fn lit_str(arena: &mut Arena<AExpr>, value: &str) -> Node {
+        let scalar = Scalar::new(
+            DataType::String,
+            AnyValue::StringOwned(PlSmallStr::from(value)),
+        );
+        arena.add(AExpr::Literal(LiteralValue::Scalar(scalar)))
+    }
+
+    #[cfg(feature = "strings")]
+    fn string_function(
+        arena: &mut Arena<AExpr>,
+        str_fn: IRStringFunction,
+        col_node: Node,
+        needle: Node,
+    ) -> Node {
+        let col_ir = ExprIR::new(col_node, OutputName::Alias(PlSmallStr::EMPTY));
+        let needle_ir = ExprIR::new(needle, OutputName::Alias(PlSmallStr::EMPTY));
+        arena.add(AExpr::Function {
+            input: vec![col_ir, needle_ir],
+            function: IRFunctionExpr::StringExpr(str_fn),
+            options: FunctionOptions::default(),
+        })
+    }
+
+    /// starts_with positive — `col.str.starts_with("prefix")` → `like(col, "prefix%")`.
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_positive() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "prefix");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// starts_with with a `%` in the needle — refuse (would change LIKE semantics).
+    /// Same refuse logic for `_` and `\` (covered by `bytes_to_like_literal`).
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_wildcard_in_needle_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "100%");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// ends_with positive — `col.str.ends_with("suffix")` → `like(col, "%suffix")`.
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_ends_with_positive() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "suffix");
+        let n = string_function(&mut arena, IRStringFunction::EndsWith, c, needle);
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// contains{literal:true} positive — `col.str.contains("sub", literal=True)`
+    /// → `like(col, "%sub%")`.
+    #[cfg(all(feature = "strings", feature = "regex"))]
+    #[test]
+    fn shape_contains_literal_true_positive() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "substr");
+        let n = string_function(
+            &mut arena,
+            IRStringFunction::Contains {
+                literal: true,
+                strict: false,
+            },
+            c,
+            needle,
+        );
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_some());
+    }
+
+    /// contains{literal:false} — regex pattern; Vortex LIKE doesn't support regex;
+    /// refuse. Preserves the always-SAFE-fallback contract: the residual filter
+    /// applies the regex post-decode.
+    #[cfg(all(feature = "strings", feature = "regex"))]
+    #[test]
+    fn shape_contains_literal_false_returns_none() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, ".*");
+        let n = string_function(
+            &mut arena,
+            IRStringFunction::Contains {
+                literal: false,
+                strict: false,
+            },
+            c,
+            needle,
+        );
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// Ternary positive — `when(a == 1).then(a).otherwise(b)` →
+    /// `case_when(eq(col_a, lit(1)), col_a, col_b)`. All three subtrees push down,
+    /// so the Ternary as a whole pushes down.
+    #[test]
+    fn shape_ternary_positive() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let predicate = binop(&mut arena, a, Operator::Eq, one);
+        let a2 = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let n = arena.add(AExpr::Ternary {
+            predicate,
+            truthy: a2,
+            falsy: b,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
+    }
+
+    /// Ternary with an unsupported subtree (Minus arithmetic) — fail-closed.
+    #[test]
+    fn shape_ternary_unsupported_subtree_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let a_minus_1 = binop(&mut arena, a, Operator::Minus, one);
+        let predicate = binop(&mut arena, a, Operator::Eq, one);
+        let b = col(&mut arena, "b");
+        let n = arena.add(AExpr::Ternary {
+            predicate,
+            truthy: a_minus_1,
+            falsy: b,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
     }
 }
