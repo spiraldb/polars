@@ -1,6 +1,7 @@
 [files]
 extend-exclude = [
   ".git/",
+  ".big-plans/",
   "*.csv",
   "*.gz",
   "dists.dss",
