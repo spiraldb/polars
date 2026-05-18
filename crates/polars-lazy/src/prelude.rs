@@ -24,4 +24,6 @@ pub(crate) use polars_utils::arena::{Arena, Node};
 
 pub use crate::dsl::*;
 pub use crate::frame::*;
+#[cfg(feature = "vortex")]
+pub use crate::scan::vortex::ScanArgsVortex;
 pub(crate) use crate::scan::*;

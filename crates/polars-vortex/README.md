@@ -406,6 +406,23 @@ t1 = time.time(); pl.read_vortex("/tmp/big.vortex"); print("cold:", time.time() 
 t2 = time.time(); pl.read_vortex("/tmp/big.vortex"); print("warm:", time.time() - t2)
 ```
 
+Run the Vortex Criterion benches (compare filter-pushdown wall-clock across phases):
+
+```sh
+# Save a baseline (e.g. on Phase 1's tip):
+cargo bench -p polars --features vortex,cloud,parquet,dtype-full,strings \
+    --bench io_vortex -- --save-baseline phase-1
+
+# Compare a later commit (e.g. Phase 2's tip) against the saved baseline:
+cargo bench -p polars --features vortex,cloud,parquet,dtype-full,strings \
+    --bench io_vortex -- --baseline phase-1
+```
+
+The harness ships three benches (`vortex_scan/no_filter`, `vortex_scan/filter_lt`,
+`vortex_scan/filter_arithmetic`); the third is the key Phase 1 → Phase 2 measurement
+(`col + 1 == N` — Phase 1 falls back to residual+post-decode reapply, Phase 2 pushes
+arithmetic through Vortex's zone pruning via `checked_add`).
+
 ## Pointers — reading the source
 
 - The runtime wiring is the most subtle piece: see [`session.rs`] for how the global `VortexSession`

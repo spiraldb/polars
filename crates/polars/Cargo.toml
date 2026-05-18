@@ -31,14 +31,26 @@ apache-avro = { version = "0.21", features = ["snappy"] }
 arrow = { workspace = true }
 avro-schema = { workspace = true, features = ["async"] }
 chrono = { workspace = true }
+# Criterion for Vortex format benches (gated below on the `vortex` feature via the bench module).
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 either = { workspace = true }
 ethnum = "1"
 futures = { workspace = true }
+# polars-vortex direct dep for the io_vortex bench's eager `write_vortex` setup;
+# the bench file itself is `#[cfg(feature = "vortex")]`-gated and `required-features`
+# below ensures Cargo only builds it when vortex is enabled.
+polars-vortex = { workspace = true }
 # used to run formal property testing
 proptest = { workspace = true }
 rand = { workspace = true }
+tempfile = "3"
 # used to test async readers
 tokio = { workspace = true, features = ["macros", "rt", "fs", "io-util"] }
+
+[[bench]]
+name = "io_vortex"
+harness = false
+required-features = ["vortex", "lazy"]
 
 [build-dependencies]
 version_check = { workspace = true }
