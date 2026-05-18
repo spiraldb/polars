@@ -421,3 +421,162 @@ def test_multifile_scan_missing_columns_raise(tmp_path: Path) -> None:
 
     with pytest.raises(pl.exceptions.PolarsError):
         pl.scan_vortex([a, b], missing_columns="raise").collect()
+# === PR-2.7 amend: cutover-lost pushdown shapes ===
+#
+# Each test exercises a shape that the PR-2.6 cutover removed from the
+# pushdown path. Correctness via Polars's post-decode reapply is invariant
+# (PARTIAL_FILTER capability), so a "pushdown not applied" regression would
+# manifest as slower-but-correct results — these tests catch the more
+# dangerous failure mode: pushdown emitting a Vortex expression that
+# silently drops or duplicates rows. Engagement verification is implicit
+# (the bench harness from PR-1.5 measures wall-clock).
+
+
+def test_scan_with_is_between_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``col.is_between(lo, hi)`` pushes down via the
+    is_between arm, decomposed to ``(col >= lo) AND (col <= hi)``.
+
+    The legacy SpecializedColumnPredicate path handled this via
+    ``SpecializedColumnPredicate::Between``; PR-2.6 cutover removed it.
+    The new convertor arm re-establishes pushdown by decomposing to a
+    Vortex ``and(gt_eq, lt_eq)`` (or strict variants per ``closed``).
+    """
+    path = tmp_path / "between_filter.vortex"
+    df = pl.DataFrame({"a": list(range(20))})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("a").is_between(5, 10)).collect()
+    # Default closed="both" → 5, 6, 7, 8, 9, 10
+    assert out["a"].to_list() == [5, 6, 7, 8, 9, 10]
+
+
+def test_scan_with_is_between_left_closed_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``is_between`` with non-default closed kwarg.
+
+    ClosedInterval::Left → ``(col >= lo) AND (col < hi)``. Verifies the
+    closed-interval-variant mapping isn't off-by-one.
+    """
+    path = tmp_path / "between_left_filter.vortex"
+    df = pl.DataFrame({"a": list(range(20))})
+    df.write_vortex(path)
+
+    out = (
+        pl.scan_vortex(path)
+        .filter(pl.col("a").is_between(5, 10, closed="left"))
+        .collect()
+    )
+    # closed="left" → 5, 6, 7, 8, 9 (10 excluded)
+    assert out["a"].to_list() == [5, 6, 7, 8, 9]
+
+
+def test_scan_with_is_in_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``col.is_in([...])`` pushes down via the is_in arm,
+    decomposed to ``(col == v1) OR (col == v2) OR ...``.
+
+    Legacy ``SpecializedColumnPredicate::EqualOneOf`` handled this; PR-2.6
+    cutover removed it. The new convertor arm reuses the polars-plan-internal
+    ``try_extract_is_in_haystack`` helper for haystack extraction (same code
+    path as the deleted SpecializedColumnPredicate route) so the
+    constant-eval / list-dispatch / null-drop logic stays consistent.
+    """
+    path = tmp_path / "is_in_filter.vortex"
+    df = pl.DataFrame({"a": list(range(20))})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("a").is_in([1, 3, 5, 7])).collect()
+    assert out["a"].to_list() == [1, 3, 5, 7]
+
+
+def test_scan_with_starts_with_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``col.str.starts_with("prefix")`` pushes down via the
+    StringExpr arm as ``like(col, lit("prefix%"))``.
+
+    Legacy ``SpecializedColumnPredicate::StartsWith`` handled this; PR-2.6
+    cutover removed it. The needle is escaped via ``bytes_to_like_literal``
+    which refuses pushdown if the prefix contains LIKE wildcards (%, _, \\).
+    """
+    path = tmp_path / "starts_with_filter.vortex"
+    df = pl.DataFrame({"s": ["apple", "apricot", "banana", "blueberry", "cherry"]})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("s").str.starts_with("ap")).collect()
+    assert out["s"].to_list() == ["apple", "apricot"]
+
+
+def test_scan_with_ends_with_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``col.str.ends_with("suffix")`` pushes down via the
+    StringExpr arm as ``like(col, lit("%suffix"))``."""
+    path = tmp_path / "ends_with_filter.vortex"
+    df = pl.DataFrame({"s": ["apple", "pineapple", "banana", "grape"]})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("s").str.ends_with("apple")).collect()
+    # Both "apple" and "pineapple" end with "apple"
+    assert out["s"].to_list() == ["apple", "pineapple"]
+
+
+def test_scan_with_contains_literal_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``col.str.contains("sub", literal=True)`` pushes down
+    via the StringExpr arm as ``like(col, lit("%sub%"))``.
+
+    ``literal=False`` (regex mode) is REFUSED — Vortex's LIKE doesn't
+    support regex; the residual filter reapplies post-decode for correctness.
+    Tested implicitly by the unit-level
+    ``shape_contains_literal_false_returns_none`` test.
+    """
+    path = tmp_path / "contains_filter.vortex"
+    df = pl.DataFrame(
+        {"s": ["hello world", "good morning", "world peace", "morning sun"]}
+    )
+    df.write_vortex(path)
+
+    out = (
+        pl.scan_vortex(path)
+        .filter(pl.col("s").str.contains("world", literal=True))
+        .collect()
+    )
+    assert out["s"].to_list() == ["hello world", "world peace"]
+
+
+def test_scan_with_ternary_filter(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1: ``pl.when(...).then(...).otherwise(...)`` inside a
+    filter pushes down via the Ternary arm as Vortex
+    ``case_when(condition, then_value, else_value)``.
+
+    The Ternary returns a Boolean expression usable as a filter predicate.
+    Here: when ``a > 5``, push down ``a < 15``; otherwise emit False.
+    Effective predicate: ``5 < a < 15``.
+    """
+    path = tmp_path / "ternary_filter.vortex"
+    df = pl.DataFrame({"a": list(range(20))})
+    df.write_vortex(path)
+
+    out = (
+        pl.scan_vortex(path)
+        .filter(
+            pl.when(pl.col("a") > 5).then(pl.col("a") < 15).otherwise(False)  # noqa: FBT003
+        )
+        .collect()
+    )
+    # 5 < a < 15 → 6, 7, 8, 9, 10, 11, 12, 13, 14
+    assert out["a"].to_list() == [6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+
+def test_scan_with_starts_with_wildcard_in_needle(tmp_path: Path) -> None:
+    """PR-2.7 cycle 1 (negative path): a wildcard ('%') in the needle refuses
+    pushdown via ``bytes_to_like_literal``. The residual filter reapplies
+    post-decode for correctness; a regression dropping the wildcard guard
+    would *widen* the predicate (Vortex LIKE interprets '%' as match-any).
+
+    Correctness must hold either way (the residual is the safety net), so
+    the assertion focuses on the result: only rows containing the literal
+    '100%' string match.
+    """
+    path = tmp_path / "wildcard_needle.vortex"
+    df = pl.DataFrame({"s": ["100% pure", "1000 hits", "absolute 100%", "no match"]})
+    df.write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("s").str.starts_with("100%")).collect()
+    # Only "100% pure" starts with the literal "100%". "1000 hits" must not
+    # match (would if '%' were interpreted as LIKE wildcard).
+    assert out["s"].to_list() == ["100% pure"]
