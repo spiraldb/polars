@@ -574,14 +574,38 @@ pub fn aexpr_to_vortex_expression(
         // `when(predicate).then(truthy).otherwise(falsy)` maps to Vortex's
         // `case_when(condition, then_value, else_value)`. All three children recurse
         // through `aexpr_to_vortex_expression`; any unsupported subtree fails
-        // closed via `?`-propagation. Vortex's `CaseWhen` is type-checked at builder
-        // time (then/else must have a unified return dtype); the recursion's
-        // existing CAST/Plus pairwise-PType gates protect against mismatched arms.
+        // closed via `?`-propagation.
+        //
+        // **Explicit THEN/ELSE pairwise-dtype gate (PR-2.7 cycle-1 must-fix #2).**
+        // Vortex's `case_when` builder
+        // (`vortex-array/src/expr/expression.rs:45-62 try_new`) validates only
+        // arity at builder time; the dtype unification check fires later in
+        // `CaseWhen::return_dtype`
+        // (`vortex-array/src/scalar_fn/fns/case_when.rs:185-191`) which
+        // `vortex_bail!`s with "CaseWhen THEN and ELSE dtypes must match" at
+        // scan/pruning time. The recursion's CAST/Plus pairwise-PType gates
+        // protect their own subtrees but NOT the Ternary truthy-vs-falsy
+        // mismatch. Cross-dtype truthy/falsy (e.g., nested Ternary with
+        // col_int32 vs col_int64 when TYPE_COERCION is off) bypass any inner
+        // gate. Same bug class as PR-2.2 cycle-1 Plus must-fix. Refuse pushdown
+        // when truthy and falsy dtypes disagree.
+        //
+        // **Reachability note**: a Ternary at the filter root must be Boolean-typed
+        // (Polars validates), so the cross-dtype hazard is gated to nested Ternary
+        // inside a complex predicate. The gate is held to must-fix per the existing
+        // precedent (Plus / comparison gates) because the always-SAFE-fallback
+        // contract is binary; reduced reach is mitigation, not category change.
         AExpr::Ternary {
             predicate,
             truthy,
             falsy,
         } => {
+            let s = schema?;
+            let then_dt = resolve_inner_dtype(*truthy, arena, s)?;
+            let else_dt = resolve_inner_dtype(*falsy, arena, s)?;
+            if then_dt != else_dt {
+                return None;
+            }
             let condition = aexpr_to_vortex_expression(*predicate, arena, schema)?;
             let then_value = aexpr_to_vortex_expression(*truthy, arena, schema)?;
             let else_value = aexpr_to_vortex_expression(*falsy, arena, schema)?;
@@ -2204,5 +2228,48 @@ mod tests {
         });
         let schema = schema_a_b_int32();
         assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Ternary with cross-dtype truthy/falsy (truthy=Int32 col `a`, falsy=Int64
+    /// literal) — refuses pushdown per the explicit THEN/ELSE pairwise-dtype gate
+    /// (PR-2.7 cycle-1 must-fix #2). Without the gate, Vortex's
+    /// `CaseWhen::return_dtype` would `vortex_bail!` at scan-time. Mirrors the
+    /// `shape_eq_cross_ptype_returns_none` discipline.
+    #[test]
+    fn shape_ternary_cross_dtype_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a"); // Int32 per schema_a_b_int32
+        let one_i32 = lit_i32(&mut arena, 1);
+        let predicate = binop(&mut arena, a, Operator::Eq, one_i32);
+        let a2 = col(&mut arena, "a"); // Int32
+        let int64_lit = arena.add(AExpr::Literal(LiteralValue::Scalar(Scalar::new(
+            DataType::Int64,
+            AnyValue::Int64(7),
+        ))));
+        let n = arena.add(AExpr::Ternary {
+            predicate,
+            truthy: a2,
+            falsy: int64_lit,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_none());
+    }
+
+    /// Ternary without schema → conservative refuse (the explicit gate at the
+    /// arm's top consults `schema?`).
+    #[test]
+    fn shape_ternary_without_schema_returns_none() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let predicate = binop(&mut arena, a, Operator::Eq, one);
+        let a2 = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let n = arena.add(AExpr::Ternary {
+            predicate,
+            truthy: a2,
+            falsy: b,
+        });
+        assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
     }
 }
