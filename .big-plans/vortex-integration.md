@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: planning
+status: awaiting-review
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
-planning_sub_flow: amend-phase-2
-current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) + PR-2.8 (virtual-column per-column split); Phase 1+2 CI lint sweep landed pre-amend on both stacked PRs"
+planning_sub_flow: null
+current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) inner-loop 2-vote pr-2 review pending; PR-2.8 (virtual-column per-column split) queued"
 phase_index: 2
-current_pr: null
-pr_index: 7
+current_pr: PR-2.7
+pr_index: 8
 outstanding_must_fix: 0
 deferred_items_total: 14
-last_user_touchpoint: 2026-05-18T22:00:00Z
-last_user_touchpoint_what: "took over Phase 2→3 boundary in cross-worktree mode; landed CI lint fixes (dprint reflow + ruff format + 4 clippy-nightly question_mark + 1 collapsible_match + typos exclude of .big-plans/ + PR title fixes) on both stacked PRs; lint checks all green by 22:00; user picked Amend Phase 2 with scope = PR-2.7 (cutover-lost shapes ~65 LoC) + PR-2.8 (virtual-column per-column split ~60 LoC)"
-subagent_invocations_this_pr: 4
+last_user_touchpoint: 2026-05-18T22:30:00Z
+last_user_touchpoint_what: "amend-completion + PR-2.7 implementation landed: 065df50278 convertor (6 new arms + helper + 9 unit tests, all 72 vortex_convertor tests pass) + 0e2c26f84f e2e (7 new Python tests + README pushdown table refresh + dprint reflow); awaiting 2-vote pr-2 gauntlet review on PR-2.7 diff (16e14b4697..HEAD)"
+subagent_invocations_this_pr: 0
 subagent_invocations_total: 41
-review_cycles_this_pr: 1
+review_cycles_this_pr: 0
 phase_entry_sha: 93643dd77
 phase_end_cycle: 1
 phase_end_reject_cycles: 0
-last_phase_end_verdict: accept
+last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 9f3fa65a0c
+last_commit: 0e2c26f84f
 ```
 
 ## Context
