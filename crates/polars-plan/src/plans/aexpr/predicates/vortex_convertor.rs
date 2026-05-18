@@ -24,11 +24,13 @@
 //! re-export so the AnyValue→VortexScalar mapping has one canonical source of truth across
 //! both the SpecializedColumnPredicate path and this AExpr-direct path.)
 //!
-//! ## What this module covers (PR-2.1 foundation + PR-2.2 + PR-2.3 + PR-2.4 extensions)
+//! ## What this module covers (PR-2.1 foundation + PR-2.2 + PR-2.3 + PR-2.4 + PR-2.7 extensions)
 //!
-//! The 16 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
+//! The 22 shapes below — the "kernel" the rest of PR-13 extends. (13 from PR-2.1's
 //! foundation + 1 from PR-2.2: `addition (numeric)` + 1 from PR-2.3: `cast (same-kind
-//! Primitive/Bool/Utf8 target)` + 1 from PR-2.4: `struct field access`.)
+//! Primitive/Bool/Utf8 target)` + 1 from PR-2.4: `struct field access` + 6 from PR-2.7's
+//! cutover-lost-shapes port: `is_between` / `is_in` / `starts_with` / `ends_with` /
+//! `contains{literal:true}` / `Ternary`.)
 //!
 //! | Shape | AExpr matcher | Vortex builder |
 //! |---|---|---|
@@ -48,8 +50,14 @@
 //! | `is_null` | `AExpr::Function { Boolean(IsNull), .. }` | `is_null` |
 //! | `is_not_null` | `AExpr::Function { Boolean(IsNotNull), .. }` | `is_not_null` |
 //! | `not` | `AExpr::Function { Boolean(Not), .. }` | `not` (schema-gated) |
+//! | `is_between(lo, hi, closed)` | `AExpr::Function { Boolean(IsBetween { closed }), .. }` (PR-2.7) | `(col gt[_eq] lo) AND (col lt[_eq] hi)` (schema-gated pairwise-PType) |
+//! | `is_in([...])` | `AExpr::Function { Boolean(IsIn { nulls_equal }), .. }` (PR-2.7) | OR of equalities (refuses `nulls_equal=true + had_nulls`; per-scalar conversion failure refuses) |
+//! | `str.starts_with(prefix)` | `AExpr::Function { StringExpr(StartsWith), .. }` (PR-2.7) | `like(col, lit("prefix%"))` (schema-gated Utf8 input; `bytes_to_like_literal` refuses LIKE wildcards `%`/`_`/`\`) |
+//! | `str.ends_with(suffix)` | `AExpr::Function { StringExpr(EndsWith), .. }` (PR-2.7) | `like(col, lit("%suffix"))` (same gates) |
+//! | `str.contains{literal:true}(sub)` | `AExpr::Function { StringExpr(Contains { literal: true, .. }), .. }` (PR-2.7) | `like(col, lit("%sub%"))` (same gates; `literal: false` refuses — Vortex LIKE doesn't do regex) |
+//! | `Ternary { predicate, truthy, falsy }` | `AExpr::Ternary { .. }` (PR-2.7) | `case_when(condition, then, else)` (schema-gated THEN/ELSE pairwise-dtype) |
 //!
-//! ## What this module does NOT cover yet (PR-2.5 follow-ups)
+//! ## What this module does NOT cover yet (PR-2.5 follow-ups + Phase 3 work)
 //!
 //! Remaining arithmetic (`Minus`/`Multiply`/divides/`Modulus`) → still residual; PR-2.2
 //! ships `Plus` only because `checked_add` is the only arithmetic builder publicly exposed
@@ -57,11 +65,11 @@
 //! `NonStrict`/`Overflowing` CAST options → still residual (PR-2.3 cycle-1 must-fix gates;
 //! Vortex's per-array `CastKernel` is strictly within-kind and fail-on-overflow). Other
 //! struct functions (`RenameFields`/`PrefixFields`/etc.) → not in predicate scope. Temporal
-//! extracts (`AExpr::Function { IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5. Anything
-//! else (`Sort`, `Gather`, `Filter`, `Agg`, `Ternary`, `AnonymousFunction`, `Over`,
-//! `Rolling`, etc.) returns `None` and falls through as residual; the multi-scan layer
-//! re-applies the full predicate post-decode so dropping coverage is always SOUND, just
-//! suboptimal.
+//! extracts (`AExpr::Function { IRFunctionExpr::TemporalExpr(..), .. }`) → PR-2.5 (slipped
+//! to Deferred work; Vortex `datetime_parts` op unavailable at pinned SHA). Anything else
+//! (`Sort`, `Gather`, `Filter`, `Agg`, `AnonymousFunction`, `Over`, `Rolling`, etc.)
+//! returns `None` and falls through as residual; the multi-scan layer re-applies the full
+//! predicate post-decode so dropping coverage is always SOUND, just suboptimal.
 //!
 //! ## Wiring
 //!
@@ -2364,5 +2372,159 @@ mod tests {
             falsy: b,
         });
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    // === PR-2.7 cycle-1 should-fix #4: engagement-assertion structural tests ===
+    //
+    // Each test asserts the produced Vortex Expression's Display output contains
+    // recognizable structural anchors for the shape's expected builder. Catches
+    // paste-swap bugs (e.g., is_between → eq, starts_with → ends_with). Mirrors
+    // the `shape_plus_arithmetic_structural` discipline established for the Plus
+    // arm in PR-2.2 cycle-1 (the cycle-1 fresh reviewer's escalation that
+    // tautological `.is_some()` assertions miss paste-swap bugs). Closes
+    // acceptance criterion (c): "Each new shape engaged via display_tree() OR
+    // POLARS_VERBOSE assertion in at least one test."
+
+    /// is_between structural — decomposed to `and(gt_eq, lt_eq)` for Both. A
+    /// paste-swap to `eq` or `or` would change the display string.
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn shape_is_between_structural() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let c_ir = ExprIR::new(c, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let n = arena.add(AExpr::Function {
+            input: vec![c_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Both,
+            }),
+            options: FunctionOptions::default(),
+        });
+        let schema = schema_x_int32();
+        let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
+        let s = format!("{}", expr);
+        // Structural anchors: AND + lower-bound + upper-bound + column + bounds.
+        assert!(
+            s.contains("and") || s.contains("AND") || s.contains("&&"),
+            "expected and in {s}"
+        );
+        assert!(
+            s.contains(">=") || s.contains("gt_eq"),
+            "expected >= or gt_eq in {s}"
+        );
+        assert!(
+            s.contains("<=") || s.contains("lt_eq"),
+            "expected <= or lt_eq in {s}"
+        );
+        assert!(s.contains('x'), "expected column 'x' in {s}");
+        assert!(s.contains("10"), "expected literal 10 in {s}");
+        assert!(s.contains("20"), "expected literal 20 in {s}");
+        // Negative check: a paste-swap to eq would produce an 'eq' or '=='.
+        assert!(
+            !s.contains("eq(") && !s.contains("=="),
+            "unexpected eq/== in {s} (paste-swap regression?)"
+        );
+    }
+
+    /// starts_with structural — `like(col, lit("prefix%"))`.
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_starts_with_structural() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "prefix");
+        let n = string_function(&mut arena, IRStringFunction::StartsWith, c, needle);
+        let schema = schema_s_string();
+        let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
+        let s = format!("{}", expr);
+        assert!(
+            s.contains("like") || s.contains("LIKE"),
+            "expected like in {s}"
+        );
+        assert!(s.contains("prefix"), "expected 'prefix' in {s}");
+        assert!(s.contains('%'), "expected '%' wildcard in {s}");
+        assert!(s.contains('s'), "expected column 's' in {s}");
+    }
+
+    /// ends_with structural — `like(col, lit("%suffix"))`.
+    #[cfg(feature = "strings")]
+    #[test]
+    fn shape_ends_with_structural() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "suffix");
+        let n = string_function(&mut arena, IRStringFunction::EndsWith, c, needle);
+        let schema = schema_s_string();
+        let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
+        let s = format!("{}", expr);
+        assert!(
+            s.contains("like") || s.contains("LIKE"),
+            "expected like in {s}"
+        );
+        assert!(s.contains("suffix"), "expected 'suffix' in {s}");
+        assert!(s.contains('%'), "expected '%' wildcard in {s}");
+    }
+
+    /// contains{literal:true} structural — `like(col, lit("%sub%"))`.
+    #[cfg(all(feature = "strings", feature = "regex"))]
+    #[test]
+    fn shape_contains_literal_true_structural() {
+        let mut arena = Arena::new();
+        let c = col(&mut arena, "s");
+        let needle = lit_str(&mut arena, "sub");
+        let n = string_function(
+            &mut arena,
+            IRStringFunction::Contains {
+                literal: true,
+                strict: false,
+            },
+            c,
+            needle,
+        );
+        let schema = schema_s_string();
+        let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
+        let s = format!("{}", expr);
+        assert!(
+            s.contains("like") || s.contains("LIKE"),
+            "expected like in {s}"
+        );
+        assert!(s.contains("sub"), "expected 'sub' in {s}");
+        // Both '%' wildcards present (prefix + suffix).
+        assert!(
+            s.matches('%').count() >= 2,
+            "expected two '%' wildcards in {s}"
+        );
+    }
+
+    /// Ternary structural — `case_when(condition, then, else)`. A paste-swap to
+    /// `if` or wrong builder would change the display anchor.
+    #[test]
+    fn shape_ternary_structural() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let predicate = binop(&mut arena, a, Operator::Eq, one);
+        let a2 = col(&mut arena, "a");
+        let b = col(&mut arena, "b");
+        let n = arena.add(AExpr::Ternary {
+            predicate,
+            truthy: a2,
+            falsy: b,
+        });
+        let schema = schema_a_b_int32();
+        let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
+        let s = format!("{}", expr);
+        // Vortex's case_when builder produces a "case" or "case_when" anchor.
+        assert!(
+            s.contains("case") || s.contains("CASE") || s.contains("when"),
+            "expected case/case_when in {s}"
+        );
+        assert!(s.contains('a'), "expected column 'a' in {s}");
+        assert!(s.contains('b'), "expected column 'b' in {s}");
     }
 }
