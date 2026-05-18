@@ -1,6 +1,6 @@
 # Vortex Integration into Polars — big-plans plan
 
-> Continuation of [spiraldb/polars#1](https://github.com/spiraldb/polars/pull/1) (`vortex-integration`, 31 existing commits, +6,497/-80, 73 tests). big-plans takes over the remaining work — retroactive ratification + CI green-up + PR-13 aggressive AExpr pushdown + PR-8 file-stats + PR-6 multi-file/nested coverage + PR-14 benches — and lands as one squash-merged PR onto `spiraldb:main`.
+> Continuation of the polars-vortex integration on `vortex-integration` (started at 31 commits, +6,497/-80, 73 tests). big-plans took over the remaining work — retroactive ratification + CI green-up + PR-13 aggressive AExpr pushdown + Criterion bench harness + PR-8 file-stats + PR-6 multi-file/nested coverage + PR-14 extended benches. As of 2026-05-17 the work ships as a **2-branch GitHub stack** (see §"GitHub PR stacking strategy" below): **PR #2** [spiraldb/polars#2](https://github.com/spiraldb/polars/pull/2) is Phase 1 (functional + benches; base `main`); **PR #1** [spiraldb/polars#1](https://github.com/spiraldb/polars/pull/1) is Phase 2 (AExpr-direct pushdown; base `vortex-integration-phase-1`). Phases 3 + 4 still to ship as further stacked PRs.
 
 ## Current State
 
@@ -8,14 +8,14 @@
 status: paused
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 COMPLETE + restructured into 2-branch GitHub stack; paused before Phase 3 entry per user direction"
+current_phase: "Phase 2 COMPLETE + restructured into 2-branch GitHub stack; PRs #1 + #2 open with full bodies; paused before Phase 3 entry per user direction"
 phase_index: 2
 current_pr: null
 pr_index: 7
 outstanding_must_fix: 0
 deferred_items_total: 14
-last_user_touchpoint: 2026-05-17T02:00:00Z
-last_user_touchpoint_what: "Phase 2 → 3 restructure: user proposed 2-branch GitHub stack with benchmarks IN the Phase 1 PR; PR-1.5 (Vortex Criterion bench harness) added to Phase 1 branch; Phase 2 branch rebased onto new Phase 1 tip; ready to push + retarget PR #1"
+last_user_touchpoint: 2026-05-17T02:30:00Z
+last_user_touchpoint_what: "PR title + body edits committed: PR #2 (Phase 1 + benches) and PR #1 (Phase 2 stacked) both have substantive descriptions; branch tip at d89b7a502 pushed to spiraldb; ready to resume at Phase 3 entry when user returns"
 subagent_invocations_this_pr: 4
 subagent_invocations_total: 41
 review_cycles_this_pr: 1
@@ -24,7 +24,7 @@ phase_end_cycle: 1
 phase_end_reject_cycles: 0
 last_phase_end_verdict: accept
 current_pr_is_ci_reopen: null
-last_commit: 27cb49d6d
+last_commit: d89b7a502
 ```
 
 ## Context
