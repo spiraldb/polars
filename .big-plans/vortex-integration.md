@@ -12,7 +12,7 @@ current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) cycle 1 rejected —
 phase_index: 2
 current_pr: PR-2.7
 pr_index: 8
-outstanding_must_fix: 3
+outstanding_must_fix: 2
 deferred_items_total: 14
 last_user_touchpoint: 2026-05-18T23:00:00Z
 last_user_touchpoint_what: "PR-2.7 cycle 1 gauntlet returned REJECT (3 must-fix, 6 should-fix, 2 nit): is_between pairwise-PType gate + Ternary THEN/ELSE pairwise-dtype gate + StringExpr Utf8 input gate; all three same bug class as PR-2.3 CAST + PR-2.4 comparison gates. User picked apply-all-must-fix+key-should-fix inline; entering Step 2.4 fix-application loop"
