@@ -8,23 +8,23 @@
 status: awaiting-review
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) inner-loop 2-vote pr-2 review pending; PR-2.8 (virtual-column per-column split) queued"
+current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) cycle 1 rejected — 3 must-fix schema-gate items + 6 should-fix; entering Step 2.4 fix-application; PR-2.8 still queued"
 phase_index: 2
 current_pr: PR-2.7
 pr_index: 8
-outstanding_must_fix: 0
+outstanding_must_fix: 3
 deferred_items_total: 14
-last_user_touchpoint: 2026-05-18T22:30:00Z
-last_user_touchpoint_what: "amend-completion + PR-2.7 implementation landed: 065df50278 convertor (6 new arms + helper + 9 unit tests, all 72 vortex_convertor tests pass) + 0e2c26f84f e2e (7 new Python tests + README pushdown table refresh + dprint reflow); awaiting 2-vote pr-2 gauntlet review on PR-2.7 diff (16e14b4697..HEAD)"
-subagent_invocations_this_pr: 0
-subagent_invocations_total: 41
-review_cycles_this_pr: 0
+last_user_touchpoint: 2026-05-18T23:00:00Z
+last_user_touchpoint_what: "PR-2.7 cycle 1 gauntlet returned REJECT (3 must-fix, 6 should-fix, 2 nit): is_between pairwise-PType gate + Ternary THEN/ELSE pairwise-dtype gate + StringExpr Utf8 input gate; all three same bug class as PR-2.3 CAST + PR-2.4 comparison gates. User picked apply-all-must-fix+key-should-fix inline; entering Step 2.4 fix-application loop"
+subagent_invocations_this_pr: 1
+subagent_invocations_total: 42
+review_cycles_this_pr: 1
 phase_entry_sha: 93643dd77
 phase_end_cycle: 1
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 0e2c26f84f
+last_commit: 8639dd51c0
 ```
 
 ## Context
