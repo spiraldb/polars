@@ -1,30 +1,45 @@
-# Vortex Integration into Polars — big-plans plan
+# Vortex Integration into Polars — big-plans plan (Phase 2 branch)
 
-> Continuation of the polars-vortex integration on `vortex-integration` (started at 31 commits, +6,497/-80, 73 tests). big-plans took over the remaining work — retroactive ratification + CI green-up + PR-13 aggressive AExpr pushdown + Criterion bench harness + PR-8 file-stats + PR-6 multi-file/nested coverage + PR-14 extended benches. As of 2026-05-17 the work ships as a **2-branch GitHub stack** (see §"GitHub PR stacking strategy" below): **PR #2** [spiraldb/polars#2](https://github.com/spiraldb/polars/pull/2) is Phase 1 (functional + benches; base `main`); **PR #1** [spiraldb/polars#1](https://github.com/spiraldb/polars/pull/1) is Phase 2 (AExpr-direct pushdown; base `vortex-integration-phase-1`). Phases 3 + 4 still to ship as further stacked PRs.
+> **2026-05-19 re-stack**: This branch (`vortex-integration`) is now **Phase 2 only** — AExpr-direct convertor + Option B→A cutover (PR-2.1 through PR-2.8 amend). PR-2.0 cleanups (segment_cache thread-through, etc.) and Phase 3 work (file-stats, multi-file tests) MOVED to the Phase 1++ branch (`vortex-integration-phase-1`) so the user-facing PR split is "Phase 1++ = complete robust Vortex integration" + "Phase 2 = pure perf follow-on (AExpr-direct pushdown vs legacy SpecializedColumnPredicate)". Backup at `backup-vortex-integration-pre-restack`.
+>
+> **Phase 2 contents on this branch** (60 commits, rebased onto Phase 1++ tip):
+> - PR-2.1 — AExpr-direct convertor module foundation (Column/Literal/comparisons/booleans/null-checks)
+> - PR-2.2 — wire convertor at lower_ir.rs + Plus arithmetic
+> - PR-2.3 — CAST in predicates (same-kind + Strict only)
+> - PR-2.4 — Struct field access + proactive Plus cross-PType gate
+> - PR-2.5 — Temporal extracts (SLIPPED; Vortex 0.70.0 lacks public datetime_parts)
+> - PR-2.6 — Option B → A cutover (delete legacy SpecializedColumnPredicate fast path)
+> - Phase 2 cycle-1 phase-end should-fix sweep (CI green-up, plan/doc cleanup, orphan stub removal)
+> - PR-2.7 — Cutover-lost shapes (is_between, is_in, starts_with, ends_with, str.contains{literal:true}, Ternary; 3 must-fix gates from cycle-1; cycle-2 polish; cycle 3 accept)
+> - PR-2.8 — Virtual-column per-column predicate split (MintermIter-based)
+> - Phase 2 cycle-2 phase-end sweep (3 must-fix + 4 should-fix including SCHEMA-GATE markers)
+> - Phase 2 cycle-3 phase-end accept + lint fixes
+>
+> Phase 2's last commit was `7b0f6709f7` pre-restack; the rebased equivalent is the current tip. The Phase 2 cycle-3 4-vote phase-end ACCEPTED verdict is preserved through the rebase.
 
 ## Current State
 
 ```yaml
 status: phase-boundary
-branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
+branch: vortex-integration (Phase 2 stack tip; REBASED 2026-05-19 onto extended vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 COMPLETE — cycle 3 4-vote phase-end ACCEPTED; awaiting Step 3.4 user gate"
+current_phase: "Phase 2 COMPLETE — re-stacked 2026-05-19 onto Phase 1++ tip"
 phase_index: 2
 current_pr: null
 pr_index: 9
 outstanding_must_fix: 0
 deferred_items_total: 16
-last_user_touchpoint: 2026-05-19T00:45:00Z
-last_user_touchpoint_what: "Phase 2 cycle 2 4-vote gauntlet REJECTED (3 must-fix: spec MF Deferred entries not strikethrough; 2 maint MF stale e2e docstrings). Cycle 2 sweep commit 0a1475b54b applied 3 must-fix + 4 should-fix (Deferred entries strikethrough/RESOLVED in PR-2.7; 2 docstring rewrites; predicate.rs header refresh; README inner-table refresh; cross-PR unit test minterms_is_between_with_virtual_col_pushes_is_between_only; 8 SCHEMA-GATE markers + module-doc convention section; is_in arena-level structural test added as Deferred per spec reviewer Option (b)). Phase 2 cycle 3 4-vote gauntlet ACCEPTED (spec/correctness/maint/arch all 0 must-fix, 0 should-fix, 0 nit; phase-4 preset). 94 unit tests pass (+1 cross-PR) + 13 e2e tests pass. Phase 2 amend (PR-2.7 + PR-2.8) totals 30 commits; Phase 2 cumulative is 78 commits. Phase 2 exit criteria (a/b/c/d/e/f/g) all SATISFIED. Awaiting Step 3.4 user gate: (proceed to Phase 3 / re-plan / amend / pause / abort)."
+last_user_touchpoint: 2026-05-19T05:00:00Z
+last_user_touchpoint_what: "Re-stack complete: 60 Phase 2 commits rebased onto extended vortex-integration-phase-1 tip (which now includes Phase 3 file-stats / multi-file work + PR-2.0 cleanups). Branch ready for cycle-3 phase-end accept verdict to carry forward; PR #1 base needs retargeting to vortex-integration-phase-1 (Phase 1++) tip. Plan rewrite + full Implementation status update deferred to next session."
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 60
 review_cycles_this_pr: 0
-phase_entry_sha: 93643dd77
+phase_entry_sha: 3aabb7693d
 phase_end_cycle: 3
 phase_end_reject_cycles: 1
 last_phase_end_verdict: accept
 current_pr_is_ci_reopen: null
-last_commit: 0a1475b54b
+last_commit: 01e89522d2
 ```
 
 ## Context
