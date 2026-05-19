@@ -2489,14 +2489,28 @@ mod tests {
         assert!(s.contains('x'), "expected column 'x' in {s}");
         assert!(s.contains("10"), "expected literal 10 in {s}");
         assert!(s.contains("20"), "expected literal 20 in {s}");
-        // Negative check: a paste-swap to eq would produce an 'eq' or '=='.
+        // Paste-swap anchor (PR-2.7 cycle-2 should-fix #3): an `eq` paste-swap
+        // would produce `(x = 10) AND (x = 20)` — no `>` / `<` chars. The
+        // correct form contains both. The cycle-1 negative anchor checked
+        // `!s.contains("eq(") && !s.contains("==")` which was vacuous: Vortex
+        // displays binary ops as single-char `=`, never `eq(` or `==`.
         assert!(
-            !s.contains("eq(") && !s.contains("=="),
-            "unexpected eq/== in {s} (paste-swap regression?)"
+            s.contains('>'),
+            "expected '>' (in '>=') in {s} (paste-swap to eq?)"
+        );
+        assert!(
+            s.contains('<'),
+            "expected '<' (in '<=') in {s} (paste-swap to eq?)"
         );
     }
 
     /// starts_with structural — `like(col, lit("prefix%"))`.
+    ///
+    /// PR-2.7 cycle-2 should-fix #4 strengthens this test: assert the JOINT
+    /// substring `prefix%` (in order) AND the negative anchor `!"%prefix"`. The
+    /// cycle-1 version only checked `s.contains("prefix")` + `s.contains('%')`
+    /// independently, which a paste-swap to the ends_with branch (producing
+    /// `like(col, "%prefix")`) would silently pass.
     #[cfg(feature = "strings")]
     #[test]
     fn shape_starts_with_structural() {
@@ -2511,12 +2525,24 @@ mod tests {
             s.contains("like") || s.contains("LIKE"),
             "expected like in {s}"
         );
-        assert!(s.contains("prefix"), "expected 'prefix' in {s}");
-        assert!(s.contains('%'), "expected '%' wildcard in {s}");
         assert!(s.contains('s'), "expected column 's' in {s}");
+        // Joint-substring positive anchor (PR-2.7 cycle-2 should-fix #4):
+        // correct starts_with emits `prefix%` (% AFTER needle).
+        assert!(
+            s.contains("prefix%"),
+            "expected joint 'prefix%' (% after needle) in {s} \
+             (paste-swap to ends_with would emit '%prefix' instead)"
+        );
+        // Negative anchor: ends_with's `%prefix` pattern must be absent.
+        assert!(
+            !s.contains("%prefix"),
+            "unexpected '%prefix' (% before needle) in {s} \
+             (paste-swap to ends_with branch?)"
+        );
     }
 
-    /// ends_with structural — `like(col, lit("%suffix"))`.
+    /// ends_with structural — `like(col, lit("%suffix"))`. Same joint+negative
+    /// discipline as `shape_starts_with_structural` (PR-2.7 cycle-2 should-fix #4).
     #[cfg(feature = "strings")]
     #[test]
     fn shape_ends_with_structural() {
@@ -2531,8 +2557,18 @@ mod tests {
             s.contains("like") || s.contains("LIKE"),
             "expected like in {s}"
         );
-        assert!(s.contains("suffix"), "expected 'suffix' in {s}");
-        assert!(s.contains('%'), "expected '%' wildcard in {s}");
+        // Joint-substring positive anchor: correct ends_with emits `%suffix`.
+        assert!(
+            s.contains("%suffix"),
+            "expected joint '%suffix' (% before needle) in {s} \
+             (paste-swap to starts_with would emit 'suffix%' instead)"
+        );
+        // Negative anchor: starts_with's `suffix%` pattern must be absent.
+        assert!(
+            !s.contains("suffix%"),
+            "unexpected 'suffix%' (% after needle) in {s} \
+             (paste-swap to starts_with branch?)"
+        );
     }
 
     /// contains{literal:true} structural — `like(col, lit("%sub%"))`.
@@ -2568,18 +2604,25 @@ mod tests {
 
     /// Ternary structural — `case_when(condition, then, else)`. A paste-swap to
     /// `if` or wrong builder would change the display anchor.
+    ///
+    /// PR-2.7 cycle-2 should-fix #5 strengthens this test: use distinct integer
+    /// literals (777 truthy, 888 falsy) so positional ordering becomes
+    /// asserting. The cycle-1 version used col 'a' (truthy) + col 'b' (falsy)
+    /// which a paste-swap to `case_when(cond, b, a)` would silently pass (both
+    /// columns remain present in the display).
     #[test]
     fn shape_ternary_structural() {
         let mut arena = Arena::new();
         let a = col(&mut arena, "a");
         let one = lit_i32(&mut arena, 1);
         let predicate = binop(&mut arena, a, Operator::Eq, one);
-        let a2 = col(&mut arena, "a");
-        let b = col(&mut arena, "b");
+        // Distinct integer literals discriminate paste-swap order.
+        let truthy = lit_i32(&mut arena, 777);
+        let falsy = lit_i32(&mut arena, 888);
         let n = arena.add(AExpr::Ternary {
             predicate,
-            truthy: a2,
-            falsy: b,
+            truthy,
+            falsy,
         });
         let schema = schema_a_b_int32();
         let expr = aexpr_to_vortex_expression(n, &arena, Some(&schema)).expect("Some");
@@ -2589,7 +2632,16 @@ mod tests {
             s.contains("case") || s.contains("CASE") || s.contains("when"),
             "expected case/case_when in {s}"
         );
-        assert!(s.contains('a'), "expected column 'a' in {s}");
-        assert!(s.contains('b'), "expected column 'b' in {s}");
+        assert!(s.contains("777"), "expected truthy literal 777 in {s}");
+        assert!(s.contains("888"), "expected falsy literal 888 in {s}");
+        // Positional-ordering anchor: in a correct case_when(cond, 777, 888),
+        // the truthy 777 appears BEFORE the falsy 888 in the display string.
+        let t_pos = s.find("777").expect("777 absent");
+        let f_pos = s.find("888").expect("888 absent");
+        assert!(
+            t_pos < f_pos,
+            "expected truthy 777 BEFORE falsy 888 in {s} \
+             (paste-swap to case_when(cond, falsy, truthy)?)"
+        );
     }
 }
