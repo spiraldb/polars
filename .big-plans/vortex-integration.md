@@ -5,17 +5,17 @@
 ## Current State
 
 ```yaml
-status: executing
+status: awaiting-review
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) COMPLETE across 3 review cycles (reject → accept-with-polish → accept-clean); entering PR-2.8 (virtual-column per-column split)"
+current_phase: "Phase 2 amend: PR-2.7 COMPLETE; PR-2.8 (virtual-column per-column split) cycle 1 awaiting 2-vote pr-2 gauntlet review"
 phase_index: 2
 current_pr: PR-2.8
 pr_index: 9
 outstanding_must_fix: 0
 deferred_items_total: 15
-last_user_touchpoint: 2026-05-19T00:30:00Z
-last_user_touchpoint_what: "PR-2.7 complete: 3-cycle gauntlet history (cycle 1 REJECT — 3 must-fix schema gates + 6 should-fix; cycle 2 ACCEPT — applied all 3 must-fix + 6 should-fix + 2 nit inline; cycle 3 ACCEPT — verified polish clean). 17 PR-work commits ending at 71540df77; 25 new convertor unit tests + 7 e2e Python tests; confidence high; 1 new Deferred item (NaN divergence). Entering PR-2.8 Step 2.1 — virtual-column per-column split refactor at polars-stream/src/physical_plan/lower_ir.rs:780-815"
+last_user_touchpoint: 2026-05-19T00:45:00Z
+last_user_touchpoint_what: "PR-2.8 cycle 1 implementation landed: 9d9469f5a (3 files; ~270 LoC; convertor helper aexpr_file_minterms_to_vortex_expression + lower_ir.rs refactor from all-or-nothing to per-column split + 5 new unit tests + 1 new e2e Python test). 93 unit tests pass (was 88; +5). Umbrella cargo check clean. Awaiting 2-vote pr-2 gauntlet review on PR-2.8 diff (024341dc21..HEAD = 1 commit)"
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 45
 review_cycles_this_pr: 0
@@ -24,7 +24,7 @@ phase_end_cycle: 1
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 71540df774
+last_commit: 9d9469f5a
 ```
 
 ## Context
