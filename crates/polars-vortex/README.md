@@ -159,37 +159,36 @@ impl) → morsels are converted to Vortex `ArrayRef`s by the reverse C-ABI bridg
    `VortexReaderBuilder.aexpr_filter` and consumed by `VortexFileReader::begin_read` →
    `ScanBuilder::with_filter`. Coverage:
 
-   | Polars `AExpr` shape                              | Vortex `Expression`                     | Gates                                  |
-   | ------------------------------------------------- | --------------------------------------- | -------------------------------------- |
-   | `Column(name)`                                    | `get_item(name, root())`                | virtual-col drop in helper (PR-2.8)    |
-   | `Literal(Scalar)`                                 | `lit(polars_scalar_to_vortex(...))`     | none                                   |
-   | comparisons (Eq/NotEq/Lt/LtEq/Gt/GtEq)            | `eq`/`not_eq`/`lt`/`lt_eq`/`gt`/`gt_eq` | pairwise-equal-PType + schema          |
-   | logical AND/OR (And/Or/LogicalAnd/LogicalOr)      | `and`/`or`                              | bitwise-vs-logical schema gate         |
-   | numeric addition (Plus)                           | `checked_add`                           | numeric + pairwise-equal-PType         |
-   | same-kind CAST (Strict only)                      | `cast(child, vortex_dtype)`             | source-kind + Strict-options gates     |
-   | struct field access (`col.struct.field("inner")`) | `get_item(field_name, struct_expr)`     | schema-membership gate                 |
-   | `IsNull` / `IsNotNull`                            | `is_null` / `is_not_null`               | none                                   |
-   | `Not`                                             | `not`                                   | boolean-only schema gate               |
-   | `is_between(lo, hi, closed)` (PR-2.7)             | `and(gt/gt_eq, lt/lt_eq)`               | pairwise-PType (col vs lo/hi)          |
-   | `is_in([scalars])` (PR-2.7)                       | `or_collect(eq(col, s_i) for s_i)`      | refuse on nulls_equal + had_nulls      |
-   | `str.starts_with(prefix)` (PR-2.7)                | `like(col, lit("prefix%"))`             | Utf8 input + `bytes_to_like_literal`   |
-   | `str.ends_with(suffix)` (PR-2.7)                  | `like(col, lit("%suffix"))`             | Utf8 input + `bytes_to_like_literal`   |
-   | `str.contains(needle, literal=True)` (PR-2.7)     | `like(col, lit("%needle%"))`            | Utf8 input + `bytes_to_like_literal`   |
-   | `Ternary(p, t, f)` (PR-2.7)                       | `case_when([(p, t)], Some(f))`          | THEN/ELSE pairwise-dtype + schema      |
+   | Polars `AExpr` shape                              | Vortex `Expression`                     | Gates                                |
+   | ------------------------------------------------- | --------------------------------------- | ------------------------------------ |
+   | `Column(name)`                                    | `get_item(name, root())`                | virtual-col drop in helper (PR-2.8)  |
+   | `Literal(Scalar)`                                 | `lit(polars_scalar_to_vortex(...))`     | none                                 |
+   | comparisons (Eq/NotEq/Lt/LtEq/Gt/GtEq)            | `eq`/`not_eq`/`lt`/`lt_eq`/`gt`/`gt_eq` | pairwise-equal-PType + schema        |
+   | logical AND/OR (And/Or/LogicalAnd/LogicalOr)      | `and`/`or`                              | bitwise-vs-logical schema gate       |
+   | numeric addition (Plus)                           | `checked_add`                           | numeric + pairwise-equal-PType       |
+   | same-kind CAST (Strict only)                      | `cast(child, vortex_dtype)`             | source-kind + Strict-options gates   |
+   | struct field access (`col.struct.field("inner")`) | `get_item(field_name, struct_expr)`     | schema-membership gate               |
+   | `IsNull` / `IsNotNull`                            | `is_null` / `is_not_null`               | none                                 |
+   | `Not`                                             | `not`                                   | boolean-only schema gate             |
+   | `is_between(lo, hi, closed)` (PR-2.7)             | `and(gt/gt_eq, lt/lt_eq)`               | pairwise-PType (col vs lo/hi)        |
+   | `is_in([scalars])` (PR-2.7)                       | `or_collect(eq(col, s_i) for s_i)`      | refuse on nulls_equal + had_nulls    |
+   | `str.starts_with(prefix)` (PR-2.7)                | `like(col, lit("prefix%"))`             | Utf8 input + `bytes_to_like_literal` |
+   | `str.ends_with(suffix)` (PR-2.7)                  | `like(col, lit("%suffix"))`             | Utf8 input + `bytes_to_like_literal` |
+   | `str.contains(needle, literal=True)` (PR-2.7)     | `like(col, lit("%needle%"))`            | Utf8 input + `bytes_to_like_literal` |
+   | `Ternary(p, t, f)` (PR-2.7)                       | `case_when([(p, t)], Some(f))`          | THEN/ELSE pairwise-dtype + schema    |
 
    Pushdown is refused (returns `None` → residual) for unhandled shapes (Sort, Gather, Filter, Agg,
    AnonymousFunction, Over, Rolling, temporal extracts, `str.contains(literal=False)` regex, etc.),
-   for non-Strict `CastOptions`, for cross-kind CAST, and for cross-PType arithmetic/comparison.
-   For predicates referencing hive partition columns or virtual columns (row_index,
-   include_file_paths), PR-2.8's per-minterm split (`aexpr_file_minterms_to_vortex_expression`)
-   drops minterms whose leaves include any virtual col and AND-collects the file-only minterms —
-   strictly better than the prior all-or-nothing refuse (e.g., `(file_col > 5) & (year == 2024)`
-   with `year` hive now pushes the `file_col > 5` part). The reader advertises
-   `ReaderCapabilities::PARTIAL_FILTER`, so Polars' multi-scan layer always re-applies the
-   original full predicate post-decode. Result: pushdown is always _safe_, just sometimes
-   _partial_. Historical note: PR-2.6 deleted the previous `SpecializedColumnPredicate`-derived
-   path (a parallel fast path during PR-13.1–.5); PR-2.7 + PR-2.8 then ported the remaining
-   shapes back into the AExpr-direct convertor.
+   for non-Strict `CastOptions`, for cross-kind CAST, and for cross-PType arithmetic/comparison. For
+   predicates referencing hive partition columns or virtual columns (row_index, include_file_paths),
+   PR-2.8's per-minterm split (`aexpr_file_minterms_to_vortex_expression`) drops minterms whose
+   leaves include any virtual col and AND-collects the file-only minterms — strictly better than the
+   prior all-or-nothing refuse (e.g., `(file_col > 5) & (year == 2024)` with `year` hive now pushes
+   the `file_col > 5` part). The reader advertises `ReaderCapabilities::PARTIAL_FILTER`, so Polars'
+   multi-scan layer always re-applies the original full predicate post-decode. Result: pushdown is
+   always _safe_, just sometimes _partial_. Historical note: PR-2.6 deleted the previous
+   `SpecializedColumnPredicate`-derived path (a parallel fast path during PR-13.1–.5); PR-2.7 +
+   PR-2.8 then ported the remaining shapes back into the AExpr-direct convertor.
 
 ## Cargo features
 
