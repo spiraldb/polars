@@ -631,7 +631,14 @@ def test_scan_with_row_index_and_file_col_mixed_filter(tmp_path: Path) -> None:
 def test_scan_with_include_file_paths_and_file_col_mixed_filter(tmp_path: Path) -> None:
     """PR-2.8 cycle 2: include_file_paths virtual col + file col mixed filter
     splits the predicate per-minterm. The ``x > 5`` minterm pushes to Vortex;
-    the ``pl.col("src").str.contains("a")`` minterm stays residual.
+    the ``pl.col("src").str.ends_with("a.vortex")`` minterm stays residual.
+
+    Note: ``include_file_paths`` populates ``src`` with the FULL path (per
+    ``ScanSourceRef::to_include_path_name`` at
+    ``crates/polars-plan/src/dsl/scan_sources.rs``), not the basename. The
+    discriminator must therefore anchor on a substring that does NOT appear in
+    pytest's ``tmp_path`` parent directory; ``str.ends_with("a.vortex")``
+    anchors on the basename suffix and is robust across CI environments.
 
     A regression where the per-column split mis-classified ``src`` as a file
     column would surface as a ``ComputeError`` from Vortex bailing on missing
@@ -644,14 +651,14 @@ def test_scan_with_include_file_paths_and_file_col_mixed_filter(tmp_path: Path) 
 
     out = (
         pl.scan_vortex([a, b], include_file_paths="src")
-        .filter((pl.col("x") > 5) & pl.col("src").str.contains("a"))
+        .filter((pl.col("x") > 5) & pl.col("src").str.ends_with("a.vortex"))
         .collect()
     )
-    # a.vortex's x: 1,3,5,7,9 → x > 5 → 7, 9 (src="a.vortex" matches "a")
-    # b.vortex's x: 2,4,6,8,10 → x > 5 → 6, 8, 10 (src="b.vortex" does NOT contain "a")
+    # a.vortex's x: 1,3,5,7,9 → x > 5 → 7, 9 (src ends with "a.vortex" → match)
+    # b.vortex's x: 2,4,6,8,10 → x > 5 → 6, 8, 10 (src ends with "b.vortex" → no match)
     assert out.shape == (2, 2)
     assert sorted(out["x"].to_list()) == [7, 9]
-    assert all("a.vortex" in s for s in out["src"].to_list())
+    assert all(s.endswith("a.vortex") for s in out["src"].to_list())
 
 
 def test_scan_with_starts_with_wildcard_in_needle(tmp_path: Path) -> None:
