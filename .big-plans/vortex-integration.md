@@ -8,23 +8,23 @@
 status: phase-boundary
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 amend: PR-2.7 + PR-2.8 COMPLETE; ready for cumulative Phase 2 cycle-2 phase-end 4-vote gauntlet"
+current_phase: "Phase 2 COMPLETE — cycle 3 4-vote phase-end ACCEPTED; awaiting Step 3.4 user gate"
 phase_index: 2
 current_pr: null
 pr_index: 9
 outstanding_must_fix: 0
-deferred_items_total: 15
+deferred_items_total: 16
 last_user_touchpoint: 2026-05-19T00:45:00Z
-last_user_touchpoint_what: "PR-2.8 cycle 1 implementation landed: 9d9469f5a; cycle 2 polish landed: f55e00b3e9 (structural assertions on 3 minterms_* unit tests + 2 new e2e tests for row_index/include_file_paths virtual cols); cycle 3 must-fix fix: c9fd818616 (test_scan_with_include_file_paths_and_file_col_mixed_filter discriminator: str.contains('a') → str.ends_with('a.vortex'); FULL-path semantics of include_file_paths caught by both reviewers). PR-2.8 cycle 3 gauntlet ACCEPTED (2-vote pr-2: 0 must-fix, 0 should-fix, 0 nit; both lenses clean). Total: 4 commits in PR-2.8 (impl + plan + cycle 2 polish + cycle 3 fix). 93 unit tests pass + 13 e2e tests pass (2 new from PR-2.8 cycle 2). PR-2.8 closes Deferred entry 'Virtual-column-partitioned Vortex scans don't benefit from AExpr convertor pushdown' (PR-2.2 cycle-1 must-fix M1 + cycle-2 C2-001). Next: cumulative Phase 2 cycle-2 4-vote phase-end gauntlet"
-subagent_invocations_this_pr: 6
-subagent_invocations_total: 51
-review_cycles_this_pr: 3
+last_user_touchpoint_what: "Phase 2 cycle 2 4-vote gauntlet REJECTED (3 must-fix: spec MF Deferred entries not strikethrough; 2 maint MF stale e2e docstrings). Cycle 2 sweep commit 0a1475b54b applied 3 must-fix + 4 should-fix (Deferred entries strikethrough/RESOLVED in PR-2.7; 2 docstring rewrites; predicate.rs header refresh; README inner-table refresh; cross-PR unit test minterms_is_between_with_virtual_col_pushes_is_between_only; 8 SCHEMA-GATE markers + module-doc convention section; is_in arena-level structural test added as Deferred per spec reviewer Option (b)). Phase 2 cycle 3 4-vote gauntlet ACCEPTED (spec/correctness/maint/arch all 0 must-fix, 0 should-fix, 0 nit; phase-4 preset). 94 unit tests pass (+1 cross-PR) + 13 e2e tests pass. Phase 2 amend (PR-2.7 + PR-2.8) totals 30 commits; Phase 2 cumulative is 78 commits. Phase 2 exit criteria (a/b/c/d/e/f/g) all SATISFIED. Awaiting Step 3.4 user gate: (proceed to Phase 3 / re-plan / amend / pause / abort)."
+subagent_invocations_this_pr: 0
+subagent_invocations_total: 60
+review_cycles_this_pr: 0
 phase_entry_sha: 93643dd77
-phase_end_cycle: 2
-phase_end_reject_cycles: 0
-last_phase_end_verdict: null
+phase_end_cycle: 3
+phase_end_reject_cycles: 1
+last_phase_end_verdict: accept
 current_pr_is_ci_reopen: null
-last_commit: c9fd818616
+last_commit: 0a1475b54b
 ```
 
 ## Context
