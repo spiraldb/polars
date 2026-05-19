@@ -212,18 +212,32 @@ def test_scan_with_cross_kind_cast_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
-    """PR-2.2 cycle-1 M1 regression: hive-partitioned scans with filter must not crash.
+    """PR-2.2 cycle-1 M1 regression (mechanism updated by PR-2.8): hive-partitioned
+    scans with a hive-only-column filter must not crash.
 
-    The convertor at lower_ir.rs would otherwise emit
-    ``get_item(hive_col, root())`` references to columns that don't exist in
-    the per-file Vortex data.
+    Without protection, the convertor at ``lower_ir.rs`` would emit a Vortex
+    ``get_item('year', root())`` reference to a column that doesn't exist in
+    the per-file Vortex data (``year`` is a HIVE virtual column, synthesized
+    after decode from the directory structure).
 
-    The cycle-1 guard at ``lower_ir.rs:780-791`` refuses convertor pushdown
-    when ``hive_parts.is_some()``; the legacy ``polars_to_vortex_predicate``
-    fallback (which consumes the hive-stripped
-    ``ScanIOPredicate::column_predicates``) handles the predicate. A
-    regression where the guard is dropped would surface here as a
-    ``ComputeError`` from Vortex bailing on a missing column 'year'.
+    Protection mechanism (updated by PR-2.8): ``aexpr_file_minterms_to_vortex_expression``
+    walks top-level conjuncts via ``MintermIter`` and drops minterms whose
+    leaves are in ``virtual_cols`` (built from ``hive_parts.schema()`` +
+    ``row_index.name`` + ``include_file_paths``). The single minterm
+    ``year == 2024`` references only ``year`` (a hive virtual col), so the
+    helper drops it; ``and_collect(vec![])`` returns ``None``; pushdown is
+    refused; Polars' hive-partition pruning + multi-scan ``PARTIAL_FILTER``
+    reapply produces the correct result.
+
+    Pre-PR-2.8 mechanism: ``lower_ir.rs`` had an all-or-nothing virtual-col
+    guard that refused the WHOLE predicate when ``hive_parts.is_some()``.
+    The guard was REPLACED by PR-2.8's per-minterm split (which is
+    strictly-better — see ``test_scan_with_hive_and_file_col_mixed_filter``
+    for the mixed-shape case it now handles).
+
+    A regression where the per-column split mis-classified ``year`` as a
+    file column would surface as a ``ComputeError`` from Vortex bailing on
+    a missing column 'year'.
     """
     (tmp_path / "year=2024").mkdir()
     (tmp_path / "year=2025").mkdir()
@@ -241,16 +255,30 @@ def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_row_index_and_filter(tmp_path: Path) -> None:
-    """PR-2.2 cycle-2 C2-001 regression: row_index virtual col + filter must not crash.
+    """PR-2.2 cycle-2 C2-001 regression (mechanism updated by PR-2.8): row_index
+    virtual col + row_index-only filter must not crash.
 
-    ``row_index_name`` is a virtual column not present in the Vortex file's
-    data. The cycle-1 hive-only guard at ``lower_ir.rs`` was extended in
-    cycle-2 to also refuse convertor pushdown when
-    ``unified_scan_args.row_index.is_some()`` (and
-    when ``include_file_paths.is_some()``), preventing the convertor from
-    emitting a Vortex ``get_item('ri', root())`` reference to a column
-    Vortex's data doesn't contain. A regression would surface as a
-    ``ComputeError`` from Vortex bailing on missing column 'ri'.
+    ``row_index_name`` synthesizes ``ri`` as a virtual column after decode;
+    ``ri`` is not present in the Vortex file's data. Without protection,
+    the convertor would emit a Vortex ``get_item('ri', root())`` reference
+    that Vortex can't resolve.
+
+    Protection mechanism (updated by PR-2.8): the single minterm
+    ``ri > 10`` references only ``ri`` (a row_index virtual col, included
+    in ``virtual_cols`` at ``lower_ir.rs``); ``aexpr_file_minterms_to_vortex_expression``
+    drops the minterm; ``and_collect(vec![])`` returns ``None``; pushdown
+    is refused; Polars' row-index materialization + multi-scan
+    ``PARTIAL_FILTER`` reapply produces the correct result.
+
+    Pre-PR-2.8 mechanism: ``lower_ir.rs`` had an extended all-or-nothing
+    guard that refused the WHOLE predicate when ``row_index.is_some()`` OR
+    ``include_file_paths.is_some()``. The guard was REPLACED by PR-2.8's
+    per-minterm split (see ``test_scan_with_row_index_and_file_col_mixed_filter``
+    for the mixed-shape case it now handles).
+
+    A regression where the per-column split mis-classified ``ri`` as a file
+    column would surface as a ``ComputeError`` from Vortex bailing on
+    missing column 'ri'.
     """
     path = tmp_path / "ri.vortex"
     pl.DataFrame({"x": list(range(20))}).write_vortex(path)

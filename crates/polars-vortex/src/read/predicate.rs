@@ -12,25 +12,29 @@
 //!
 //! ## Coverage parity with the deleted legacy path
 //!
-//! The AExpr-direct convertor handles:
+//! As of PR-2.7 + PR-2.8 (Phase 2 amend), the AExpr-direct convertor handles:
 //! - Scalar comparisons (Eq / NotEq / Lt / LtEq / Gt / GtEq) — direct mapping
 //! - Boolean combinators (And / Or / Not / IsNull / IsNotNull) — direct mapping
 //! - Plus arithmetic (numeric, same-PType only)
 //! - CAST (same-kind: Primitive↔Primitive, Bool↔Bool, Utf8↔Utf8; Strict only)
 //! - Struct field access (`col.struct.field("inner")`)
+//! - `is_between(lo, hi)` (`AExpr::Function::Boolean(IsBetween)`) — PR-2.7
+//! - `is_in([...])` (`AExpr::Function::Boolean(IsIn)`) — PR-2.7
+//! - `str.starts_with(prefix)` / `str.ends_with(suffix)` (`AExpr::Function::StringExpr(...)`) — PR-2.7
+//! - `str.contains(needle, literal=True)` (maps to `like(col, "%needle%")`) — PR-2.7
+//! - `Ternary { predicate, then, otherwise }` (maps to `case_when([(p, t)], Some(o))`) — PR-2.7
+//! - Per-column file-vs-virtual minterm split for hive / row_index / include_file_paths
+//!   (helper `aexpr_file_minterms_to_vortex_expression`) — PR-2.8
 //! - Multi-column predicates (everything composable via the above)
 //!
-//! Shapes the legacy path covered that the AExpr-direct convertor does NOT yet handle:
-//! - `is_between(lo, hi)` (`AExpr::Function::Boolean(IsBetween)`)
-//! - `is_in([...])` (`AExpr::Function::Boolean(IsIn)`)
-//! - `str.starts_with(prefix)` / `str.ends_with(suffix)` (`AExpr::Function::StringExpr(...)`)
-//!
-//! These four shapes are tracked as Deferred work items
-//! (`.big-plans/vortex-integration.md` — "PR-2.6 cutover-lost pushdown shapes"). They
-//! correctly fall through to residual via the convertor's `_ => None` arm; correctness
-//! is preserved because the multi-scan layer reapplies the full predicate post-decode
-//! (`PARTIAL_FILTER` capability). The loss is a **perf regression only** — these
-//! predicates produce correct results but don't benefit from Vortex zone-pruning.
+//! Remaining residual shapes (perf-only — correctness preserved via `PARTIAL_FILTER`):
+//! - Non-Strict CAST + cross-kind CAST (refused at the CAST arm's kind gate)
+//! - `str.contains(needle, literal=False)` (regex; refused at the StringExpr arm)
+//! - Temporal extracts (`col.dt.year()` etc.) — Vortex 0.70.0 doesn't expose the builders;
+//!   tracked at `.big-plans/vortex-integration.md` Deferred entry "Temporal-extract
+//!   predicate pushdown"
+//! - Float16 — neither `polars_dtype_to_vortex_dtype` nor `is_vortex_numeric_dtype`
+//!   handles `F16` yet; tracked as Deferred
 //!
 //! ## What this module still does
 //!

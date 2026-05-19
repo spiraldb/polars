@@ -82,6 +82,30 @@
 //! thread). `VortexFileReader::begin_read` uses `aexpr_filter` directly. PR-2.6 deleted
 //! the legacy `polars_to_vortex_predicate` (`SpecializedColumnPredicate`-derived) path;
 //! the AExpr-direct convertor is now the sole filter-pushdown path.
+//!
+//! ## SCHEMA-GATE convention (added Phase 2 cycle-2 arch-lens should-fix)
+//!
+//! Each pattern-match arm in [`aexpr_to_vortex_expression`] that DIRECTLY constructs a
+//! Vortex builder (i.e., bypasses the [`AExpr::BinaryExpr`] arm's gates by matching on a
+//! more specific `AExpr` shape) carries a single-line `// SCHEMA-GATE: <kind>` marker as
+//! the first line of the arm body. Greppable via
+//! `rg '// SCHEMA-GATE:' crates/polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs`.
+//!
+//! The marker codifies a recurring discipline: PR-2.2/.3/.4/.7 each surfaced the same bug
+//! class — arms that build Vortex builders directly without revalidating operand types
+//! against the always-SAFE-fallback contract emit expressions that bail at scan-time. The
+//! markers force a future arm-adder to either (a) replicate the gate or (b) explicitly
+//! justify why no gate is needed for the new shape.
+//!
+//! Current gates:
+//! - `AExpr::BinaryExpr` → And/Or boolean-only + Plus pairwise-equal-PType + comparison pairwise-equal-PType
+//! - `is_between` → pairwise-PType across col/lo/hi (col must be numeric and match both bounds)
+//! - `is_in` → `try_extract_is_in_haystack` enforces haystack dtype == column dtype; refuse on `nulls_equal + had_nulls`
+//! - `Function::Boolean(boolean_fn)` (Not/IsNull/IsNotNull) → boolean-only for Not
+//! - `StructField` → schema-membership (struct must contain the requested field)
+//! - `StringExpr` (starts_with/ends_with/contains{literal:true}) → Utf8 input
+//! - `Cast` → source-kind compat + Strict-options only
+//! - `Ternary` → THEN/ELSE pairwise-dtype equality
 
 use polars_core::chunked_array::cast::CastOptions;
 #[cfg(feature = "strings")]
@@ -210,6 +234,7 @@ pub fn aexpr_to_vortex_expression(
 
         // --- comparisons + boolean combinators (BinaryExpr) ---
         AExpr::BinaryExpr { left, op, right } => {
+            // SCHEMA-GATE: And/Or boolean-only + Plus pairwise-equal-PType + comparison pairwise-equal-PType.
             // Bitwise-vs-logical schema gate (cycle-1 should-fix from PR-2.1): Polars
             // `And/Or` are bitwise-or-logical (aexpr/schema.rs:127-149 dispatches through
             // `get_arithmetic_field` so output dtype follows operand dtype). Vortex's
@@ -351,6 +376,7 @@ pub fn aexpr_to_vortex_expression(
             function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween { closed }),
             ..
         } => {
+            // SCHEMA-GATE: pairwise-PType across col/lo/hi (col must be numeric and match both bound dtypes).
             if input.len() != 3 {
                 return None;
             }
@@ -394,6 +420,7 @@ pub fn aexpr_to_vortex_expression(
             function: IRFunctionExpr::Boolean(IRBooleanFunction::IsIn { nulls_equal }),
             ..
         } => {
+            // SCHEMA-GATE: try_extract_is_in_haystack enforces haystack dtype == column dtype; refuse on nulls_equal + had_nulls.
             if input.len() != 2 {
                 return None;
             }
@@ -437,6 +464,7 @@ pub fn aexpr_to_vortex_expression(
             function: IRFunctionExpr::Boolean(boolean_fn),
             ..
         } => {
+            // SCHEMA-GATE: boolean-only for Not (IsNull/IsNotNull accept any dtype).
             // All three of IsNull / IsNotNull / Not are unary — one Node input.
             // `input` is `Vec<ExprIR>`; we take the first and unwrap its node.
             let arg_node = input.first().map(|expr_ir| expr_ir.node())?;
@@ -481,8 +509,8 @@ pub fn aexpr_to_vortex_expression(
             function: IRFunctionExpr::StructExpr(IRStructFunction::FieldByName(name)),
             ..
         } => {
+            // SCHEMA-GATE: schema-membership (struct must contain the requested field).
             let arg_node = input.first().map(|expr_ir| expr_ir.node())?;
-            // Schema-membership gate.
             let s = schema?;
             let inner_dtype = resolve_inner_dtype(arg_node, arena, s)?;
             if !struct_field_exists(&inner_dtype, name) {
@@ -526,6 +554,7 @@ pub fn aexpr_to_vortex_expression(
             function: IRFunctionExpr::StringExpr(string_fn),
             ..
         } => {
+            // SCHEMA-GATE: Utf8 input (refuse non-String column before needle extraction; see must-fix #3).
             if input.len() != 2 {
                 return None;
             }
@@ -597,6 +626,7 @@ pub fn aexpr_to_vortex_expression(
             dtype: target_pl,
             options,
         } => {
+            // SCHEMA-GATE: source-kind compat + Strict-options only (refuses cross-kind + non-Strict casts).
             if !options.is_strict() {
                 return None;
             }
@@ -642,6 +672,7 @@ pub fn aexpr_to_vortex_expression(
             truthy,
             falsy,
         } => {
+            // SCHEMA-GATE: THEN/ELSE pairwise-dtype equality (mirror of Plus/comparison pattern; PR-2.7 cycle-1 must-fix #2).
             let s = schema?;
             let then_dt = resolve_inner_dtype(*truthy, arena, s)?;
             let else_dt = resolve_inner_dtype(*falsy, arena, s)?;
@@ -2045,12 +2076,16 @@ mod tests {
 
     // === PR-2.7 amend tests: cutover-lost pushdown shapes ===
     //
-    // is_between, is_in (covered by e2e Python tests; arena-level Series literal
-    // construction is awkward, so unit coverage stays at e2e), starts_with,
-    // ends_with, contains{literal:true|false}, Ternary. Each new shape gets at
-    // least one positive test (returns Some) and, where applicable, a negative
-    // test exercising the refuse path (returns None) — same discipline as the
-    // PR-2.1 foundation shape tests above.
+    // Coverage: is_between (positive + Left/Right/None variants + cross-PType
+    // gate negative + structural shape_is_between_structural), is_in (positive
+    // arena tests deferred — arena-level Series-literal construction requires
+    // spinning up a polars-core Series + AnyValue::List + DataType::List shell;
+    // coverage stays at the e2e Python layer via test_scan_with_is_in_filter
+    // and the Phase 2 phase-end spec-lens Deferred entry "is_in arena-level
+    // structural test"), starts_with/ends_with/contains{literal:true|false}
+    // (positive + negative + structural variants), Ternary (positive +
+    // cross-dtype gate negative + nested-matching-dtypes via PR-2.7 cycle-2
+    // resolve_inner_dtype Ternary arm + structural).
 
     #[cfg(feature = "is_between")]
     fn schema_x_int32() -> Schema {
@@ -2637,6 +2672,74 @@ mod tests {
             !s.contains("888"),
             "unexpected dropped-side literal 888 (from (b - 7) == 888) in {s} — \
              unsupported Minus subtree leaked into pushdown?"
+        );
+    }
+
+    /// Cross-PR test (Phase 2 cycle-2 correctness lens): PR-2.7 shape
+    /// (`is_between`) inside a PR-2.8 minterm-split with a virtual col. Walks
+    /// the structurally-safe path: `aexpr_to_leaf_names_iter` descends through
+    /// `Function::Boolean(IsBetween)` (per traverse.rs's children_rev), finds
+    /// only `x` (file col, not in virtual_cols), so the is_between minterm is
+    /// kept. The `year == 9999` minterm references `year` (in virtual_cols)
+    /// and is dropped. Helper AND-collects the kept is_between minterm.
+    ///
+    /// Defends against a regression where leaf-walking through Function args
+    /// silently drops or mis-classifies leaves — would manifest as either
+    /// pushing too much (year leaks) or pushing nothing (is_between mis-dropped).
+    #[cfg(feature = "is_between")]
+    #[test]
+    fn minterms_is_between_with_virtual_col_pushes_is_between_only() {
+        use polars_ops::series::ClosedInterval;
+        let mut arena = Arena::new();
+        // is_between(x, 10, 20, Both) — file-only minterm
+        let x = col(&mut arena, "x");
+        let lo = lit_i32(&mut arena, 10);
+        let hi = lit_i32(&mut arena, 20);
+        let x_ir = ExprIR::new(x, OutputName::Alias(PlSmallStr::EMPTY));
+        let lo_ir = ExprIR::new(lo, OutputName::Alias(PlSmallStr::EMPTY));
+        let hi_ir = ExprIR::new(hi, OutputName::Alias(PlSmallStr::EMPTY));
+        let is_between_node = arena.add(AExpr::Function {
+            input: vec![x_ir, lo_ir, hi_ir],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                closed: ClosedInterval::Both,
+            }),
+            options: FunctionOptions::default(),
+        });
+        // year == 9999 — virtual-only minterm (year is hive)
+        let year = col(&mut arena, "year");
+        let ninethousand = lit_i32(&mut arena, 9999);
+        let eq_year = binop(&mut arena, year, Operator::Eq, ninethousand);
+        // Combine via top-level And
+        let and_node = binop(&mut arena, is_between_node, Operator::And, eq_year);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("x"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("year"), DataType::Int32);
+        let mut virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
+        virtual_cols.insert(PlSmallStr::from("year"));
+        let expr = aexpr_file_minterms_to_vortex_expression(
+            and_node,
+            &arena,
+            Some(&schema),
+            &virtual_cols,
+        )
+        .expect("expected is_between minterm to push despite virtual year sibling");
+        let s = format!("{}", expr);
+        // is_between(x, 10, 20, Both) → `and(gt_eq(x, 10), lt_eq(x, 20))`.
+        // Positive anchors: both bounds present (10 + 20) → confirms is_between
+        // structure kept. Negative anchor: dropped-side literal 9999 absent.
+        assert!(
+            s.contains("10"),
+            "expected is_between lower bound 10 in {s}"
+        );
+        assert!(
+            s.contains("20"),
+            "expected is_between upper bound 20 in {s}"
+        );
+        assert!(
+            !s.contains("9999"),
+            "unexpected dropped-side literal 9999 (from year == 9999) in {s} — \
+             virtual conjunct leaked into pushdown? (leaf-walk through is_between's \
+             Function args must descend correctly via aexpr_to_leaf_names_iter)"
         );
     }
 
