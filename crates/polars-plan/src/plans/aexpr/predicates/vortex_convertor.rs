@@ -84,18 +84,25 @@
 //! the AExpr-direct convertor is now the sole filter-pushdown path.
 
 use polars_core::chunked_array::cast::CastOptions;
-use polars_core::prelude::{AnyValue, DataType};
+#[cfg(feature = "strings")]
+use polars_core::prelude::AnyValue;
+use polars_core::prelude::DataType;
 #[cfg(feature = "is_in")]
 use polars_core::scalar::Scalar;
 use polars_core::schema::Schema;
 #[cfg(feature = "is_between")]
 use polars_ops::series::ClosedInterval;
 use polars_utils::arena::{Arena, Node};
+#[cfg(feature = "strings")]
 use polars_vortex::vortex::array::scalar::Scalar as VortexScalar;
 use polars_vortex::vortex::dtype::{DType, Nullability, PType};
+#[cfg(feature = "strings")]
+use polars_vortex::vortex::expr::like;
+#[cfg(feature = "is_in")]
+use polars_vortex::vortex::expr::or_collect;
 use polars_vortex::vortex::expr::{
     Expression, and, case_when, cast, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null,
-    like, lit, lt, lt_eq, not, not_eq, or, or_collect, root,
+    lit, lt, lt_eq, not, not_eq, or, root,
 };
 
 use crate::dsl::Operator;
@@ -951,7 +958,11 @@ fn convert_literal(lv: &LiteralValue) -> Option<Expression> {
 /// Resurrected verbatim from the legacy
 /// `polars-vortex/src/read/predicate.rs::bytes_to_like_literal` (deleted in
 /// PR-2.6's Option B → A cutover); the PR-2.7 amend re-introduces it inline in
-/// the convertor so polars-plan owns its own LIKE-pattern escaping.
+/// the convertor so polars-plan owns its own LIKE-pattern escaping. Gated on
+/// `strings` since the sole caller is the StringExpr arm (PR-2.7 cycle-2
+/// should-fix #2 — avoid unused-fn warning under `--no-default-features
+/// --features vortex`).
+#[cfg(feature = "strings")]
 fn bytes_to_like_literal(bytes: &[u8]) -> Option<&str> {
     let s = std::str::from_utf8(bytes).ok()?;
     if s.contains('%') || s.contains('_') || s.contains('\\') {
