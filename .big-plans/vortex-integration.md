@@ -20,8 +20,8 @@ current_pr: null
 pr_index: 0
 outstanding_must_fix: 0
 deferred_items_total: 20
-last_user_touchpoint: 2026-05-19T05:00:00Z
-last_user_touchpoint_what: "Re-stack complete: cherry-picked Phase 3 work (PR-3.1 file-stats + PR-3.2 multi-file tests, 4 commits) + PR-2.0 cleanup work (6 commits: segment_cache thread-through, C-001/C-002/C-003, C2-001) from old vortex-integration onto vortex-integration-phase-1. Backup branches preserve pre-restack state. Phase 2 branch rebased onto this new Phase 1++ tip in parallel. Plan rewrite + full Implementation status update deferred to next session."
+last_user_touchpoint: 2026-05-19T17:00:00Z
+last_user_touchpoint_what: "Session wrap: re-stack complete (PR-2.0 cleanups + Phase 3 work absorbed onto this branch); Phase 2 branch rebased onto new Phase 1++ tip; both PR descriptions rewritten per spiral:pr-and-issue-voice; PR numbers swapped (PR #1 closed, reopened as #3) so foundation = lower-numbered PR; plan files + memory refreshed. Next session: implement PR-3.3 (nested-type + small-int + POLARS_VERBOSE engagement infra) + Phase 4 extended benches → Phase 1++ phase-end 4-vote gauntlet → ship. See Phases and PRs section for sub-PR detail."
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 64
 review_cycles_this_pr: 0
@@ -30,7 +30,7 @@ phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 3aabb7693d
+last_commit: 089f7715e4
 ```
 
 ## Context
