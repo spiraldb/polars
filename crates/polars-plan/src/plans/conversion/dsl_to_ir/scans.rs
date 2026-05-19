@@ -300,8 +300,13 @@ pub(super) async fn vortex_file_info(
     // matching streaming-source path threads the same value via
     // `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:138`.
     segment_cache: std::sync::Arc<dyn polars_vortex::vortex::layout::segments::SegmentCache>,
-) -> PolarsResult<(FileInfo, Option<polars_vortex::read::VortexFooterRef>)> {
+) -> PolarsResult<(
+    FileInfo,
+    Option<polars_vortex::read::VortexFooterRef>,
+    Option<polars_core::frame::DataFrame>,
+)> {
     use polars_core::runtime::ASYNC;
+    use polars_vortex::read::file_stats::footer_to_table_statistics;
     use polars_vortex::read::read_at::{in_memory_read_at, local_file_read_at};
     use polars_vortex::read::schema::vortex_dtype_to_schema;
     use polars_vortex::session::session;
@@ -349,6 +354,14 @@ pub(super) async fn vortex_file_info(
     // `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs:217` so both
     // row-count read sites in the Vortex pipeline use the same shape.
     let row_count = usize::try_from(vxf.row_count()).unwrap_or(usize::MAX);
+
+    // Extract per-file `TableStatistics` BEFORE row_index synthesis (we want
+    // stats on the FILE columns, not the synthetic row-index column; row_index
+    // extras can be filled in via the `expand_datasets` optimizer pass if the
+    // predicate references the row-index column — see
+    // `crates/polars-plan/src/plans/optimizer/expand_datasets.rs:249-277`).
+    let table_statistics_df = footer_to_table_statistics(vxf.footer(), &pl_schema)?;
+
     if let Some(ri) = row_index {
         insert_row_index_to_schema(Arc::make_mut(&mut pl_schema), ri.name.clone())?;
     }
@@ -365,7 +378,7 @@ pub(super) async fn vortex_file_info(
     );
 
     let footer = Arc::new(vxf.footer().clone());
-    Ok((file_info, Some(footer)))
+    Ok((file_info, Some(footer), table_statistics_df))
 }
 
 pub fn max_metadata_scan_cached() -> usize {
@@ -1031,7 +1044,7 @@ this scan to succeed with an empty DataFrame.",
                     // silently ignoring the user's `cache_mode='off'` opt-out
                     // (cycle-2 should-fix).
                     let segment_cache = options.segment_cache.resolve();
-                    let (mut file_info, mut metadata) = scans::vortex_file_info(
+                    let (mut file_info, mut metadata, table_stats_df) = scans::vortex_file_info(
                         first_scan_source,
                         unified_scan_args.row_index.as_ref(),
                         cloud_options,
@@ -1044,6 +1057,30 @@ this scan to succeed with an empty DataFrame.",
                     if let Some((total, deleted)) = unified_scan_args.row_count {
                         let size = (total - deleted) as usize;
                         file_info.row_estimation = (Some(size), size);
+                    }
+
+                    // Thread the per-file `TableStatistics` DataFrame (produced
+                    // by `vortex_file_info` from the first source's footer) into
+                    // `unified_scan_args.table_statistics`. The mem-engine's
+                    // `create_scan_predicate` consumes this to evaluate the
+                    // skip-batch predicate against per-file min/max/null-count
+                    // and prune whole files that can't match. Vortex is the FIRST
+                    // Polars format to populate this — Parquet hard-codes None
+                    // at `polars-plan/src/dsl/file_scan/mod.rs`.
+                    //
+                    // **n_sources == 1 gate**: mem-engine's
+                    // `apply_scan_predicate_to_scan_ir` asserts
+                    // `skip_files_mask.len() == sources.len()` (functions.rs:397);
+                    // since `vortex_file_info` only reads the first source's
+                    // footer, the stats DataFrame is single-row. Populating it
+                    // for N-file scans would produce a 1-element skip-files
+                    // bitmap and hit the assert (hard panic). Multi-file stats
+                    // aggregation is tracked as a Deferred item.
+                    if let Some(stats_df) = table_stats_df
+                        && n_sources == 1
+                    {
+                        unified_scan_args.table_statistics =
+                            Some(crate::dsl::TableStatistics(Arc::new(stats_df)));
                     }
 
                     if self.inner.read().unwrap().len() > max_metadata_scan_cached() {

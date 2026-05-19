@@ -180,3 +180,98 @@ def test_cache_mode_rejects_invalid_inputs(tmp_path: Path) -> None:
     # (The resolver returns ('dedicated', 2**64); pyo3's u64 conversion raises.)
     with pytest.raises(OverflowError):
         pl.scan_vortex(path, cache_mode=2**64)
+
+
+def test_scan_with_file_stats_smoke(tmp_path: Path) -> None:
+    """Scan + filter with file-level table_statistics populated.
+
+    ``vortex_file_info`` populates ``UnifiedScanArgs::table_statistics`` from
+    the Vortex footer's ``FileStatistics``. The mem-engine's
+    ``skip_batch_predicate`` evaluates the predicate against the per-file
+    min/max/null-count stats DataFrame and prunes the file when the predicate
+    can never match.
+
+    A regression dropping the table_statistics populate would still yield
+    correct results (file gets opened, scanned, post-decode filter applies);
+    the visible regression would be slower scan time. Smoke test verifies the
+    populate path doesn't crash and returns the right rows.
+    """
+    path = tmp_path / "file_stats_smoke.vortex"
+    pl.DataFrame({"a": list(range(100))}).write_vortex(path)
+
+    out = pl.scan_vortex(path).filter(pl.col("a") > 90).collect()
+    assert out.shape == (9, 1)
+    assert out["a"].to_list() == list(range(91, 100))
+
+
+def test_scan_with_file_stats_multifile_does_not_panic(tmp_path: Path) -> None:
+    """Multi-file scan + filter must not panic.
+
+    The populate path gates on ``n_sources == 1`` because the
+    ``vortex_file_info`` only reads the first source's footer, producing a
+    single-row stats DataFrame. Without the gate, multi-file scans would hit
+    ``polars-mem-engine/src/scan_predicate/functions.rs:397``
+    (``assert_eq!(skip_files_mask.len(), sources.len())``) and panic.
+
+    A regression where the gate is dropped would surface here as a hard
+    ``assertion failed`` panic during ``collect()``.
+    """
+    a = tmp_path / "stats_multi_a.vortex"
+    b = tmp_path / "stats_multi_b.vortex"
+    pl.DataFrame({"x": [1, 3, 5, 7, 9]}).write_vortex(a)
+    pl.DataFrame({"x": [2, 4, 6, 8, 10]}).write_vortex(b)
+
+    out = pl.scan_vortex([a, b]).filter(pl.col("x") > 5).collect()
+    # Combined sorted: a's {7, 9} + b's {6, 8, 10} = 5 rows.
+    assert out.shape == (5, 1)
+    assert sorted(out["x"].to_list()) == [6, 7, 8, 9, 10]
+
+
+def test_multifile_scan_shape_and_ordering(tmp_path: Path) -> None:
+    """``pl.scan_vortex([a, b])`` yields right shape + path-list order.
+
+    Multi-file scans should: (a) read each file in path-list order, (b) concat
+    results with the same schema, (c) produce a DataFrame whose row count is
+    the sum of per-file row counts.
+    """
+    a = tmp_path / "multi_a.vortex"
+    b = tmp_path / "multi_b.vortex"
+    pl.DataFrame({"x": [1, 2, 3], "y": ["a", "b", "c"]}).write_vortex(a)
+    pl.DataFrame({"x": [4, 5], "y": ["d", "e"]}).write_vortex(b)
+
+    out = pl.scan_vortex([a, b]).collect()
+    assert out.shape == (5, 2)
+    assert out["x"].to_list() == [1, 2, 3, 4, 5]
+    assert out["y"].to_list() == ["a", "b", "c", "d", "e"]
+
+
+def test_multifile_scan_missing_columns_insert(tmp_path: Path) -> None:
+    """missing_columns='insert' synthesizes typed nulls for absent columns.
+
+    File a has {x, y}; file b has only {x}. With missing_columns='insert',
+    file b's rows get NULL in the y column.
+
+    Verifies Vortex respects the missing_columns parameter at multi-scan
+    layer (parameter already exposed via scan_vortex's signature; handled
+    generically in apply_extra_ops).
+    """
+    a = tmp_path / "miss_a.vortex"
+    b = tmp_path / "miss_b.vortex"
+    pl.DataFrame({"x": [1, 2], "y": ["a", "b"]}).write_vortex(a)
+    pl.DataFrame({"x": [3, 4]}).write_vortex(b)
+
+    out = pl.scan_vortex([a, b], missing_columns="insert").collect()
+    assert out.shape == (4, 2)
+    assert out["x"].to_list() == [1, 2, 3, 4]
+    assert out["y"].to_list() == ["a", "b", None, None]
+
+
+def test_multifile_scan_missing_columns_raise(tmp_path: Path) -> None:
+    """missing_columns='raise' (default) errors when a file lacks a column."""
+    a = tmp_path / "miss_r_a.vortex"
+    b = tmp_path / "miss_r_b.vortex"
+    pl.DataFrame({"x": [1, 2], "y": ["a", "b"]}).write_vortex(a)
+    pl.DataFrame({"x": [3, 4]}).write_vortex(b)
+
+    with pytest.raises(pl.exceptions.PolarsError):
+        pl.scan_vortex([a, b], missing_columns="raise").collect()
