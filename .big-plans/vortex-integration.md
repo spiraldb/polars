@@ -1,30 +1,36 @@
-# Vortex Integration into Polars — big-plans plan
+# Vortex Integration into Polars — big-plans plan (Phase 1++ branch)
 
-> Continuation of [spiraldb/polars#1](https://github.com/spiraldb/polars/pull/1) (`vortex-integration`, 31 existing commits, +6,497/-80, 73 tests). big-plans takes over the remaining work — retroactive ratification + CI green-up + PR-13 aggressive AExpr pushdown + PR-8 file-stats + PR-6 multi-file/nested coverage + PR-14 benches — and lands as one squash-merged PR onto `spiraldb:main`.
+> **2026-05-19 re-stack**: Restructured from a 2-PR Phase 1 / Phase 2 split into a 2-PR Phase 1++ / Phase 2 split, where Phase 1++ absorbs the originally-Phase-3 work (file-stats + multi-file tests) AND the originally-Phase-2 PR-2.0 cleanup work (segment_cache thread-through, code-doc + plan-doc carry-forwards, etc.) so that Phase 1++ ships a complete, robust, well-tested Vortex integration as a single reviewable PR. The remaining Phase 2 PR is then a pure perf follow-on (AExpr-direct convertor + Option B→A cutover, with measured speedup against the Phase 1++ baseline). Backup at `backup-vortex-integration-phase-1-pre-restack`.
+>
+> **Phase 1++ contents on this branch**:
+> - Phase 1 foundation (read/write, schema discovery, legacy SpecializedColumnPredicate pushdown, multi-file, hive, cloud, in-memory, sink, etc.) — original Phase 1 PRs PR-1.1 through PR-1.5
+> - **NEW (absorbed from Phase 2 PR-2.0)**: `VortexSegmentCacheRef` newtype + segment_cache thread-through; code-doc carry-forwards; C-001/C-002/C-003 fixes; C2-001 expand_datasets fix
+> - **NEW (absorbed from Phase 3)**: `crates/polars-vortex/src/read/file_stats.rs` (footer → TableStatistics DataFrame); `vortex_file_info` extended to return stats; mem-engine Vortex-override removed; 6 new Python e2e tests (file_stats smoke, multi-file-not-panic, multi-file shape/order, missing_columns insert/raise)
+> - **STILL PENDING for Phase 1++ completion**: PR-3.3 nested-type (List/Struct) roundtrips + small-int dtypes (i8/i16/u8/u16) + `POLARS_VERBOSE` pushdown engagement infra. Phase 4 enhanced benches (cold-cache, second-run cache, write throughput, TPC-H Q6/Q14 vs Parquet).
 
 ## Current State
 
 ```yaml
 status: executing
-branch: vortex-integration
+branch: vortex-integration-phase-1
 planning_sub_flow: null
-current_phase: "PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown"
-phase_index: 2
-current_pr: PR-2.0
-pr_index: 1
+current_phase: "Phase 1++ post-re-stack: foundation + Phase 3 absorption + PR-2.0 cleanups complete; PR-3.3 nested+small-int+engagement + Phase 4 enhanced benches pending"
+phase_index: 1
+current_pr: null
+pr_index: 0
 outstanding_must_fix: 0
-deferred_items_total: 6
-last_user_touchpoint: 2026-05-16T17:02:00Z
-last_user_touchpoint_what: "started PR-2.0 (Phase 2.0 housekeeping: 10 cycle-3 should-fix carry-forward + Dedicated single-cache refactor)"
+deferred_items_total: 20
+last_user_touchpoint: 2026-05-19T05:00:00Z
+last_user_touchpoint_what: "Re-stack complete: cherry-picked Phase 3 work (PR-3.1 file-stats + PR-3.2 multi-file tests, 4 commits) + PR-2.0 cleanup work (6 commits: segment_cache thread-through, C-001/C-002/C-003, C2-001) from old vortex-integration onto vortex-integration-phase-1. Backup branches preserve pre-restack state. Phase 2 branch rebased onto this new Phase 1++ tip in parallel. Plan rewrite + full Implementation status update deferred to next session."
 subagent_invocations_this_pr: 0
-subagent_invocations_total: 18
+subagent_invocations_total: 64
 review_cycles_this_pr: 0
-phase_entry_sha: fc43d1b8d
+phase_entry_sha: 93643dd77e
 phase_end_cycle: 0
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: fc43d1b8d
+last_commit: 3aabb7693d
 ```
 
 ## Context
