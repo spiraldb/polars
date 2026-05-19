@@ -759,6 +759,26 @@ fn resolve_inner_dtype(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Opt
                 None
             }
         },
+        // Ternary self-contained verification (PR-2.7 cycle-2 should-fix #1).
+        // Without this arm, the Ternary convertor's pairwise-dtype gate
+        // (`resolve_inner_dtype(*truthy)?`) would unconditionally return None
+        // for any NESTED Ternary truthy/falsy and `?`-propagate → the outer
+        // Ternary refuses pushdown even when the inner Ternary's truthy/falsy
+        // dtypes match. Fail-closed-safe but a coverage regression vs. the
+        // pre-gate baseline. The recursive resolution mirrors the Plus arm's
+        // self-contained verification at L726-730: walk truthy + falsy,
+        // require equality (Vortex's `case_when` builder requires THEN and
+        // ELSE share a return_dtype), unresolvable shapes fall through to
+        // None → conservative refuse. Note: this arm makes `resolve_inner_dtype`
+        // walk a Ternary tree even when the OUTER predicate isn't a Ternary
+        // (e.g., `eq(when().then().otherwise(), 5)` resolves the lhs by
+        // recursing through the Ternary). Acceptable: typical predicate depth
+        // is shallow.
+        AExpr::Ternary { truthy, falsy, .. } => {
+            let t = resolve_inner_dtype(*truthy, arena, schema)?;
+            let e = resolve_inner_dtype(*falsy, arena, schema)?;
+            if t == e { Some(t) } else { None }
+        },
         _ => None,
     }
 }
@@ -2372,6 +2392,40 @@ mod tests {
             falsy: b,
         });
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    /// Nested Ternary with matching inner dtypes — pushes down via the
+    /// `resolve_inner_dtype` Ternary arm (PR-2.7 cycle-2 should-fix #1). Before
+    /// the arm was added, the outer Ternary's THEN/ELSE gate consulted
+    /// `resolve_inner_dtype(inner_ternary)?` which fell to the catchall `None`,
+    /// `?`-propagating to refuse pushdown unconditionally. With the recursive
+    /// arm, nested Ternary chains resolve correctly. Tree:
+    /// `when(a == 1).then(when(a > 0).then(a).otherwise(a)).otherwise(b)`
+    /// — outer truthy is `case_when(...)`, outer falsy is col `b` (Int32);
+    /// inner truthy/falsy both Int32 → inner resolves to Int32 → outer t==e → pushes.
+    #[test]
+    fn shape_ternary_nested_matching_dtypes_pushes() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a"); // Int32
+        let zero = lit_i32(&mut arena, 0);
+        let one = lit_i32(&mut arena, 1);
+        let inner_pred = binop(&mut arena, a, Operator::Gt, zero);
+        let a2 = col(&mut arena, "a"); // Int32
+        let a3 = col(&mut arena, "a"); // Int32
+        let inner_ternary = arena.add(AExpr::Ternary {
+            predicate: inner_pred,
+            truthy: a2,
+            falsy: a3,
+        });
+        let outer_pred = binop(&mut arena, a, Operator::Eq, one);
+        let b = col(&mut arena, "b"); // Int32 per schema_a_b_int32
+        let n = arena.add(AExpr::Ternary {
+            predicate: outer_pred,
+            truthy: inner_ternary,
+            falsy: b,
+        });
+        let schema = schema_a_b_int32();
+        assert!(aexpr_to_vortex_expression(n, &arena, Some(&schema)).is_some());
     }
 
     // === PR-2.7 cycle-1 should-fix #4: engagement-assertion structural tests ===
