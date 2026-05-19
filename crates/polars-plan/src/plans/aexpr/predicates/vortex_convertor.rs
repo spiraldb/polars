@@ -2469,16 +2469,20 @@ mod tests {
 
     /// `aexpr_file_minterms_to_vortex_expression` positive — predicate with all
     /// file-only minterms (no virtual_cols in any leaf) AND-collects all
-    /// conjuncts.
+    /// conjuncts. Structural assertion (cycle-1 should-fix): asserts BOTH
+    /// literals appear in the produced expression, defending against a
+    /// regression where one minterm is dropped spuriously. Literals 42 / 99
+    /// chosen as unique discriminators (no overlap with each other or with
+    /// connector keywords).
     #[test]
     fn minterms_all_file_only_collects_all() {
         let mut arena = Arena::new();
         let a = col(&mut arena, "a");
-        let one = lit_i32(&mut arena, 1);
-        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let fortytwo = lit_i32(&mut arena, 42);
+        let eq_a = binop(&mut arena, a, Operator::Eq, fortytwo);
         let b = col(&mut arena, "b");
-        let two = lit_i32(&mut arena, 2);
-        let eq_b = binop(&mut arena, b, Operator::Eq, two);
+        let ninetynine = lit_i32(&mut arena, 99);
+        let eq_b = binop(&mut arena, b, Operator::Eq, ninetynine);
         let and_node = binop(&mut arena, eq_a, Operator::And, eq_b);
         let schema = schema_a_b_int32();
         let virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
@@ -2487,8 +2491,13 @@ mod tests {
             &arena,
             Some(&schema),
             &virtual_cols,
-        );
-        assert!(expr.is_some(), "expected file-only AND to push down");
+        )
+        .expect("expected file-only AND to push down");
+        let s = format!("{}", expr);
+        // Both literal-bearing conjuncts must survive into the AND-collected
+        // result. A regression dropping one minterm would fail one of these.
+        assert!(s.contains("42"), "expected literal 42 (from a == 42) in {s}");
+        assert!(s.contains("99"), "expected literal 99 (from b == 99) in {s}");
     }
 
     /// Predicate references only virtual cols → all minterms filtered out → None.
@@ -2515,17 +2524,23 @@ mod tests {
         assert!(expr.is_none(), "expected virtual-only predicate to refuse");
     }
 
-    /// Mixed predicate: `a == 1 AND year == 2024` with `year` virtual →
-    /// pushes only the `a == 1` minterm; virtual conjunct dropped.
+    /// Mixed predicate: `a == 42 AND year == 9999` with `year` virtual →
+    /// pushes only the `a == 42` minterm; virtual conjunct dropped.
+    /// Structural assertion (cycle-1 should-fix): positive anchor on the
+    /// kept-side literal `42` + negative anchor on the dropped-side literal
+    /// `9999`. Defends against (a) regressions where the helper ignores
+    /// `virtual_cols` entirely (pushes both → `9999` would appear), (b)
+    /// filter-polarity inversion (keeps virtual, drops file → `42` would be
+    /// absent and `9999` present).
     #[test]
     fn minterms_partial_pushes_file_part_only() {
         let mut arena = Arena::new();
         let a = col(&mut arena, "a");
-        let one = lit_i32(&mut arena, 1);
-        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let fortytwo = lit_i32(&mut arena, 42);
+        let eq_a = binop(&mut arena, a, Operator::Eq, fortytwo);
         let year = col(&mut arena, "year");
-        let twentyfour = lit_i32(&mut arena, 2024);
-        let eq_year = binop(&mut arena, year, Operator::Eq, twentyfour);
+        let ninethousand = lit_i32(&mut arena, 9999);
+        let eq_year = binop(&mut arena, year, Operator::Eq, ninethousand);
         let and_node = binop(&mut arena, eq_a, Operator::And, eq_year);
         let mut schema = Schema::default();
         schema.with_column(PlSmallStr::from("a"), DataType::Int32);
@@ -2537,10 +2552,17 @@ mod tests {
             &arena,
             Some(&schema),
             &virtual_cols,
+        )
+        .expect("expected file-column conjunct (a == 42) to push despite virtual conjunct");
+        let s = format!("{}", expr);
+        assert!(
+            s.contains("42"),
+            "expected kept-side literal 42 (from a == 42) in {s}"
         );
         assert!(
-            expr.is_some(),
-            "expected file-column conjunct (a == 1) to push despite virtual conjunct (year == 2024)"
+            !s.contains("9999"),
+            "unexpected dropped-side literal 9999 (from year == 9999) in {s} — \
+             virtual conjunct leaked into pushdown?"
         );
     }
 
@@ -2579,16 +2601,23 @@ mod tests {
     /// the other → pushes only the supported conjunct. Demonstrates the
     /// PARTIAL-conversion win even without virtual cols (an improvement over
     /// the prior all-or-nothing `aexpr_to_vortex_expression` direct call).
+    /// Structural assertion (cycle-1 should-fix): positive anchor on the
+    /// kept-side literal `42` + negative anchors on the dropped-subtree
+    /// literals (`7` from `b - 7`, `888` from the eq RHS). Defends against
+    /// regressions where the helper somehow pushed the Minus-bearing minterm
+    /// (producing an invalid Vortex expression that would crash at execute
+    /// time — a unit-test crash is preferable to a runtime panic).
     #[test]
     fn minterms_unsupported_subtree_dropped_in_partial_push() {
         let mut arena = Arena::new();
         let a = col(&mut arena, "a");
-        let one = lit_i32(&mut arena, 1);
-        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let fortytwo = lit_i32(&mut arena, 42);
+        let eq_a = binop(&mut arena, a, Operator::Eq, fortytwo);
         let b = col(&mut arena, "b");
-        let b_minus_1 = binop(&mut arena, b, Operator::Minus, one);
-        let five = lit_i32(&mut arena, 5);
-        let minus_eq = binop(&mut arena, b_minus_1, Operator::Eq, five);
+        let seven = lit_i32(&mut arena, 7);
+        let b_minus_7 = binop(&mut arena, b, Operator::Minus, seven);
+        let eighteighteight = lit_i32(&mut arena, 888);
+        let minus_eq = binop(&mut arena, b_minus_7, Operator::Eq, eighteighteight);
         let and_node = binop(&mut arena, eq_a, Operator::And, minus_eq);
         let schema = schema_a_b_int32();
         let virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
@@ -2597,10 +2626,17 @@ mod tests {
             &arena,
             Some(&schema),
             &virtual_cols,
+        )
+        .expect("expected supported conjunct (a == 42) to push down even with unsupported sibling");
+        let s = format!("{}", expr);
+        assert!(
+            s.contains("42"),
+            "expected kept-side literal 42 (from a == 42) in {s}"
         );
         assert!(
-            expr.is_some(),
-            "expected supported conjunct (a == 1) to push down even when sibling conjunct uses Minus (unsupported)"
+            !s.contains("888"),
+            "unexpected dropped-side literal 888 (from (b - 7) == 888) in {s} — \
+             unsupported Minus subtree leaked into pushdown?"
         );
     }
 

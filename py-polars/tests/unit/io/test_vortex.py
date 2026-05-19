@@ -599,6 +599,61 @@ def test_scan_with_hive_and_file_col_mixed_filter(tmp_path: Path) -> None:
     assert out["year"].unique().to_list() == [2024]
 
 
+def test_scan_with_row_index_and_file_col_mixed_filter(tmp_path: Path) -> None:
+    """PR-2.8 cycle 2: row_index virtual col + file col mixed filter splits the
+    predicate per-minterm. The ``x > 5`` minterm pushes to Vortex; the
+    ``ri > 10`` minterm stays residual and Polars' row-index materialization
+    + multi-scan reapply handles it.
+
+    Pre-PR-2.8 behavior: virtual-column guard refused the WHOLE predicate
+    when ``row_index.is_some()``; correctness held via PARTIAL_FILTER but the
+    file-col part missed Vortex zone pruning.
+
+    A regression where the per-column split mis-classified ``ri`` as a file
+    column (and tried to push it to Vortex) would surface as a
+    ``ComputeError`` from Vortex bailing on missing column 'ri'.
+    """
+    path = tmp_path / "ri_mixed.vortex"
+    pl.DataFrame({"x": list(range(20))}).write_vortex(path)
+
+    out = (
+        pl.scan_vortex(path, row_index_name="ri")
+        .filter((pl.col("x") > 5) & (pl.col("ri") > 10))
+        .collect()
+    )
+    # x: 0..20; ri: 0..20 (1:1 mapping). x > 5 → x ∈ {6..19}; ri > 10 → ri ∈ {11..19}.
+    # Intersection: x ∈ {11..19}, ri ∈ {11..19}, both 9 rows.
+    assert out.shape == (9, 2)
+    assert out["x"].to_list() == list(range(11, 20))
+    assert out["ri"].to_list() == list(range(11, 20))
+
+
+def test_scan_with_include_file_paths_and_file_col_mixed_filter(tmp_path: Path) -> None:
+    """PR-2.8 cycle 2: include_file_paths virtual col + file col mixed filter
+    splits the predicate per-minterm. The ``x > 5`` minterm pushes to Vortex;
+    the ``pl.col("src").str.contains("a")`` minterm stays residual.
+
+    A regression where the per-column split mis-classified ``src`` as a file
+    column would surface as a ``ComputeError`` from Vortex bailing on missing
+    column 'src'.
+    """
+    a = tmp_path / "a.vortex"
+    b = tmp_path / "b.vortex"
+    pl.DataFrame({"x": [1, 3, 5, 7, 9]}).write_vortex(a)
+    pl.DataFrame({"x": [2, 4, 6, 8, 10]}).write_vortex(b)
+
+    out = (
+        pl.scan_vortex([a, b], include_file_paths="src")
+        .filter((pl.col("x") > 5) & pl.col("src").str.contains("a"))
+        .collect()
+    )
+    # a.vortex's x: 1,3,5,7,9 → x > 5 → 7, 9 (src="a.vortex" matches "a")
+    # b.vortex's x: 2,4,6,8,10 → x > 5 → 6, 8, 10 (src="b.vortex" does NOT contain "a")
+    assert out.shape == (2, 2)
+    assert sorted(out["x"].to_list()) == [7, 9]
+    assert all("a.vortex" in s for s in out["src"].to_list())
+
+
 def test_scan_with_starts_with_wildcard_in_needle(tmp_path: Path) -> None:
     """PR-2.7 cycle 1 (negative path): a wildcard ('%') in the needle refuses
     pushdown via ``bytes_to_like_literal``. The residual filter reapplies
