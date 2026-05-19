@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: phase-boundary
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 amend: PR-2.7 COMPLETE; PR-2.8 (virtual-column per-column split) cycle 1 awaiting 2-vote pr-2 gauntlet review"
+current_phase: "Phase 2 amend: PR-2.7 + PR-2.8 COMPLETE; ready for cumulative Phase 2 cycle-2 phase-end 4-vote gauntlet"
 phase_index: 2
-current_pr: PR-2.8
+current_pr: null
 pr_index: 9
 outstanding_must_fix: 0
 deferred_items_total: 15
 last_user_touchpoint: 2026-05-19T00:45:00Z
-last_user_touchpoint_what: "PR-2.8 cycle 1 implementation landed: 9d9469f5a (3 files; ~270 LoC; convertor helper aexpr_file_minterms_to_vortex_expression + lower_ir.rs refactor from all-or-nothing to per-column split + 5 new unit tests + 1 new e2e Python test). 93 unit tests pass (was 88; +5). Umbrella cargo check clean. Awaiting 2-vote pr-2 gauntlet review on PR-2.8 diff (024341dc21..HEAD = 1 commit)"
-subagent_invocations_this_pr: 0
-subagent_invocations_total: 45
-review_cycles_this_pr: 0
+last_user_touchpoint_what: "PR-2.8 cycle 1 implementation landed: 9d9469f5a; cycle 2 polish landed: f55e00b3e9 (structural assertions on 3 minterms_* unit tests + 2 new e2e tests for row_index/include_file_paths virtual cols); cycle 3 must-fix fix: c9fd818616 (test_scan_with_include_file_paths_and_file_col_mixed_filter discriminator: str.contains('a') → str.ends_with('a.vortex'); FULL-path semantics of include_file_paths caught by both reviewers). PR-2.8 cycle 3 gauntlet ACCEPTED (2-vote pr-2: 0 must-fix, 0 should-fix, 0 nit; both lenses clean). Total: 4 commits in PR-2.8 (impl + plan + cycle 2 polish + cycle 3 fix). 93 unit tests pass + 13 e2e tests pass (2 new from PR-2.8 cycle 2). PR-2.8 closes Deferred entry 'Virtual-column-partitioned Vortex scans don't benefit from AExpr convertor pushdown' (PR-2.2 cycle-1 must-fix M1 + cycle-2 C2-001). Next: cumulative Phase 2 cycle-2 4-vote phase-end gauntlet"
+subagent_invocations_this_pr: 6
+subagent_invocations_total: 51
+review_cycles_this_pr: 3
 phase_entry_sha: 93643dd77
-phase_end_cycle: 1
+phase_end_cycle: 2
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 9d9469f5a
+last_commit: c9fd818616
 ```
 
 ## Context
@@ -623,6 +623,73 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
     reviewers explicitly noted the polish commits' correctness without
     spawning new must-fix items. The attention block calibrated the cycle-3
     reviewers' frame correctly.
+
+### PR-2.8: Amend cycle 2 — virtual-column per-column predicate split (4 PR-work commits, ending at `c9fd818616` — accepted cycle 3)
+
+- **Scope shipped**: refactor the virtual-column guard at
+  `crates/polars-stream/src/physical_plan/lower_ir.rs:780-815` from
+  full-refusal to per-column file-vs-virtual split via MintermIter. New
+  helper `aexpr_file_minterms_to_vortex_expression` in
+  `crates/polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs`
+  (~30 LoC) walks top-level conjuncts, filters file-only minterms
+  (no leaf-column in `virtual_cols`), converts each via
+  `aexpr_to_vortex_expression`, and AND-collects. Strictly better than
+  flat `aexpr_to_vortex_expression` even when no virtual cols present
+  (partial conversion of mixed-shape predicates: e.g., `a == 1 AND
+  unsupported_op(b)` pushes `a == 1` instead of refusing the whole
+  tree). Closes Deferred entry "Virtual-column-partitioned Vortex scans
+  don't benefit from AExpr convertor pushdown" (PR-2.2 cycle-1 must-fix
+  M1 + cycle-2 C2-001).
+
+- **Commits**:
+  - `9d9469f5a` — cycle 1 implementation (helper + lower_ir refactor + 5
+    unit tests + 1 e2e test)
+  - `86c00f8568` — plan-state transition
+  - `f55e00b3e9` — cycle 2 polish (structural assertions on 3 minterms_*
+    unit tests via joint-substring + negative-anchor pattern from PR-2.7
+    cycle 2; +2 e2e tests for row_index / include_file_paths virtual cols)
+  - `c9fd818616` — cycle 3 must-fix
+    (`test_scan_with_include_file_paths_and_file_col_mixed_filter`
+    discriminator: `str.contains("a")` → `str.ends_with("a.vortex")`;
+    `include_file_paths` stores FULL path, pytest's tmp_path always
+    contains 'a' in the test name — caught by BOTH cycle 2 reviewers)
+
+- **Test additions**: 5 unit tests (`minterms_all_file_only_collects_all`,
+  `minterms_all_virtual_returns_none`, `minterms_partial_pushes_file_part_only`,
+  `minterms_top_level_or_with_virtual_refuses`,
+  `minterms_unsupported_subtree_dropped_in_partial_push`) + 3 e2e tests
+  (`test_scan_with_hive_and_file_col_mixed_filter`,
+  `test_scan_with_row_index_and_file_col_mixed_filter`,
+  `test_scan_with_include_file_paths_and_file_col_mixed_filter`).
+
+- **Review history**:
+  - **Cycle 1**: 2-vote pr-2 ACCEPTED. 0 must-fix, 3 should-fix (3 of 5
+    new unit tests asserted only `.is_some()` — paste-swap vulnerable;
+    e2e coverage gap for row_index / include_file_paths virtual cols;
+    nit on virtual_cols hoist outside and_then closure).
+  - **Cycle 2**: 2-vote pr-2 REJECTED. 1 must-fix caught by BOTH lenses:
+    the new `test_scan_with_include_file_paths_and_file_col_mixed_filter`
+    used `str.contains("a")` as discriminator, but
+    `ScanSourceRef::to_include_path_name` returns `path.as_str()` (FULL
+    path), and pytest's tmp_path always contains 'a' in the test name
+    `test_scan_with_include_file_paths_and_file_col_mixed_filter` — so
+    the predicate degenerates to `x > 5` alone (matches BOTH files).
+    Would have failed CI with shape `(5, 2)` vs expected `(2, 2)`.
+  - **Cycle 3**: 2-vote pr-2 ACCEPTED. 0 must-fix, 0 should-fix, 0 nit
+    (both lenses fully clean). The surgical fix (`str.ends_with("a.vortex")`)
+    correctly anchors on basename suffix and is cross-platform robust.
+
+- **Lessons surfaced for future PRs**:
+  - **e2e tests with `include_file_paths` MUST use basename-suffix
+    discriminators** (`str.ends_with` or exact path equality), NEVER
+    single-letter `str.contains` patterns — pytest's tmp_path includes
+    the test function name and `pytest-of-USER/pytest-N/` parent dirs,
+    which freely contain common letters. This is the same class of
+    silent-test-failure bug as cycle-1's tautological-test pattern.
+  - **The same paste-swap-vulnerability discipline applies to e2e tests
+    as to unit tests**: cycle 1's structural-assertion fix for unit
+    tests didn't extend to e2e tests; the discriminator-correctness
+    review should run on both layers.
 
 ### PR-2.5: PR-13.5 Temporal extracts — SLIPPED to Deferred work (Vortex op unavailable at pinned SHA)
 
@@ -2242,7 +2309,7 @@ Seeded with carry-forward items from the existing plan's §13 that may surface a
   - (iii) **Recursive-walk stack-overflow risk on pathological inputs** (cycle-1 correctness nit #5): deeply nested predicates (thousands of clauses) would consume one stack frame per AExpr node. Vortex's own `and_collect`/`or_collect` builders use balanced binary trees to avoid this (see `vortex-array/src/expr/exprs.rs:345-356`). Typical predicate depths are small (~5-10 levels); guard via depth-counter or batch-flatten before recursing. Deferred to Phase 4 polish unless benchmarks show issues.
 
 - **Vortex sink Writeable match non-exhaustive under `polars-stream --features vortex` (without `cloud`)** (`crates/polars-stream/src/nodes/io_sinks/writers/vortex/mod.rs:91`): `Writeable::Cloud(_)` arm is `#[cfg(feature = "cloud")]` on polars-stream's own `cloud` feature, but the underlying enum's Cloud variant remains visible because `polars-io` (a non-optional polars-stream dep with `features = ["async", "file_cache"]`) enables `polars-io/cloud` transitively via `file_cache`. `cargo check -p polars-stream --features vortex` fails with E0004; `cargo check -p polars --features vortex,cloud,parquet,dtype-full` is clean because that combo keeps `polars-stream/cloud` on. Predates PR-1.3 (commit `bbe16b34a` introduced the cloud sink). Two fix paths: (a) make polars-stream's `vortex` feature transitively enable `cloud` (mirroring how `parquet` may handle it), or (b) add a fall-through wildcard arm in the Vortex sink match. Out of PR-1.3 scope (a 6-must-fix patch); track for Phase 2 cleanup or a follow-up PR. (Deferred from PR-1.3 inner-loop cycle 2 should-fix #1, 2026-05-15.)
-- **Virtual-column-partitioned Vortex scans don't benefit from AExpr convertor pushdown** (PR-2.2 cycle-1 must-fix M1 + cycle-2 must-fix-extension C2-001 — partial resolution): `lower_ir.rs` now refuses convertor pushdown when ANY of `hive_parts.is_some()`, `unified_scan_args.row_index.is_some()`, or `unified_scan_args.include_file_paths.is_some()` (conservative; legacy `polars_to_vortex_predicate` fast path still fires via `begin_read`'s fallback). A future PR could thread a per-column file-vs-virtual split through `lower_ir`, mirroring `polars-mem-engine/src/scan_predicate/functions.rs`'s `create_scan_predicate` `hive_predicate` extraction (lines 42-90): split the AExpr into (virtual-only, file-only, mixed); push the file-only part through the convertor; let the virtual-only part flow through Polars's standard machinery (hive-partition pruning for hive, row-index materialization for row_index, etc.). Modest scope (~60 LoC after extending to cover all three virtual-column kinds); deferred because Phase 2's primary objective (PR-13 pushdown coverage) doesn't block on this and the conservative refuse is sound. Tracked for a Phase 4 polish PR or a follow-up. (Deferred from PR-2.2 cycle-1 must-fix M1, extended cycle-2 C2-001, 2026-05-16.)
+- ~~**Virtual-column-partitioned Vortex scans don't benefit from AExpr convertor pushdown**~~ — **RESOLVED in PR-2.8** (commits `9d9469f5a` + `f55e00b3e9` + `c9fd818616`): new helper `aexpr_file_minterms_to_vortex_expression` in `vortex_convertor.rs` walks top-level conjuncts via MintermIter, drops minterms whose leaves include any virtual col, and AND-collects the rest via Vortex's `and_collect`. Wired at the `FileScanIR::Vortex` arm of `lower_ir.rs` with the virtual_cols set built from `hive_parts.schema() + row_index.name + include_file_paths`. Strictly-better than the previous `aexpr_to_vortex_expression` direct call even when no virtual cols present (partial conversion of mixed-shape predicates: e.g., `a == 1 AND unsupported_op(b)` pushes `a == 1` instead of refusing the whole tree). 5 unit tests + 3 e2e tests (hive / row_index / include_file_paths virtual-col scenarios). Accepted at cycle 3 of the 2-vote pr-2 gauntlet (cycle 2 must-fix on test discriminator: `str.contains("a")` vs `str.ends_with("a.vortex")` for `include_file_paths` full-path semantics). (Resolved 2026-05-18.)
 
 - **Vortex `wrapping_add` (or non-fallible add) public API** (PR-2.2 cycle-1 must-fix M2 — partial resolution): The current `Plus → checked_add` mapping has a semantic divergence with Polars's wrapping `+`: Vortex errors at scan-time on integer overflow while Polars wraps. For typical OLAP queries with small-int data this is rare, but `col + 1 == big_value` on a column near MAX errors out instead of producing wrapped-then-compared results. PR-2.2 documents this in the function doc-comment; the proper fix is for Vortex to expose `wrapping_add` (or similar) in `vortex::expr::*` so polars-vortex can prefer it for Polars Plus semantics. Tracking as an upstream-Vortex coordination item — file when polars-vortex hits a real-world user query that surfaces the divergence, or as part of PR-2.5 (which already coordinates Vortex's `datetime_parts` op). (Deferred from PR-2.2 cycle-1 must-fix M2 / F-MF-002, 2026-05-16.)
 
