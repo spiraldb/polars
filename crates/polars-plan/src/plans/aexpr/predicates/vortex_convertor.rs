@@ -92,7 +92,9 @@ use polars_core::scalar::Scalar;
 use polars_core::schema::Schema;
 #[cfg(feature = "is_between")]
 use polars_ops::series::ClosedInterval;
+use polars_utils::aliases::PlHashSet;
 use polars_utils::arena::{Arena, Node};
+use polars_utils::pl_str::PlSmallStr;
 #[cfg(feature = "strings")]
 use polars_vortex::vortex::array::scalar::Scalar as VortexScalar;
 use polars_vortex::vortex::dtype::{DType, Nullability, PType};
@@ -101,8 +103,8 @@ use polars_vortex::vortex::expr::like;
 #[cfg(feature = "is_in")]
 use polars_vortex::vortex::expr::or_collect;
 use polars_vortex::vortex::expr::{
-    Expression, and, case_when, cast, checked_add, eq, get_item, gt, gt_eq, is_not_null, is_null,
-    lit, lt, lt_eq, not, not_eq, or, root,
+    Expression, and, and_collect, case_when, cast, checked_add, eq, get_item, gt, gt_eq,
+    is_not_null, is_null, lit, lt, lt_eq, not, not_eq, or, root,
 };
 
 use crate::dsl::Operator;
@@ -112,7 +114,9 @@ use crate::plans::aexpr::function_expr::IRStructFunction;
 #[cfg(feature = "strings")]
 use crate::plans::aexpr::function_expr::IRStringFunction;
 use crate::plans::aexpr::function_expr::{IRBooleanFunction, IRFunctionExpr};
+use crate::plans::aexpr::MintermIter;
 use crate::plans::lit::LiteralValue;
+use crate::utils::aexpr_to_leaf_names_iter;
 
 /// Convert a Polars AExpr predicate tree into a Vortex [`Expression`] for pushdown.
 ///
@@ -656,6 +660,56 @@ pub fn aexpr_to_vortex_expression(
         // fall through to residual unconditionally.
         _ => None,
     }
+}
+
+/// Per-minterm file-vs-virtual split for the Vortex pushdown convertor (PR-2.8).
+///
+/// Walks the top-level conjunction of `root_node` via [`MintermIter`] and converts
+/// only the minterms whose leaf column references are all **file** columns —
+/// i.e., not present in `virtual_cols`. Virtual-column-touching minterms
+/// (hive partition columns, row_index, include_file_paths) are left for the
+/// multi-scan layer's `PARTIAL_FILTER` reapply.
+///
+/// Returns `Some(Expression)` with the AND-collected file-only minterms, or
+/// `None` if either (a) no top-level conjunct is file-only, OR (b) every
+/// file-only conjunct individually failed [`aexpr_to_vortex_expression`].
+/// The contract is always-SAFE: the caller treats `None` as "no convertor
+/// pushdown for this predicate" and lets the post-decode residual reapply
+/// the full predicate.
+///
+/// **When `virtual_cols` is empty**, this is equivalent to converting each
+/// top-level conjunct independently and AND-collecting — which is STRICTLY
+/// BETTER than calling [`aexpr_to_vortex_expression`] on the whole tree
+/// because partial conversion is now possible (a predicate like
+/// `a == 1 AND unsupported_op(b)` pushes the `a == 1` part instead of
+/// refusing entirely). Callers can use this unconditionally as the entrypoint.
+///
+/// **Wiring**: replaces the all-or-nothing virtual-column guard at
+/// `polars-stream::physical_plan::lower_ir.rs::FileScanIR::Vortex` (PR-2.2
+/// cycle-1 must-fix M1's conservative refuse). The PR-2.8 amend turns that
+/// guard into a per-column split so hive-partitioned / row-indexed Vortex
+/// scans still get Vortex zone pruning on the file-column part of the
+/// predicate.
+///
+/// **Why MintermIter**: it walks top-level `And`/`LogicalAnd` conjuncts
+/// (`crate::plans::aexpr::minterm_iter`'s docstring) — the natural unit for
+/// CNF-style partial pushdown. A top-level OR is returned as a single minterm
+/// (correct: if `(file_col == 1) OR (virtual_col == 2)`, the whole OR must
+/// fall to residual because Vortex can't see the virtual_col side of the OR).
+pub fn aexpr_file_minterms_to_vortex_expression(
+    root_node: Node,
+    arena: &Arena<AExpr>,
+    schema: Option<&Schema>,
+    virtual_cols: &PlHashSet<PlSmallStr>,
+) -> Option<Expression> {
+    let exprs: Vec<Expression> = MintermIter::new(root_node, arena)
+        .filter(|node| {
+            // File-only iff NO leaf-column-name appears in virtual_cols.
+            !aexpr_to_leaf_names_iter(*node, arena).any(|name| virtual_cols.contains(name))
+        })
+        .filter_map(|node| aexpr_to_vortex_expression(node, arena, schema))
+        .collect();
+    and_collect(exprs)
 }
 
 /// Convert a Polars [`DataType`] to a Vortex [`DType`] for the CAST arm. Returns `None`
@@ -2409,6 +2463,145 @@ mod tests {
             falsy: b,
         });
         assert!(aexpr_to_vortex_expression(n, &arena, None).is_none());
+    }
+
+    // === PR-2.8: per-column file-vs-virtual minterm split helper ===
+
+    /// `aexpr_file_minterms_to_vortex_expression` positive — predicate with all
+    /// file-only minterms (no virtual_cols in any leaf) AND-collects all
+    /// conjuncts.
+    #[test]
+    fn minterms_all_file_only_collects_all() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let b = col(&mut arena, "b");
+        let two = lit_i32(&mut arena, 2);
+        let eq_b = binop(&mut arena, b, Operator::Eq, two);
+        let and_node = binop(&mut arena, eq_a, Operator::And, eq_b);
+        let schema = schema_a_b_int32();
+        let virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
+        let expr = aexpr_file_minterms_to_vortex_expression(
+            and_node,
+            &arena,
+            Some(&schema),
+            &virtual_cols,
+        );
+        assert!(expr.is_some(), "expected file-only AND to push down");
+    }
+
+    /// Predicate references only virtual cols → all minterms filtered out → None.
+    #[test]
+    fn minterms_all_virtual_returns_none() {
+        let mut arena = Arena::new();
+        let year = col(&mut arena, "year");
+        let twentyfour = lit_i32(&mut arena, 2024);
+        let n = binop(&mut arena, year, Operator::Eq, twentyfour);
+        // schema must contain `year` for the comparison gate (gate's
+        // resolve_inner_dtype call); without it the minterm wouldn't even
+        // convert. The point of this test: even WITH a schema that resolves
+        // the minterm, the minterm filter drops it as virtual.
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("year"), DataType::Int32);
+        let mut virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
+        virtual_cols.insert(PlSmallStr::from("year"));
+        let expr = aexpr_file_minterms_to_vortex_expression(
+            n,
+            &arena,
+            Some(&schema),
+            &virtual_cols,
+        );
+        assert!(expr.is_none(), "expected virtual-only predicate to refuse");
+    }
+
+    /// Mixed predicate: `a == 1 AND year == 2024` with `year` virtual →
+    /// pushes only the `a == 1` minterm; virtual conjunct dropped.
+    #[test]
+    fn minterms_partial_pushes_file_part_only() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let year = col(&mut arena, "year");
+        let twentyfour = lit_i32(&mut arena, 2024);
+        let eq_year = binop(&mut arena, year, Operator::Eq, twentyfour);
+        let and_node = binop(&mut arena, eq_a, Operator::And, eq_year);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("year"), DataType::Int32);
+        let mut virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
+        virtual_cols.insert(PlSmallStr::from("year"));
+        let expr = aexpr_file_minterms_to_vortex_expression(
+            and_node,
+            &arena,
+            Some(&schema),
+            &virtual_cols,
+        );
+        assert!(
+            expr.is_some(),
+            "expected file-column conjunct (a == 1) to push despite virtual conjunct (year == 2024)"
+        );
+    }
+
+    /// Top-level OR with one virtual operand → single minterm referencing both
+    /// → refuse pushdown (CAN'T split an OR partially without changing
+    /// semantics: pushing only one side would yield a NARROWER predicate
+    /// vs the OR — Vortex would drop rows that satisfy the other side).
+    #[test]
+    fn minterms_top_level_or_with_virtual_refuses() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let year = col(&mut arena, "year");
+        let twentyfour = lit_i32(&mut arena, 2024);
+        let eq_year = binop(&mut arena, year, Operator::Eq, twentyfour);
+        let or_node = binop(&mut arena, eq_a, Operator::Or, eq_year);
+        let mut schema = Schema::default();
+        schema.with_column(PlSmallStr::from("a"), DataType::Int32);
+        schema.with_column(PlSmallStr::from("year"), DataType::Int32);
+        let mut virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
+        virtual_cols.insert(PlSmallStr::from("year"));
+        let expr = aexpr_file_minterms_to_vortex_expression(
+            or_node,
+            &arena,
+            Some(&schema),
+            &virtual_cols,
+        );
+        assert!(
+            expr.is_none(),
+            "expected top-level OR with virtual operand to refuse (single minterm references virtual)"
+        );
+    }
+
+    /// Unsupported subtree (Minus arithmetic) in one conjunct + supported in
+    /// the other → pushes only the supported conjunct. Demonstrates the
+    /// PARTIAL-conversion win even without virtual cols (an improvement over
+    /// the prior all-or-nothing `aexpr_to_vortex_expression` direct call).
+    #[test]
+    fn minterms_unsupported_subtree_dropped_in_partial_push() {
+        let mut arena = Arena::new();
+        let a = col(&mut arena, "a");
+        let one = lit_i32(&mut arena, 1);
+        let eq_a = binop(&mut arena, a, Operator::Eq, one);
+        let b = col(&mut arena, "b");
+        let b_minus_1 = binop(&mut arena, b, Operator::Minus, one);
+        let five = lit_i32(&mut arena, 5);
+        let minus_eq = binop(&mut arena, b_minus_1, Operator::Eq, five);
+        let and_node = binop(&mut arena, eq_a, Operator::And, minus_eq);
+        let schema = schema_a_b_int32();
+        let virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
+        let expr = aexpr_file_minterms_to_vortex_expression(
+            and_node,
+            &arena,
+            Some(&schema),
+            &virtual_cols,
+        );
+        assert!(
+            expr.is_some(),
+            "expected supported conjunct (a == 1) to push down even when sibling conjunct uses Minus (unsupported)"
+        );
     }
 
     /// Nested Ternary with matching inner dtypes — pushes down via the

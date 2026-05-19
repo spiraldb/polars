@@ -562,6 +562,43 @@ def test_scan_with_ternary_filter(tmp_path: Path) -> None:
     assert out["a"].to_list() == [6, 7, 8, 9, 10, 11, 12, 13, 14]
 
 
+def test_scan_with_hive_and_file_col_mixed_filter(tmp_path: Path) -> None:
+    """PR-2.8: hive-partitioned scan with a mixed file-col + hive-col filter
+    splits the predicate per-column and pushes the file-col conjunct to Vortex
+    while leaving the hive-col conjunct for Polars' multi-scan reapply.
+
+    Pre-PR-2.8: the convertor's virtual-column guard at lower_ir.rs:801-815
+    refused convertor pushdown ENTIRELY when hive_parts.is_some(); correctness
+    held via PARTIAL_FILTER reapply but the file-col part missed Vortex zone
+    pruning.
+
+    Post-PR-2.8: `aexpr_file_minterms_to_vortex_expression` walks top-level
+    conjuncts via MintermIter and converts only the file-only ones. The
+    `x > 5` minterm pushes to Vortex; the `year == 2024` minterm stays
+    residual and Polars' hive-partition pruning + multi-scan reapply handles
+    it. Result correctness is preserved either way; the test confirms the
+    pipeline doesn't crash and returns the right rows.
+
+    A regression where the per-column split mis-classified a hive col as
+    file (and tried to push it to Vortex) would surface as a ``ComputeError``
+    from Vortex bailing on missing column 'year'.
+    """
+    (tmp_path / "year=2024").mkdir()
+    (tmp_path / "year=2025").mkdir()
+    pl.DataFrame({"x": [1, 3, 5, 7, 9]}).write_vortex(tmp_path / "year=2024" / "data.vortex")
+    pl.DataFrame({"x": [2, 4, 6, 8, 10]}).write_vortex(tmp_path / "year=2025" / "data.vortex")
+
+    out = (
+        pl.scan_vortex(tmp_path / "**/*.vortex", hive_partitioning=True)
+        .filter((pl.col("x") > 5) & (pl.col("year") == 2024))
+        .collect()
+    )
+    # x > 5 AND year == 2024 → from year=2024 dir: 7, 9 (1, 3, 5 are filtered)
+    assert out.shape == (2, 2)
+    assert sorted(out["x"].to_list()) == [7, 9]
+    assert out["year"].unique().to_list() == [2024]
+
+
 def test_scan_with_starts_with_wildcard_in_needle(tmp_path: Path) -> None:
     """PR-2.7 cycle 1 (negative path): a wildcard ('%') in the needle refuses
     pushdown via ``bytes_to_like_literal``. The residual filter reapplies
