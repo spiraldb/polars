@@ -13,18 +13,18 @@ phase_index: 2
 current_pr: PR-2.7
 pr_index: 8
 outstanding_must_fix: 0
-deferred_items_total: 14
-last_user_touchpoint: 2026-05-18T23:00:00Z
-last_user_touchpoint_what: "PR-2.7 cycle 1 gauntlet returned REJECT (3 must-fix, 6 should-fix, 2 nit): is_between pairwise-PType gate + Ternary THEN/ELSE pairwise-dtype gate + StringExpr Utf8 input gate; all three same bug class as PR-2.3 CAST + PR-2.4 comparison gates. User picked apply-all-must-fix+key-should-fix inline; entering Step 2.4 fix-application loop"
-subagent_invocations_this_pr: 1
-subagent_invocations_total: 42
-review_cycles_this_pr: 1
+deferred_items_total: 15
+last_user_touchpoint: 2026-05-18T23:45:00Z
+last_user_touchpoint_what: "PR-2.7 cycle 2 gauntlet ACCEPT (0 must-fix, 6 should-fix, 2 nit). User picked maximum-thoroughness: apply all 8 polish inline. Landed 5 polish commits: fa89c9b39 resolve_inner_dtype Ternary arm + nested-Ternary test (should-fix #1) + d457a1300 feature-gate strings/is_in imports (should-fix #2) + a9918a201 strengthen 3 structural tests (should-fix #3/#4/#5) + aebb30250 README gate notes + is_in empty-haystack comment (should-fix #6 + nit #7) + 5e68b4f2d plan NaN-divergence Deferred entry (nit #8). 88 unit tests pass. Ready for cycle 3 verification or PR-2.7 complete."
+subagent_invocations_this_pr: 2
+subagent_invocations_total: 44
+review_cycles_this_pr: 2
 phase_entry_sha: 93643dd77
 phase_end_cycle: 1
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 8639dd51c0
+last_commit: 5e68b4f2d
 ```
 
 ## Context
