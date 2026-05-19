@@ -20,6 +20,9 @@ ignore = [
   # error[unmaintained]: Bincode is unmaintained
   "RUSTSEC-2025-0141",
 
+  # error[unmaintained]: paste is unmaintained (transitive via vortex 0.70.0)
+  "RUSTSEC-2024-0436",
+
   # error[unsound]: Rand is unsound with a custom logger using `rand::rng()`
   "RUSTSEC-2026-0097",
 
@@ -48,6 +51,7 @@ allow = [
   "Unicode-3.0",
   # Public domain / no-rights-reserved
   "CC0-1.0",
+  "0BSD",
   # Other permissive / widely-used
   "BSL-1.0",
   "OpenSSL",

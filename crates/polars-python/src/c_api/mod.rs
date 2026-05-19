@@ -321,6 +321,10 @@ pub fn _polars_runtime(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(functions::set_trim_decimal_zeros))
         .unwrap();
 
+    #[cfg(feature = "vortex")]
+    m.add_wrapped(wrap_pyfunction!(functions::set_vortex_cache_bytes))
+        .unwrap();
+
     // Functions - misc
     m.add_wrapped(wrap_pyfunction!(functions::dtype_str_repr))
         .unwrap();

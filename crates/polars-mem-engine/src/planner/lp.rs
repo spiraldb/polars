@@ -445,6 +445,19 @@ fn create_physical_plan_impl(
                     create_skip_batch_predicate |= options.use_statistics;
                 }
             }
+            // Vortex's zone-level pruning inside `ScanBuilder::with_filter` (via
+            // `LayoutReader::pruning_evaluation`) operates on a DIFFERENT layer than
+            // Polars' per-file `skip_batch_predicate`: Vortex zones are sub-file
+            // (~chunks within a file's layout), while skip_batch_predicate prunes
+            // WHOLE files via the per-file `{col}_min`/`{col}_max`/`{col}_nc` stats
+            // DataFrame populated at IR-build time by `vortex_file_info`. The two
+            // layers are complementary: file-level prune skips the whole file
+            // (avoids opening the layout entirely); zone-level prune skips sub-file
+            // chunks within an opened file. The default
+            // `unified_scan_args.table_statistics.is_some()` trigger above fires
+            // naturally for single-file Vortex scans (the populate path gates on
+            // `n_sources == 1` at the DSL → IR layer; multi-file aggregation is
+            // tracked as Deferred work).
 
             let predicate = predicate
                 .map(|predicate| {

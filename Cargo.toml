@@ -103,6 +103,7 @@ strength_reduce = "0.2"
 strum = "0.27"
 strum_macros = "0.27"
 tokio = { version = "1.44", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
 unicode-normalization = "0.1.24"
 unicode-reverse = "1.0.8"
 uuid = { version = "1.15.1", features = ["v4", "v7"] }
@@ -110,6 +111,8 @@ version_check = "0.9.4"
 xxhash-rust = { version = "0.8.6", features = ["xxh3"] }
 zmij = "1.0.0"
 zstd = "0.13"
+
+vortex = { version = "0.70.0", default-features = false, features = ["files", "tokio"] }
 
 polars = { version = "0.53.0", path = "crates/polars", default-features = false }
 polars-buffer = { version = "0.53.0", path = "crates/polars-buffer", default-features = false }
@@ -137,6 +140,7 @@ polars-stream = { version = "0.53.0", path = "crates/polars-stream", default-fea
 polars-testing = { version = "0.53.0", path = "crates/polars-testing", default-features = false }
 polars-time = { version = "0.53.0", path = "crates/polars-time", default-features = false }
 polars-utils = { version = "0.53.0", path = "crates/polars-utils", default-features = false }
+polars-vortex = { version = "0.53.0", path = "crates/polars-vortex", default-features = false }
 pyo3-polars = { version = "0.26.0", path = "pyo3-polars/pyo3-polars" }
 pyo3-polars-derive = { version = "0.20.0", path = "pyo3-polars/pyo3-polars-derive" }
 

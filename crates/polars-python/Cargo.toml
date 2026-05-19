@@ -28,6 +28,7 @@ polars-row = { workspace = true }
 polars-testing = { workspace = true }
 polars-time = { workspace = true }
 polars-utils = { workspace = true, features = ["python"] }
+polars-vortex = { workspace = true, optional = true }
 
 arboard = { workspace = true, optional = true }
 arrow = { workspace = true }
@@ -49,7 +50,7 @@ parking_lot = { workspace = true }
 pyo3 = { workspace = true, features = ["abi3-py310", "chrono", "chrono-tz", "multiple-pymethods"] }
 rayon = { workspace = true }
 recursive = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dependencies.polars]
@@ -137,13 +138,22 @@ avro = ["polars/avro"]
 async = ["polars-lazy/async", "polars-io/async"]
 catalog = ["polars-lazy/catalog"]
 parquet = ["polars/parquet", "polars-parquet", "polars-mem-engine/parquet"]
+vortex = [
+  "polars/vortex",
+  "polars-mem-engine/vortex",
+  "polars-lazy/vortex",
+  "dep:polars-vortex",
+  # `serde` derives on VortexScanOptions are required by the lazyframe visitor
+  # (which serializes scan options to JSON for the Python AST view) — that
+  # visitor is built whenever `json` is on, which py-polars always enables.
+  "polars-vortex/serde",
+]
 ipc = ["polars/ipc", "polars-mem-engine/ipc"]
 ipc_streaming = ["polars/ipc_streaming"]
 is_in = ["polars/is_in"]
 json = [
   "polars/serde",
   "polars-buffer/serde",
-  "serde_json",
   "polars/json",
   "polars-utils/serde",
   "polars-mem-engine/json",

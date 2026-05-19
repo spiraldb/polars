@@ -328,6 +328,62 @@ impl PyLazyFrame {
         Ok(lf.into())
     }
 
+    #[cfg(feature = "vortex")]
+    #[staticmethod]
+    #[pyo3(signature = (
+        sources, schema, scan_options, push_predicate, initial_read_size, scan_concurrency,
+        cache_mode_kind, cache_dedicated_bytes
+    ))]
+    fn new_from_vortex(
+        sources: Wrap<ScanSources>,
+        schema: Option<Wrap<Schema>>,
+        scan_options: PyScanOptions,
+        push_predicate: bool,
+        initial_read_size: Option<usize>,
+        scan_concurrency: Option<usize>,
+        cache_mode_kind: &str,
+        cache_dedicated_bytes: Option<u64>,
+    ) -> PyResult<Self> {
+        use polars_vortex::{VortexCacheMode, VortexScanOptions};
+
+        use crate::utils::to_py_err;
+
+        let segment_cache = match (cache_mode_kind, cache_dedicated_bytes) {
+            ("global", _) => VortexCacheMode::Global,
+            ("off", _) => VortexCacheMode::Off,
+            ("dedicated", Some(bytes)) => VortexCacheMode::Dedicated(bytes),
+            ("dedicated", None) => {
+                return Err(PyValueError::new_err(
+                    "cache_mode='dedicated' requires cache_dedicated_bytes",
+                ));
+            },
+            (other, _) => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown cache_mode_kind {other:?}; expected 'global', 'off', or 'dedicated'",
+                )));
+            },
+        };
+
+        let options = VortexScanOptions {
+            schema: schema.map(|x| Arc::new(x.0)),
+            push_predicate,
+            initial_read_size,
+            scan_concurrency: scan_concurrency.and_then(NonZeroUsize::new),
+            segment_cache,
+        };
+
+        let sources = sources.0;
+        let first_path = sources.first_path();
+        let unified_scan_args =
+            scan_options.extract_unified_scan_args(first_path.and_then(|x| x.scheme()))?;
+
+        let lf: LazyFrame = DslBuilder::scan_vortex(sources, options, unified_scan_args)
+            .map_err(to_py_err)?
+            .build()
+            .into();
+        Ok(lf.into())
+    }
+
     #[cfg(feature = "ipc")]
     #[staticmethod]
     #[pyo3(signature = (sources, record_batch_statistics, scan_options))]
@@ -716,6 +772,52 @@ impl PyLazyFrame {
                 .sink(
                     target,
                     FileWriteFormat::Parquet(Arc::new(options)),
+                    unified_sink_args,
+                )
+                .into()
+        })
+        .map(Into::into)
+        .map_err(Into::into)
+    }
+
+    #[cfg(feature = "vortex")]
+    #[pyo3(signature = (target, sink_options, compression, row_block_size, include_dtype))]
+    fn sink_vortex(
+        &self,
+        py: Python<'_>,
+        target: PyFileSinkDestination,
+        sink_options: PySinkOptions,
+        compression: &str,
+        row_block_size: Option<u64>,
+        include_dtype: bool,
+    ) -> PyResult<PyLazyFrame> {
+        use polars_vortex::{VortexCompression, VortexWriteOptions};
+
+        let compression = match compression {
+            "btrblocks" => VortexCompression::BtrBlocks,
+            "uncompressed" => VortexCompression::Uncompressed,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid vortex compression: {other:?} (expected 'btrblocks' or 'uncompressed')",
+                )));
+            },
+        };
+
+        let options = VortexWriteOptions {
+            compression,
+            row_block_size,
+            include_dtype,
+        };
+        let target = target.extract_file_sink_destination()?;
+        let unified_sink_args = sink_options.extract_unified_sink_args(target.cloud_scheme())?;
+
+        py.enter_polars(|| {
+            self.ldf
+                .read()
+                .clone()
+                .sink(
+                    target,
+                    FileWriteFormat::Vortex(Arc::new(options)),
                     unified_sink_args,
                 )
                 .into()

@@ -24,6 +24,7 @@ polars-plan = { workspace = true }
 polars-stream = { workspace = true, optional = true }
 polars-time = { workspace = true, optional = true }
 polars-utils = { workspace = true }
+polars-vortex = { workspace = true, optional = true }
 
 bitflags = { workspace = true }
 either = { workspace = true }
@@ -50,6 +51,12 @@ parquet = [
   "polars-mem-engine/parquet",
   "polars-stream?/parquet",
 ]
+vortex = [
+  "dep:polars-vortex",
+  "polars-plan/vortex",
+  "polars-mem-engine/vortex",
+  "polars-stream?/vortex",
+]
 async = [
   "polars-io/cloud",
   "polars-mem-engine/async",
@@ -61,6 +68,7 @@ cloud = [
   "futures",
   "polars-mem-engine/cloud",
   "polars-stream?/cloud",
+  "polars-vortex?/cloud",
 ]
 ipc = ["polars-io/ipc", "polars-plan/ipc", "polars-mem-engine/ipc", "polars-stream?/ipc"]
 json = [
@@ -124,6 +132,7 @@ dtype-date = [
   "temporal",
   "polars-expr/dtype-date",
   "polars-mem-engine/dtype-date",
+  "polars-vortex?/dtype-date",
 ]
 dtype-datetime = [
   "polars-plan/dtype-datetime",
@@ -132,12 +141,14 @@ dtype-datetime = [
   "temporal",
   "polars-expr/dtype-datetime",
   "polars-mem-engine/dtype-datetime",
+  "polars-vortex?/dtype-datetime",
 ]
 dtype-decimal = [
   "polars-plan/dtype-decimal",
   "polars-expr/dtype-decimal",
   "polars-stream?/dtype-decimal",
   "polars-mem-engine/dtype-decimal",
+  "polars-vortex?/dtype-decimal",
 ]
 dtype-duration = [
   "polars-plan/dtype-duration",
@@ -178,6 +189,7 @@ dtype-time = [
   "temporal",
   "polars-expr/dtype-time",
   "polars-mem-engine/dtype-time",
+  "polars-vortex?/dtype-time",
 ]
 dtype-u128 = [
   "polars-plan/dtype-u128",

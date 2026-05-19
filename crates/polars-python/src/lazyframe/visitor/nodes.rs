@@ -41,6 +41,14 @@ fn scan_type_to_pyobject(
         },
         #[cfg(feature = "ipc")]
         FileScanIR::Ipc { .. } => Err(PyNotImplementedError::new_err("ipc scan")),
+        #[cfg(feature = "vortex")]
+        FileScanIR::Vortex { options, .. } => {
+            let options = serde_json::to_string(options)
+                .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+            let cloud_options = serde_json::to_string(cloud_options)
+                .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
+            Ok(("vortex", options, cloud_options).into_py_any(py)?)
+        },
         #[cfg(feature = "json")]
         FileScanIR::NDJson { options, .. } => {
             let options = serde_json::to_string(options)

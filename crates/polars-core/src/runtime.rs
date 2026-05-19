@@ -287,6 +287,13 @@ impl AsyncRuntime {
     {
         self.rt.spawn_blocking(f)
     }
+
+    /// Returns a [`tokio::runtime::Handle`] to the underlying runtime. Useful for
+    /// downstream libraries (e.g. Vortex) that accept a `tokio::runtime::Handle`
+    /// directly so they can share Polars' async runtime instead of starting their own.
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.rt.handle().clone()
+    }
 }
 
 pub static ASYNC: LazyLock<AsyncRuntime> = LazyLock::new(AsyncRuntime::new);

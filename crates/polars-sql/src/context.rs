@@ -2016,9 +2016,15 @@ impl SQLContext {
         // Note: remove the `group_by` keys as Polars adds those implicitly.
         let mut aliased_aggregations: PlHashMap<PlSmallStr, PlSmallStr> = PlHashMap::new();
         let mut aggregation_projection = Vec::with_capacity(projections.len());
-        let mut projection_overrides = PlHashMap::with_capacity(projections.len());
-        let mut projection_aliases = PlHashSet::new();
-        let mut group_key_aliases = PlHashSet::new();
+        // Explicit type annotations: when the `vortex` feature is enabled, Vortex
+        // pulls in hashbrown 0.17 transitively while Polars uses 0.16 directly.
+        // Two coexisting `hashbrown` crates in the dep tree confuse type inference
+        // on the bare `PlHashMap::new()` / `PlHashSet::new()` calls below, so we
+        // pin the key type explicitly. Harmless when vortex is off.
+        let mut projection_overrides: PlHashMap<&str, Expr> =
+            PlHashMap::with_capacity(projections.len());
+        let mut projection_aliases: PlHashSet<&str> = PlHashSet::new();
+        let mut group_key_aliases: PlHashSet<&str> = PlHashSet::new();
 
         // Pre-compute group key data (stripped expression + output name) to avoid repeated work.
         // We check both expression AND output name match to avoid cross-aliasing issues.

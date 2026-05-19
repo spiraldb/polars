@@ -25,6 +25,7 @@ polars-ops = { workspace = true, features = [] }
 polars-parquet = { workspace = true, optional = true }
 polars-time = { workspace = true, optional = true }
 polars-utils = { workspace = true }
+polars-vortex = { workspace = true, optional = true }
 
 arrow = { workspace = true }
 bitflags = { workspace = true }
@@ -71,11 +72,13 @@ serde = [
   "polars-ops/serde",
   "polars-utils/serde",
   "polars-compute/serde",
+  "polars-vortex?/serde",
   "either/serde",
   "slotmap/serde",
 ]
 parquet = ["polars-io/parquet", "polars-parquet"]
-cloud = ["polars-io/cloud"]
+vortex = ["polars-vortex"]
+cloud = ["polars-io/cloud", "polars-vortex?/cloud"]
 ipc = ["polars-io/ipc"]
 json = ["polars-io/json", "polars-json"]
 scan_lines = []
@@ -135,6 +138,7 @@ dsl-schema = [
   "polars-ops/dsl-schema",
   "polars-utils/dsl-schema",
   "polars-compute/dsl-schema",
+  "polars-vortex?/dsl-schema",
 ]
 
 # operations

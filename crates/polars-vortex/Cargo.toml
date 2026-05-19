@@ -1,0 +1,58 @@
+[package]
+name = "polars-vortex"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Vortex file format I/O for Polars"
+
+[dependencies]
+polars-core = { workspace = true, features = ["algorithm_group_by"] }
+polars-error = { workspace = true }
+polars-io = { workspace = true, features = ["async"] }
+polars-schema = { workspace = true }
+polars-utils = { workspace = true }
+
+arrow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+
+object_store = { workspace = true, optional = true }
+tokio-util = { workspace = true, features = ["compat"], optional = true }
+vortex = { workspace = true, default-features = false, features = ["files", "tokio"] }
+
+# Upstream Arrow crates used solely for the C Data Interface bridge in `read::array_bridge`.
+# Vortex's `ArrowArrayExecutor::execute_record_batch` returns a `arrow_array::RecordBatch`
+# (upstream Arrow); we transfer it into polars-arrow zero-copy via the C ABI. Pinned to
+# the same major version Vortex uses transitively so there's no duplicate-crate risk.
+arrow-array = "58"
+arrow-data = "58"
+arrow-schema = "58"
+
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+cloud = ["vortex/object_store", "polars-io/cloud", "dep:object_store", "dep:tokio-util"]
+serde = ["dep:serde", "polars-io/serde", "polars-utils/serde"]
+dsl-schema = ["dep:schemars", "polars-utils/dsl-schema"]
+# Enables the temporal/decimal scalar arms in the predicate convertor. Off by
+# default — without these, filters on Date/Datetime/Time/Decimal scalars fall
+# back to the residual filter (still correct, just no pruning).
+dtype-date = ["polars-core/dtype-date"]
+dtype-datetime = ["polars-core/dtype-datetime"]
+dtype-time = ["polars-core/dtype-time"]
+dtype-decimal = ["polars-core/dtype-decimal"]
+
+[dev-dependencies]
+regex = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true

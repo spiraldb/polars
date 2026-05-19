@@ -504,6 +504,14 @@ where
                 metadata,
             } => *metadata = None,
 
+            #[cfg(feature = "vortex")]
+            FileScanIR::Vortex {
+                options: _,
+                metadata,
+                // Segment cache is per-scan-instance state, not metadata — leave intact.
+                segment_cache: _,
+            } => *metadata = None,
+
             #[cfg(feature = "csv")]
             FileScanIR::Csv { options: _ } => {},
 

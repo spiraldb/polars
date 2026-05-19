@@ -10,6 +10,8 @@ use polars_io::ipc::IpcScanOptions;
 #[cfg(feature = "parquet")]
 use polars_io::parquet::read::ParquetOptions;
 use polars_utils::unique_id::UniqueId;
+#[cfg(feature = "vortex")]
+use polars_vortex::VortexScanOptions;
 
 use crate::dsl::functions::lit;
 #[cfg(feature = "python")]
@@ -78,6 +80,21 @@ impl DslBuilder {
             sources,
             unified_scan_args: Box::new(unified_scan_args),
             scan_type: Box::new(FileScanDsl::Ipc { options }),
+            cached_ir: Default::default(),
+        }
+        .into())
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn scan_vortex(
+        sources: ScanSources,
+        options: VortexScanOptions,
+        unified_scan_args: UnifiedScanArgs,
+    ) -> PolarsResult<Self> {
+        Ok(DslPlan::Scan {
+            sources,
+            unified_scan_args: Box::new(unified_scan_args),
+            scan_type: Box::new(FileScanDsl::Vortex { options }),
             cached_ir: Default::default(),
         }
         .into())

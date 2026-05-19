@@ -15,6 +15,10 @@ use polars_io::parquet::metadata::FileMetadataRef;
 use polars_io::parquet::read::ParquetOptions;
 use polars_io::{HiveOptions, RowIndex};
 use polars_utils::slice_enum::Slice;
+#[cfg(feature = "vortex")]
+use polars_vortex::VortexScanOptions;
+#[cfg(feature = "vortex")]
+use polars_vortex::read::VortexFooterRef;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use strum_macros::IntoStaticStr;
@@ -66,6 +70,11 @@ pub enum FileScanDsl {
     #[cfg(feature = "ipc")]
     Ipc {
         options: IpcScanOptions,
+    },
+
+    #[cfg(feature = "vortex")]
+    Vortex {
+        options: VortexScanOptions,
     },
 
     #[cfg(feature = "python")]
@@ -124,6 +133,21 @@ pub enum FileScanIR {
         metadata: Option<Arc<arrow::io::ipc::read::FileMetadata>>,
     },
 
+    #[cfg(feature = "vortex")]
+    Vortex {
+        options: VortexScanOptions,
+        #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
+        metadata: Option<VortexFooterRef>,
+        /// Caller-resolved segment cache, threaded from IR-build into the streaming source
+        /// so the schema-discovery read and the data read share one Moka cache instance.
+        /// Without this thread-through, `VortexCacheMode::Dedicated(N).resolve()` runs twice
+        /// per logical scan (once at IR-build, once at streaming-source-time), producing
+        /// two independent caches and losing the discovery→data prefetching benefit. See
+        /// [`polars_vortex::read::VortexSegmentCacheRef`].
+        #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
+        segment_cache: Option<polars_vortex::read::VortexSegmentCacheRef>,
+    },
+
     #[cfg(feature = "python")]
     PythonDataset {
         dataset_object: Arc<python_dataset::PythonDatasetProvider>,
@@ -155,6 +179,8 @@ impl FileScanIR {
             Self::Ipc { .. } => ScanFlags::empty(),
             #[cfg(feature = "parquet")]
             Self::Parquet { .. } => ScanFlags::SPECIALIZED_PREDICATE_FILTER,
+            #[cfg(feature = "vortex")]
+            Self::Vortex { .. } => ScanFlags::SPECIALIZED_PREDICATE_FILTER,
             #[cfg(feature = "json")]
             Self::NDJson { .. } => ScanFlags::empty(),
             #[allow(unreachable_patterns)]
@@ -170,6 +196,8 @@ impl FileScanIR {
             Self::Ipc { .. } => false,
             #[cfg(feature = "parquet")]
             Self::Parquet { .. } => true,
+            #[cfg(feature = "vortex")]
+            Self::Vortex { .. } => true,
             #[cfg(feature = "json")]
             Self::NDJson { .. } => false,
             #[allow(unreachable_patterns)]
@@ -424,6 +452,13 @@ mod _file_scan_eq_hash {
             metadata: Option<usize>,
         },
 
+        #[cfg(feature = "vortex")]
+        Vortex {
+            options: &'a polars_vortex::VortexScanOptions,
+            metadata: Option<usize>,
+            segment_cache: Option<usize>,
+        },
+
         #[cfg(feature = "python")]
         PythonDataset {
             dataset_object: usize,
@@ -468,6 +503,17 @@ mod _file_scan_eq_hash {
                 FileScanIR::Ipc { options, metadata } => FileScanEqHashWrap::Ipc {
                     options,
                     metadata: metadata.as_ref().map(arc_as_ptr),
+                },
+
+                #[cfg(feature = "vortex")]
+                FileScanIR::Vortex {
+                    options,
+                    metadata,
+                    segment_cache,
+                } => FileScanEqHashWrap::Vortex {
+                    options,
+                    metadata: metadata.as_ref().map(arc_as_ptr),
+                    segment_cache: segment_cache.as_ref().map(|c| arc_as_ptr(&c.0)),
                 },
 
                 #[cfg(feature = "python")]

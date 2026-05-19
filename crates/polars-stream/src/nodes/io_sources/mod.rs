@@ -12,3 +12,5 @@ pub mod ndjson;
 #[cfg(feature = "parquet")]
 pub mod parquet;
 pub mod shared;
+#[cfg(feature = "vortex")]
+pub mod vortex;

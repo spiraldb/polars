@@ -3136,6 +3136,115 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             return None
         return LazyFrame._from_pyldf(ldf_py)
 
+    def sink_vortex(
+        self,
+        path: str | Path | IO[bytes] | PartitionBy,
+        *,
+        compression: Literal["btrblocks", "uncompressed"] = "btrblocks",
+        row_block_size: int | None = None,
+        include_dtype: bool = True,
+        maintain_order: bool = True,
+        storage_options: StorageOptionsDict | None = None,
+        credential_provider: CredentialProviderFunction
+        | Literal["auto"]
+        | None = "auto",
+        sync_on_close: SyncOnCloseMethod | None = None,
+        mkdir: bool = False,
+        lazy: bool = False,
+        engine: EngineType = "auto",
+        optimizations: QueryOptFlags = DEFAULT_QUERY_OPT_FLAGS,
+        _sinked_paths_callback: SinkedPathsCallback | None = None,
+    ) -> LazyFrame | None:
+        """
+        Evaluate the query in streaming mode and write to a Vortex file.
+
+        Vortex is a high-performance columnar file format with rich pushdown and
+        zone-level pruning. See ``pl.scan_vortex`` for the read side.
+
+        Parameters
+        ----------
+        path
+            File path to which the file should be written. Accepts local paths as
+            well as cloud URLs (``s3://``, ``gs://``, ``az://``).
+        compression
+            Column encoding policy. ``"btrblocks"`` (default) lets Vortex's
+            sampling compressor pick per-column encodings adaptively.
+            ``"uncompressed"`` disables all schemes — useful for benchmarking or
+            strict-compliance scenarios where compression isn't desired.
+        row_block_size
+            Granularity of zone-level pruning. ``None`` (default) uses Vortex's
+            default of 8192 rows per block. Smaller blocks → finer pruning, more
+            metadata overhead; larger blocks → coarser pruning, less metadata.
+        include_dtype
+            Whether to embed the Vortex ``DType`` in the file's metadata segment.
+            ``True`` (default) — readers without an out-of-band schema require
+            this.
+        maintain_order
+            Maintain the order in which data is processed (default ``True``).
+        storage_options
+            Cloud storage auth (e.g. ``{"aws_access_key_id": ...}``). Honored by
+            both local and cloud sinks.
+        credential_provider
+            Cloud credential provider.
+        sync_on_close
+            How aggressively to fsync after the write.
+        mkdir
+            Create parent directories if they don't exist.
+        lazy
+            If ``True``, return a LazyFrame that has the sink as a leaf instead of
+            executing eagerly.
+        engine
+            Which Polars engine drives the execution.
+        optimizations
+            Optimization flags.
+
+        Returns
+        -------
+        LazyFrame | None
+            ``None`` if ``lazy=False`` (default); a LazyFrame otherwise.
+
+        See Also
+        --------
+        pl.scan_vortex : Read a Vortex file lazily.
+        pl.read_vortex : Read a Vortex file eagerly.
+        """
+        from polars.io.cloud.credential_provider._builder import (
+            _init_credential_provider_builder,
+        )
+
+        credential_provider_builder = _init_credential_provider_builder(
+            credential_provider, path, storage_options, "sink_vortex"
+        )
+        del credential_provider
+
+        target = _to_sink_target(path)
+
+        from polars.io.partition import _SinkOptions
+
+        sink_options = _SinkOptions(
+            mkdir=mkdir,
+            maintain_order=maintain_order,
+            sync_on_close=sync_on_close,
+            storage_options=storage_options,
+            credential_provider=credential_provider_builder,
+            sinked_paths_callback=_sinked_paths_callback,
+        )
+
+        ldf_py = self._ldf.sink_vortex(
+            target=target,
+            sink_options=sink_options,
+            compression=compression,
+            row_block_size=row_block_size,
+            include_dtype=include_dtype,
+        )
+
+        if not lazy:
+            ldf_py = ldf_py.with_optimizations(optimizations._pyoptflags)
+            ldf = LazyFrame._from_pyldf(ldf_py)
+            ldf.collect(engine=engine)
+            return None
+        return LazyFrame._from_pyldf(ldf_py)
+
     @overload
     def sink_delta(
         self,

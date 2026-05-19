@@ -95,3 +95,15 @@ pub fn get_trim_decimal_zeros() -> PyResult<Option<bool>> {
     use polars_core::fmt::get_trim_decimal_zeros;
     Ok(Some(get_trim_decimal_zeros()))
 }
+
+/// Set the process-global Vortex segment cache size, in bytes. Pass `0` to disable.
+///
+/// The segment cache stores decompressed columnar segments across queries on the
+/// same Vortex file — one of Vortex's biggest perf wins over Parquet. Default is
+/// 512 MiB (also tunable via the `POLARS_VORTEX_CACHE_BYTES` env var).
+#[cfg(feature = "vortex")]
+#[pyfunction]
+pub fn set_vortex_cache_bytes(bytes: u64) -> PyResult<()> {
+    polars_vortex::session::set_global_cache_bytes(bytes);
+    Ok(())
+}
