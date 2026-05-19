@@ -418,6 +418,12 @@ pub fn aexpr_to_vortex_expression(
             if terms.len() != n_values {
                 return None;
             }
+            // `or_collect(vec![])` returns None when the haystack was empty
+            // (`is_in([])` matches no rows). Polars's post-decode residual
+            // reapply handles the all-false semantic correctly, so the refuse
+            // here is a missed optimization (we could pre-empt with
+            // `lit(VortexScalar::bool(false, NonNullable))`) — not a bug.
+            // PR-2.7 cycle-2 nit #7.
             or_collect(terms)
         },
 
