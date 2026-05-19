@@ -30,7 +30,7 @@ pr_index: 9
 outstanding_must_fix: 0
 deferred_items_total: 16
 last_user_touchpoint: 2026-05-19T05:00:00Z
-last_user_touchpoint_what: "Re-stack complete: 60 Phase 2 commits rebased onto extended vortex-integration-phase-1 tip (which now includes Phase 3 file-stats / multi-file work + PR-2.0 cleanups). Branch ready for cycle-3 phase-end accept verdict to carry forward; PR #1 base needs retargeting to vortex-integration-phase-1 (Phase 1++) tip. Plan rewrite + full Implementation status update deferred to next session."
+last_user_touchpoint_what: "Re-stack complete: 60 Phase 2 commits rebased onto extended vortex-integration-phase-1 tip (which now includes Phase 3 file-stats / multi-file work + PR-2.0 cleanups). Branch ready for cycle-3 phase-end accept verdict to carry forward. PR-number swap also done 2026-05-19: original PR #1 closed and reopened as PR #3 to match phase ordering (lower-numbered PR is the foundation). Plan rewrite + full Implementation status update done in followups."
 subagent_invocations_this_pr: 0
 subagent_invocations_total: 60
 review_cycles_this_pr: 0
@@ -196,7 +196,7 @@ Reviewers must flag these as immediate **must-fix** if found in the diff. Seeded
 After the 2026-05-19 PR re-stack, the work ships as a 2-PR stack with redrawn responsibility lines:
 
 - **PR #2 (Phase 1++)** on branch `vortex-integration-phase-1` — complete robust Vortex foundation: read/write, multi-file, hive, cloud, segment cache + thread-through, filter pushdown via the legacy `SpecializedColumnPredicate` machinery, file-level stats via `UnifiedScanArgs::table_statistics`, Criterion bench baseline, multi-file schema-evolution tests. Still pending in this PR: PR-3.3 (nested-type + small-int dtypes + POLARS_VERBOSE engagement infra) + extended benches (originally Phase 4).
-- **PR #1 (Phase 2 — THIS BRANCH)** on branch `vortex-integration` — pure perf follow-on: AExpr-direct convertor walking `Arena<AExpr>` at IR-build time, replacing the legacy pushdown path. Originally "Phase 2" in the pre-restack plan; the Phase 1++ work was split out.
+- **PR #3 (Phase 2 — THIS BRANCH)** on branch `vortex-integration` — pure perf follow-on: AExpr-direct convertor walking `Arena<AExpr>` at IR-build time, replacing the legacy pushdown path. Originally "Phase 2" in the pre-restack plan; the Phase 1++ work was split out. (Originally PR #1; closed and reopened 2026-05-19 as PR #3 to match phase ordering — lower-numbered PR is the foundation.)
 
 This branch's plan describes Phase 2 (the convertor work) in detail. Phase 1++'s plan (in branch `vortex-integration-phase-1`) describes the foundation + Phase 3/4 absorption work.
 
@@ -230,10 +230,10 @@ spiraldb:main
   ↑
 vortex-integration-phase-1   ← PR #2 (Phase 1++): foundation + Phase 3 absorption + extended benches
   ↑
-vortex-integration           ← PR #1 (Phase 2 — THIS BRANCH): AExpr-direct convertor + cutover + amend
+vortex-integration           ← PR #3 (Phase 2 — THIS BRANCH): AExpr-direct convertor + cutover + amend
 ```
 
-Sequencing: spiraldb merges PR #2 first (after Phase 1++ phase-end accepts and Phase 1++'s remaining work lands) → rebase PR #1 onto `main` → spiraldb merges PR #1.
+Sequencing: spiraldb merges PR #2 first (after Phase 1++ phase-end accepts and Phase 1++'s remaining work lands) → rebase PR #3 onto `main` → spiraldb merges PR #3.
 
 Backup branches preserve pre-restack state: `backup-vortex-integration-pre-restack` (this branch's pre-restack tip `7b0f6709f7`) and `backup-vortex-integration-phase-1-pre-restack` (Phase 1++'s pre-restack tip `e730c6e1d2`).
 
@@ -347,7 +347,7 @@ Numbered; each with probability / impact / mitigation.
 4. **PR-8 leads Parquet on `UnifiedScanArgs::table_statistics`** — P=low; impact=low. The TableStatistics API is already stable and public (`crates/polars-plan/src/dsl/file_scan/mod.rs:290`). polars-vortex is the first FILE-FORMAT consumer (vs PythonDataset/Iceberg-style catalog consumers); no API change required. Mitigation: PR-3.1 follows the existing `{col}_min`/`{col}_max`/`{col}_nc` contract verbatim. Subtle interaction with the Vortex polars-mem-engine override (`planner/lp.rs:448-459`) is flagged for PR-3.1 implementation — Vortex's internal pruning stays disabled, file-level table_statistics pruning fires. No upstream coordination needed in this branch.
 5. **Mem-engine + streaming engine + plan plumbing fragile to upstream refactors** — P=low; impact=moderate. The integration crosses many crates; an upstream refactor on `to_graph.rs` / `dsl_to_ir/scans.rs` / `polars-mem-engine/planner/lp.rs` could break the integration during Phases 2–4. Mitigation: keep feature gate clean (`#[cfg(feature = "vortex")]`) so disabling vortex restores pre-integration code paths verbatim; pin upstream base SHA at PR open; rebase intentionally.
 6. **Hashbrown 0.16/0.17 coexistence type-inference breakage** — P=medium; impact=minor. Any new code path under `vortex` feature can hit this. Mitigation: BAN forces explicit annotations; recurring fix pattern is well-known; reviewers explicitly check for `PlHashMap::new()` without annotation.
-7. **AI_POLICY.md / upstream `pola-rs/polars` adoption hesitation** — P=low; impact=high (long-term). spiraldb/polars#1 lives on spiraldb's fork; eventual upstream merge requires `pola-rs/polars` adoption. Mitigation: out of big-plans scope. Merge to `spiraldb:main` is the explicit end-state. Upstreaming is a separate decision after merge.
+7. **AI_POLICY.md / upstream `pola-rs/polars` adoption hesitation** — P=low; impact=high (long-term). spiraldb/polars#2 + #3 live on spiraldb's fork; eventual upstream merge requires `pola-rs/polars` adoption. Mitigation: out of big-plans scope. Merge to `spiraldb:main` is the explicit end-state. Upstreaming is a separate decision after merge.
 8. **`Implementation status` ledger grows large** — P=medium over task lifetime; impact=minor. Mitigation: at phase boundaries, archive older entries to `<repo>/.big-plans/vortex-integration-history.md` if section exceeds 500 lines (per plan-template guidance).
 9. **The plan file itself becomes load-bearing** — P=low; impact=moderate. Multi-week task; plan-evolution commits accumulate. Mitigation: every plan edit is its own `plan:` commit (BAN #12 in skill); `Current State` YAML is the canonical resume state.
 
