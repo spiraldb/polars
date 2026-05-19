@@ -182,16 +182,43 @@ Reviewers must flag these as immediate **must-fix** if found in the diff. Seeded
 
 ## Phases and PRs
 
-### Phase summary
+### Post-restack structure (2026-05-19)
 
-Initial draft from handoff-plan skeleton, refined by Phase 1.2 subagent findings. Per-phase scope finalized by Step 1.4 design-tree interview. Review-counts confirmed by user in Step 1.6.
+After the 2026-05-19 PR re-stack, the work ships as a 2-PR stack with redrawn responsibility lines:
 
-| Phase | Name | Scope (one line) | Exit criteria (machine-checkable) | PR count | Review-count |
+- **PR #2 (Phase 1++) — THIS BRANCH** on `vortex-integration-phase-1` — complete robust Vortex foundation: original Phase 1 (ratify + crates.io + bench harness) + absorbed PR-2.0 cleanups (segment_cache thread-through + code-doc carry-forwards + cycle-1/2/3 review fixes) + absorbed Phase 3 work (file-stats via `UnifiedScanArgs::table_statistics` + multi-file scan tests + `missing_columns` policy tests). Still pending in this PR before the phase-end review: PR-3.3 (nested-type roundtrips + small-int dtypes + POLARS_VERBOSE engagement infra) + extended Criterion benches (originally Phase 4: cold-cache, second-run cache, write throughput, TPC-H Q6/Q14 vs Parquet).
+- **PR #1 (Phase 2)** on `vortex-integration` — pure perf follow-on stacked on this branch: AExpr-direct convertor walking `Arena<AExpr>` at IR-build time, replacing the legacy `SpecializedColumnPredicate` pushdown path. See that branch's plan for its sub-PR detail.
+
+This branch's plan describes Phase 1++ (the foundation + Phase 3 absorption + remaining work). Phase 2's plan (in branch `vortex-integration`) describes the convertor work in detail.
+
+### Phase 1++ scope (this branch)
+
+| Phase | Name | Scope (one line) | Exit criteria | PR count | Review-count |
 |---|---|---|---|---|---|
-| 1 | Ratify + crates.io transition | Retroactive 4-vote gauntlet of cumulative diff vs `main` + path-dep → crates.io migration + cheap polish | (a) 4-vote phase-end review accepts. (b) `cargo check -p polars --features vortex,cloud,parquet,dtype-full` clean. (c) `cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal` → at least 66 Rust tests pass. (d) `pytest py-polars/tests/unit/io/test_vortex.py` → at least 10 tests pass. (e) `gh pr checks 1 --repo spiraldb/polars` shows green for Rust + Python core checks. | 4 | **4-vote** |
-| 2 | PR-2.0 housekeeping + PR-13 aggressive AExpr pushdown | PR-2.0 (NEW, head of phase): sweep 10 cycle-3 should-fix carry-forward items + refactor `VortexCacheMode::Dedicated(N)` to thread one resolved cache through both IR + streaming reads. Then PR-13: new convertor module (Option B trajectory per user Step 1.4 decision); arithmetic / CAST / struct field access / temporal extracts shipped incrementally; PR-2.6 (final sub-PR) deletes the `SpecializedColumnPredicate` fast path. | (a) 4-vote review accepts. (b) Every row in existing plan's §5 pushdown coverage table implemented + tested OR documented as deliberately deferred. (c) New e2e tests verify pushdown engagement via Vortex `Expression::display_tree()` or `POLARS_VERBOSE` log assertion. (d) Build/test suite still green. (e) All 10 cycle-3 should-fix carry-forward items resolved or explicitly re-deferred with rationale in PR-2.0. | 7 | **4-vote** |
-| 3 | PR-8 file-stats + PR-6 multi-file / nested coverage | Populate `UnifiedScanArgs::table_statistics` from Vortex footer (lead the pattern, no API change); add multi-file scan tests + schema-evolution policy round-trips (`missing_columns`/`extra_columns`/`cast_options`) + nested-type (List/Struct) end-to-end + small-int dtypes (i8/i16/u8/u16) | (a) 4-vote review accepts. (b) Multi-file scan with file-level stats shows whole-file skips (via `EXPLAIN` or Vortex pruning counters). (c) Schema-evolution policy tests pass across the missing/extra/cast matrix. (d) Nested-type roundtrip tests pass. (e) Small-int dtype roundtrip tests pass. (f) Build/test suite green. | 3-4 | **4-vote** |
-| 4 | PR-14 benches + final polish + merge prep | Criterion benches (`crates/polars/benches/io_vortex.rs`): cold-cache full scan, filtered scan with column predicates (TPC-H Q6/Q14 style), cloud-read latency, second-run cache-hit ratio, write throughput. Top-level README mention; remaining unblocked deferred items resolved; final 4-vote review on the FULL cumulative diff vs main | (a) 4-vote review accepts. (b) `cargo bench --features vortex --bench io_vortex` compiles + runs. (c) TPC-H Q6/Q14 comparison documented in `crates/polars-vortex/README.md`. (d) `gh pr checks 1 --repo spiraldb/polars` still green. (e) Ready for squash-merge. | 2-3 | **4-vote** |
+| 1++ | Foundation + Phase 3 absorption + extended benches | PR-1.1 → PR-1.5: crates.io transition, Python `cache_mode=` surface, sundry polish, segment_cache early thread-through, Criterion bench harness (`no_filter` / `filter_lt` / `filter_arithmetic`). Then absorbed: PR-2.0 cleanups (`VortexSegmentCacheRef` newtype + Dedicated single-cache refactor + C-001/C-002/C-003/C2-001 fixes), PR-3.1 file-stats via `UnifiedScanArgs::table_statistics`, PR-3.2 multi-file scan + `missing_columns` policy tests. Remaining: PR-3.3 (nested-type / small-int / POLARS_VERBOSE) + PR-4.x extended benches. | (a) Final 4-vote phase-end review accepts. (b) `cargo check -p polars --features vortex,cloud,parquet,dtype-full,strings` clean. (c) `cargo test -p polars-vortex --features dtype-date,dtype-datetime,dtype-time,dtype-decimal` → at least 56 Rust tests pass. (d) Multi-file scan with file-level stats shows whole-file skips. (e) `missing_columns='insert'` and `=raise` policy tests pass. (f) Nested-type roundtrip tests pass (PR-3.3). (g) Small-int dtype roundtrip tests pass (PR-3.3). (h) `POLARS_VERBOSE=1` engagement assertion via `capfd` works (PR-3.3). (i) `cargo bench -p polars --features vortex,... --bench io_vortex` compiles + runs all bench categories (cold + filtered + cloud + cache-hit + write throughput + TPC-H Q6/Q14 — PR-4.x extension). | ~9 (PR-1.1–.5 + PR-2.0 absorbed + PR-3.1–.3 + PR-4.x) | **4-vote** |
+
+### Phase 1++ sub-PR enumeration (this branch)
+
+Foundation PRs (PR-1.1 → PR-1.5) and the absorbed PR-2.0 work are already complete. Phase 3 absorption (PR-3.1 + PR-3.2 collapsed into a single `feat(...)` commit at `0a0aa5f78`) is done. Remaining:
+
+| PR | Scope (one line) | Files touched (expected) | Acceptance (specific, testable) |
+|---|---|---|---|
+| PR-3.3 | Nested-type (List/Struct) end-to-end roundtrip + small-int dtypes (i8/i16/u8/u16) + filter-pushdown engagement assertion. POLARS_VERBOSE instrumentation MUST live at a SHARED layer (`VortexFileReader::begin_read` consuming the final Vortex `Expression`) so it works under both the legacy `SpecializedColumnPredicate` path (Phase 1++) and the AExpr-direct path (Phase 2 after rebase). | `crates/polars-vortex/tests/roundtrip.rs`, `crates/polars-vortex/Cargo.toml` (add `dtype-i8/i16/u8/u16` features), `crates/polars-stream/src/nodes/io_sources/vortex/mod.rs` (emit `POLARS_VERBOSE` line) | Nested-type roundtrip tests pass; small-int dtype tests pass; `POLARS_VERBOSE=1` engagement assertion via `capfd` in Python tests works. |
+| PR-4.x | Extended Criterion benches (originally Phase 4): cold-cache full scan, second-run cache-hit ratio, write throughput, TPC-H Q6/Q14 vs Parquet. PR-1.5 shipped 3 baseline benches (`no_filter`, `filter_lt`, `filter_arithmetic`); PR-4.x adds the harder categories. | `crates/polars/benches/io_vortex.rs` (extend) + possibly a new `crates/polars/benches/io_vortex_cloud.rs` if cloud benches need their own harness | `cargo bench --features vortex,cloud,parquet,dtype-full,strings --bench io_vortex` compiles + runs the extended set. |
+
+After PR-3.3 + PR-4.x land, this branch hits its phase-end 4-vote gauntlet. Then Phase 2 (`vortex-integration`) rebases onto the new tip and the project is ready to ship as the 2-PR stack.
+
+### Already-shipped sub-PRs (on this branch)
+
+| PR | Scope (one line) | Status |
+|---|---|---|
+| PR-1.1 | crates.io transition (`vortex = "0.70.0"`) | ✅ |
+| PR-1.2 | Phase 1 polish: `VortexCacheMode` Python surface (`cache_mode=`), visitor cfg-gating fix (serde_json non-optional), CI green-up | ✅ |
+| PR-1.3 | Phase 1 must-fix items from retroactive 4-vote gauntlet | ✅ |
+| PR-1.4 | Phase 1 cycle-2 cleanup: segment_cache thread-through (early form); narrowed `pub use ::vortex;`; plan-doc fixes | ✅ |
+| PR-1.5 | Vortex Criterion bench harness + `ScanArgsVortex` prelude re-export | ✅ |
+| (absorbed) PR-2.0 | 6 code commits cherry-picked from old Phase 2 branch on 2026-05-19: `VortexSegmentCacheRef` newtype + Dedicated single-cache via FileScanIR thread-through + C-001/C-002 (schema-supplied + drop on cache pressure) + C-003 (Arc-identity tests) + C2-001 (expand_datasets compile fix) + cycle-3 rustfmt | ✅ |
+| (absorbed) PR-3.1 + PR-3.2 | Single combined `feat(...)` commit at `0a0aa5f78`: `crates/polars-vortex/src/read/file_stats.rs` (new — `footer_to_table_statistics`); `vortex_file_info` returns `(FileInfo, Option<VortexFooterRef>, Option<DataFrame>)`; caller wires `unified_scan_args.table_statistics` gated on `n_sources == 1`; `polars-mem-engine/src/planner/lp.rs` Vortex force-disable REMOVED; 6 new Python e2e tests | ✅ |
 
 ### PR enumeration
 
@@ -336,6 +363,22 @@ df = pl.read_vortex("nested.vortex")  # List/Struct roundtrip
 ## Implementation status
 
 Living ledger — populated by inner-loop and phase-end reviews.
+
+### 2026-05-19 PR re-stack — absorbed PR-2.0 + Phase 3 (commits `8b66a9a342` → `deeaeb1c49`)
+
+Restructured the 2-branch PR split so this branch (`vortex-integration-phase-1`) ships a complete robust Vortex integration as a single PR, and `vortex-integration` is a focused convertor follow-on. This branch's tip advanced from `e730c6e1d2` (PR-1.5 + 2 typo / dprint fixes) to `deeaeb1c49` via 8 new commits absorbing work that previously lived on the Phase 2 branch.
+
+**Absorbed PR-2.0 (6 commits cherry-picked)**: `3d8da4dbcc` (code-doc carry-forwards), `5787a66d50` (segment_cache thread-through + `VortexSegmentCacheRef` newtype wrapper), `2a0664c7e6` (C-001 schema-supplied Dedicated single-cache + C-002 drop on cache pressure — review-finding fixes), `869120d026` (C-003 `VortexSegmentCacheRef` Arc-identity tests), `8036f132cd` (C2-001 expand_datasets compile fix — added `segment_cache: None` to the second `FileScanIR::Vortex` construction site), `b2252b107f` (cycle-3 rustfmt on C-003 test). All commits applied cleanly except `5787a66d50` (segment_cache thread-through) which conflicted with the Phase 1 baseline scans.rs in the same region; rerere-assisted resolution combined Phase 1++'s file-stats integration with Phase 2's `VortexSegmentCacheRef` newtype. PR-2.0 was originally framed as "Phase 2 housekeeping for Phase 1 cycle-3 carry-forward items" — moving it to Phase 1++ restores it to where it conceptually belongs.
+
+**Absorbed Phase 3 (PR-3.1 + PR-3.2) as a single squashed commit `0a0aa5f78`**: new module `crates/polars-vortex/src/read/file_stats.rs` (~200 LoC impl + 10 unit tests; `footer_to_table_statistics` walks Vortex's `FileStatistics::stats_sets()` and produces a 1-row DataFrame matching the `{len, {col}_min, {col}_max, {col}_nc}` contract; only `Precision::Exact` values emitted, Inexact → typed null); `vortex_file_info` extended to return `(FileInfo, Option<VortexFooterRef>, Option<DataFrame>)`; caller wires `unified_scan_args.table_statistics = Some(TableStatistics(Arc::new(stats_df)))` gated on `n_sources == 1` (mem-engine asserts `skip_files_mask.len() == sources.len()` — multi-file aggregation is Deferred); `polars-mem-engine/src/planner/lp.rs:448-459` Vortex-specific force-disable of `create_skip_batch_predicate` REMOVED; 6 new Python e2e tests (`test_scan_with_file_stats_smoke`, `test_scan_with_file_stats_multifile_does_not_panic`, `test_multifile_scan_shape_and_ordering`, `test_multifile_scan_missing_columns_insert` / `_raise`). Vortex is now the FIRST Polars format to populate `UnifiedScanArgs::table_statistics` — Parquet hard-codes `None` at `polars-plan/src/dsl/file_scan/mod.rs`. The single squashed commit is a deliberate simplification: the original PR-3.1 went through 3 review cycles (cycle-1 implementation; cycle-2 must-fix on `n_sources == 1` gate to fix a hard panic; cycle-3 4-vote accept) and PR-3.2 went through 2 (cycle-1 must-fix on broken `extra_columns` tests for non-Parquet formats per upstream Polars carve-out at `lower_ir.rs:925-936`; cycle-2 accept). All those cycles are preserved in the `backup-vortex-integration-pre-restack` branch for audit.
+
+**One Python test_vortex.py merge needed manual union** (when rebasing Phase 2 commits afterward — only relevant to `vortex-integration` branch, mentioned here for cross-branch context).
+
+**Build verification after restack**: `cargo check -p polars --features vortex,cloud,parquet,dtype-full,strings` clean. `cargo test -p polars-vortex --lib --features dtype-date,dtype-datetime,dtype-time,dtype-decimal` → 56 passed (PR-3.1's 10 file_stats tests + the rest of polars-vortex). `cargo fmt --check` + `ruff check py-polars/` clean.
+
+**PR #2 description rewritten** per `spiral:pr-and-issue-voice` (two paragraphs of prose, no headers).
+
+Backup at `backup-vortex-integration-phase-1-pre-restack` (this branch's pre-restack tip `e730c6e1d2`).
 
 ### PR-1.2: Phase 1 polish + CI green-up (8 PR-work commits, ending at `b2aeb2b8b`)
 
