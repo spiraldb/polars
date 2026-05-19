@@ -212,22 +212,22 @@ def test_scan_with_cross_kind_cast_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
-    """PR-2.2 cycle-1 M1 regression (mechanism updated by PR-2.8): hive-partitioned
-    scans with a hive-only-column filter must not crash.
+    """PR-2.2 cycle-1 M1 regression: hive scan + hive-only filter must not crash.
 
     Without protection, the convertor at ``lower_ir.rs`` would emit a Vortex
     ``get_item('year', root())`` reference to a column that doesn't exist in
     the per-file Vortex data (``year`` is a HIVE virtual column, synthesized
     after decode from the directory structure).
 
-    Protection mechanism (updated by PR-2.8): ``aexpr_file_minterms_to_vortex_expression``
-    walks top-level conjuncts via ``MintermIter`` and drops minterms whose
-    leaves are in ``virtual_cols`` (built from ``hive_parts.schema()`` +
-    ``row_index.name`` + ``include_file_paths``). The single minterm
-    ``year == 2024`` references only ``year`` (a hive virtual col), so the
-    helper drops it; ``and_collect(vec![])`` returns ``None``; pushdown is
-    refused; Polars' hive-partition pruning + multi-scan ``PARTIAL_FILTER``
-    reapply produces the correct result.
+    Protection mechanism (PR-2.8 update): the helper
+    ``aexpr_file_minterms_to_vortex_expression`` walks top-level conjuncts
+    via ``MintermIter`` and drops minterms whose leaves are in
+    ``virtual_cols`` (built from ``hive_parts.schema()`` + ``row_index.name``
+    + ``include_file_paths``). The single minterm ``year == 2024`` references
+    only ``year`` (a hive virtual col), so the helper drops it;
+    ``and_collect(vec![])`` returns ``None``; pushdown is refused; Polars'
+    hive-partition pruning + multi-scan ``PARTIAL_FILTER`` reapply produces
+    the correct result.
 
     Pre-PR-2.8 mechanism: ``lower_ir.rs`` had an all-or-nothing virtual-col
     guard that refused the WHOLE predicate when ``hive_parts.is_some()``.
@@ -255,20 +255,20 @@ def test_scan_with_hive_partitioning_and_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_row_index_and_filter(tmp_path: Path) -> None:
-    """PR-2.2 cycle-2 C2-001 regression (mechanism updated by PR-2.8): row_index
-    virtual col + row_index-only filter must not crash.
+    """PR-2.2 cycle-2 C2-001 regression: row_index virtual col + filter must not crash.
 
     ``row_index_name`` synthesizes ``ri`` as a virtual column after decode;
     ``ri`` is not present in the Vortex file's data. Without protection,
     the convertor would emit a Vortex ``get_item('ri', root())`` reference
     that Vortex can't resolve.
 
-    Protection mechanism (updated by PR-2.8): the single minterm
-    ``ri > 10`` references only ``ri`` (a row_index virtual col, included
-    in ``virtual_cols`` at ``lower_ir.rs``); ``aexpr_file_minterms_to_vortex_expression``
-    drops the minterm; ``and_collect(vec![])`` returns ``None``; pushdown
-    is refused; Polars' row-index materialization + multi-scan
-    ``PARTIAL_FILTER`` reapply produces the correct result.
+    Protection mechanism (PR-2.8 update): the single minterm ``ri > 10``
+    references only ``ri`` (a row_index virtual col, included in
+    ``virtual_cols`` at ``lower_ir.rs``); the helper
+    ``aexpr_file_minterms_to_vortex_expression`` drops the minterm;
+    ``and_collect(vec![])`` returns ``None``; pushdown is refused; Polars'
+    row-index materialization + multi-scan ``PARTIAL_FILTER`` reapply
+    produces the correct result.
 
     Pre-PR-2.8 mechanism: ``lower_ir.rs`` had an extended all-or-nothing
     guard that refused the WHOLE predicate when ``row_index.is_some()`` OR
@@ -461,9 +461,9 @@ def test_multifile_scan_missing_columns_raise(tmp_path: Path) -> None:
 
 
 def test_scan_with_is_between_filter(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1: ``col.is_between(lo, hi)`` pushes down via the
-    is_between arm, decomposed to ``(col >= lo) AND (col <= hi)``.
+    """PR-2.7 cycle 1: ``col.is_between(lo, hi)`` pushes down via is_between arm.
 
+    Decomposed to ``(col >= lo) AND (col <= hi)``.
     The legacy SpecializedColumnPredicate path handled this via
     ``SpecializedColumnPredicate::Between``; PR-2.6 cutover removed it.
     The new convertor arm re-establishes pushdown by decomposing to a
@@ -498,9 +498,9 @@ def test_scan_with_is_between_left_closed_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_is_in_filter(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1: ``col.is_in([...])`` pushes down via the is_in arm,
-    decomposed to ``(col == v1) OR (col == v2) OR ...``.
+    """PR-2.7 cycle 1: ``col.is_in([...])`` pushes down via the is_in arm.
 
+    Decomposed to ``(col == v1) OR (col == v2) OR ...``.
     Legacy ``SpecializedColumnPredicate::EqualOneOf`` handled this; PR-2.6
     cutover removed it. The new convertor arm reuses the polars-plan-internal
     ``try_extract_is_in_haystack`` helper for haystack extraction (same code
@@ -516,9 +516,9 @@ def test_scan_with_is_in_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_starts_with_filter(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1: ``col.str.starts_with("prefix")`` pushes down via the
-    StringExpr arm as ``like(col, lit("prefix%"))``.
+    r"""PR-2.7 cycle 1: ``col.str.starts_with("prefix")`` pushes down.
 
+    Via StringExpr arm, emitted as ``like(col, lit("prefix%"))``.
     Legacy ``SpecializedColumnPredicate::StartsWith`` handled this; PR-2.6
     cutover removed it. The needle is escaped via ``bytes_to_like_literal``
     which refuses pushdown if the prefix contains LIKE wildcards (%, _, \\).
@@ -532,8 +532,10 @@ def test_scan_with_starts_with_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_ends_with_filter(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1: ``col.str.ends_with("suffix")`` pushes down via the
-    StringExpr arm as ``like(col, lit("%suffix"))``."""
+    """PR-2.7 cycle 1: ``col.str.ends_with("suffix")`` pushes down via StringExpr arm.
+
+    Emitted as ``like(col, lit("%suffix"))``.
+    """
     path = tmp_path / "ends_with_filter.vortex"
     df = pl.DataFrame({"s": ["apple", "pineapple", "banana", "grape"]})
     df.write_vortex(path)
@@ -544,9 +546,9 @@ def test_scan_with_ends_with_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_contains_literal_filter(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1: ``col.str.contains("sub", literal=True)`` pushes down
-    via the StringExpr arm as ``like(col, lit("%sub%"))``.
+    """PR-2.7 cycle 1: ``col.str.contains("sub", literal=True)`` pushes down.
 
+    Via StringExpr arm, emitted as ``like(col, lit("%sub%"))``.
     ``literal=False`` (regex mode) is REFUSED — Vortex's LIKE doesn't
     support regex; the residual filter reapplies post-decode for correctness.
     Tested implicitly by the unit-level
@@ -567,10 +569,9 @@ def test_scan_with_contains_literal_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_ternary_filter(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1: ``pl.when(...).then(...).otherwise(...)`` inside a
-    filter pushes down via the Ternary arm as Vortex
-    ``case_when(condition, then_value, else_value)``.
+    """PR-2.7 cycle 1: ``pl.when(...).then(...).otherwise(...)`` pushes down.
 
+    Via Ternary arm, emitted as Vortex ``case_when(condition, then_value, else_value)``.
     The Ternary returns a Boolean expression usable as a filter predicate.
     Here: when ``a > 5``, push down ``a < 15``; otherwise emit False.
     Effective predicate: ``5 < a < 15``.
@@ -582,7 +583,7 @@ def test_scan_with_ternary_filter(tmp_path: Path) -> None:
     out = (
         pl.scan_vortex(path)
         .filter(
-            pl.when(pl.col("a") > 5).then(pl.col("a") < 15).otherwise(False)  # noqa: FBT003
+            pl.when(pl.col("a") > 5).then(pl.col("a") < 15).otherwise(False)
         )
         .collect()
     )
@@ -591,10 +592,10 @@ def test_scan_with_ternary_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_hive_and_file_col_mixed_filter(tmp_path: Path) -> None:
-    """PR-2.8: hive-partitioned scan with a mixed file-col + hive-col filter
-    splits the predicate per-column and pushes the file-col conjunct to Vortex
-    while leaving the hive-col conjunct for Polars' multi-scan reapply.
+    """PR-2.8: hive scan with mixed file-col + hive-col filter pushes file part.
 
+    The predicate is split per-minterm; the file-col conjunct pushes to Vortex
+    while the hive-col conjunct stays for Polars' multi-scan reapply.
     Pre-PR-2.8: the convertor's virtual-column guard at lower_ir.rs:801-815
     refused convertor pushdown ENTIRELY when hive_parts.is_some(); correctness
     held via PARTIAL_FILTER reapply but the file-col part missed Vortex zone
@@ -628,11 +629,11 @@ def test_scan_with_hive_and_file_col_mixed_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_row_index_and_file_col_mixed_filter(tmp_path: Path) -> None:
-    """PR-2.8 cycle 2: row_index virtual col + file col mixed filter splits the
-    predicate per-minterm. The ``x > 5`` minterm pushes to Vortex; the
-    ``ri > 10`` minterm stays residual and Polars' row-index materialization
-    + multi-scan reapply handles it.
+    """PR-2.8 cycle 2: row_index virtual col + file col mixed filter pushes file part.
 
+    The predicate is split per-minterm: ``x > 5`` pushes to Vortex; ``ri > 10``
+    stays residual and Polars' row-index materialization + multi-scan reapply
+    handles it.
     Pre-PR-2.8 behavior: virtual-column guard refused the WHOLE predicate
     when ``row_index.is_some()``; correctness held via PARTIAL_FILTER but the
     file-col part missed Vortex zone pruning.
@@ -657,10 +658,10 @@ def test_scan_with_row_index_and_file_col_mixed_filter(tmp_path: Path) -> None:
 
 
 def test_scan_with_include_file_paths_and_file_col_mixed_filter(tmp_path: Path) -> None:
-    """PR-2.8 cycle 2: include_file_paths virtual col + file col mixed filter
-    splits the predicate per-minterm. The ``x > 5`` minterm pushes to Vortex;
-    the ``pl.col("src").str.ends_with("a.vortex")`` minterm stays residual.
+    """PR-2.8 cycle 2: include_file_paths + file col mixed filter pushes file part.
 
+    The predicate is split per-minterm: ``x > 5`` pushes to Vortex; the
+    ``pl.col("src").str.ends_with("a.vortex")`` minterm stays residual.
     Note: ``include_file_paths`` populates ``src`` with the FULL path (per
     ``ScanSourceRef::to_include_path_name`` at
     ``crates/polars-plan/src/dsl/scan_sources.rs``), not the basename. The
@@ -690,11 +691,12 @@ def test_scan_with_include_file_paths_and_file_col_mixed_filter(tmp_path: Path) 
 
 
 def test_scan_with_starts_with_wildcard_in_needle(tmp_path: Path) -> None:
-    """PR-2.7 cycle 1 (negative path): a wildcard ('%') in the needle refuses
-    pushdown via ``bytes_to_like_literal``. The residual filter reapplies
-    post-decode for correctness; a regression dropping the wildcard guard
-    would *widen* the predicate (Vortex LIKE interprets '%' as match-any).
+    r"""PR-2.7 cycle 1 negative path: '%' wildcard in needle refuses pushdown.
 
+    ``bytes_to_like_literal`` rejects %/_/\\ to avoid LIKE-semantics widening.
+    The residual filter reapplies post-decode for correctness; a regression
+    dropping the wildcard guard would *widen* the predicate (Vortex LIKE
+    interprets '%' as match-any).
     Correctness must hold either way (the residual is the safety net), so
     the assertion focuses on the result: only rows containing the literal
     '100%' string match.

@@ -133,12 +133,12 @@ use polars_vortex::vortex::expr::{
 
 use crate::dsl::Operator;
 use crate::plans::AExpr;
-#[cfg(feature = "dtype-struct")]
-use crate::plans::aexpr::function_expr::IRStructFunction;
+use crate::plans::aexpr::MintermIter;
 #[cfg(feature = "strings")]
 use crate::plans::aexpr::function_expr::IRStringFunction;
+#[cfg(feature = "dtype-struct")]
+use crate::plans::aexpr::function_expr::IRStructFunction;
 use crate::plans::aexpr::function_expr::{IRBooleanFunction, IRFunctionExpr};
-use crate::plans::aexpr::MintermIter;
 use crate::plans::lit::LiteralValue;
 use crate::utils::aexpr_to_leaf_names_iter;
 
@@ -2531,8 +2531,14 @@ mod tests {
         let s = format!("{}", expr);
         // Both literal-bearing conjuncts must survive into the AND-collected
         // result. A regression dropping one minterm would fail one of these.
-        assert!(s.contains("42"), "expected literal 42 (from a == 42) in {s}");
-        assert!(s.contains("99"), "expected literal 99 (from b == 99) in {s}");
+        assert!(
+            s.contains("42"),
+            "expected literal 42 (from a == 42) in {s}"
+        );
+        assert!(
+            s.contains("99"),
+            "expected literal 99 (from b == 99) in {s}"
+        );
     }
 
     /// Predicate references only virtual cols → all minterms filtered out → None.
@@ -2550,12 +2556,8 @@ mod tests {
         schema.with_column(PlSmallStr::from("year"), DataType::Int32);
         let mut virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
         virtual_cols.insert(PlSmallStr::from("year"));
-        let expr = aexpr_file_minterms_to_vortex_expression(
-            n,
-            &arena,
-            Some(&schema),
-            &virtual_cols,
-        );
+        let expr =
+            aexpr_file_minterms_to_vortex_expression(n, &arena, Some(&schema), &virtual_cols);
         assert!(expr.is_none(), "expected virtual-only predicate to refuse");
     }
 
@@ -2620,12 +2622,8 @@ mod tests {
         schema.with_column(PlSmallStr::from("year"), DataType::Int32);
         let mut virtual_cols: PlHashSet<PlSmallStr> = PlHashSet::default();
         virtual_cols.insert(PlSmallStr::from("year"));
-        let expr = aexpr_file_minterms_to_vortex_expression(
-            or_node,
-            &arena,
-            Some(&schema),
-            &virtual_cols,
-        );
+        let expr =
+            aexpr_file_minterms_to_vortex_expression(or_node, &arena, Some(&schema), &virtual_cols);
         assert!(
             expr.is_none(),
             "expected top-level OR with virtual operand to refuse (single minterm references virtual)"
