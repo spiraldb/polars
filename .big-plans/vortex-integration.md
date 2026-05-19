@@ -5,26 +5,26 @@
 ## Current State
 
 ```yaml
-status: awaiting-review
+status: executing
 branch: vortex-integration (Phase 2 stack tip; rebased onto vortex-integration-phase-1)
 planning_sub_flow: null
-current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) cycle 1 rejected — 3 must-fix schema-gate items + 6 should-fix; entering Step 2.4 fix-application; PR-2.8 still queued"
+current_phase: "Phase 2 amend: PR-2.7 (cutover-lost shapes) COMPLETE across 3 review cycles (reject → accept-with-polish → accept-clean); entering PR-2.8 (virtual-column per-column split)"
 phase_index: 2
-current_pr: PR-2.7
-pr_index: 8
+current_pr: PR-2.8
+pr_index: 9
 outstanding_must_fix: 0
 deferred_items_total: 15
-last_user_touchpoint: 2026-05-18T23:45:00Z
-last_user_touchpoint_what: "PR-2.7 cycle 2 gauntlet ACCEPT (0 must-fix, 6 should-fix, 2 nit). User picked maximum-thoroughness: apply all 8 polish inline. Landed 5 polish commits: fa89c9b39 resolve_inner_dtype Ternary arm + nested-Ternary test (should-fix #1) + d457a1300 feature-gate strings/is_in imports (should-fix #2) + a9918a201 strengthen 3 structural tests (should-fix #3/#4/#5) + aebb30250 README gate notes + is_in empty-haystack comment (should-fix #6 + nit #7) + 5e68b4f2d plan NaN-divergence Deferred entry (nit #8). 88 unit tests pass. Ready for cycle 3 verification or PR-2.7 complete."
-subagent_invocations_this_pr: 2
-subagent_invocations_total: 44
-review_cycles_this_pr: 2
+last_user_touchpoint: 2026-05-19T00:30:00Z
+last_user_touchpoint_what: "PR-2.7 complete: 3-cycle gauntlet history (cycle 1 REJECT — 3 must-fix schema gates + 6 should-fix; cycle 2 ACCEPT — applied all 3 must-fix + 6 should-fix + 2 nit inline; cycle 3 ACCEPT — verified polish clean). 17 PR-work commits ending at 71540df77; 25 new convertor unit tests + 7 e2e Python tests; confidence high; 1 new Deferred item (NaN divergence). Entering PR-2.8 Step 2.1 — virtual-column per-column split refactor at polars-stream/src/physical_plan/lower_ir.rs:780-815"
+subagent_invocations_this_pr: 0
+subagent_invocations_total: 45
+review_cycles_this_pr: 0
 phase_entry_sha: 93643dd77
 phase_end_cycle: 1
 phase_end_reject_cycles: 0
 last_phase_end_verdict: null
 current_pr_is_ci_reopen: null
-last_commit: 5e68b4f2d
+last_commit: 71540df774
 ```
 
 ## Context
@@ -513,6 +513,116 @@ PR-1.4 was re-opened at the phase boundary after CI surfaced 2 failures on commi
     pre-fix path WAS correct via the re-export. Process lesson: when "fixing" a
     canonical-path doc-comment, verify the cited path actually resolves from
     external crates (e.g., grep for an existing `use` of the path).
+
+### PR-2.7: Amend cycle 2 — port cutover-lost pushdown shapes (17 PR-work commits, ending at `71540df77` — accepted cycle 3)
+
+- **Scope shipped (cycles 1-2 of inner-loop)**: 6 new convertor arms in
+  `crates/polars-plan/src/plans/aexpr/predicates/vortex_convertor.rs` for
+  `is_between(lo, hi, closed)`, `is_in([scalars], nulls_equal)`,
+  `str.starts_with(prefix)`, `str.ends_with(suffix)`,
+  `str.contains(sub, literal=True)`, and `AExpr::Ternary { p, t, f }` —
+  closing PR-2.6's cutover-lost coverage gap (Deferred work entries
+  "PR-2.6 cutover-lost pushdown shapes" + "Two additional §5-row shapes" both
+  RESOLVED). Each shape mirrors the existing convertor-arm idiom
+  (pattern-match → recurse on children → build Vortex expression) with
+  Vortex builders `between` (decomposed as `(col gt[_eq] lo) AND (col lt[_eq] hi)`
+  per `ClosedInterval`), `or_collect(eq(col, lit))` (per haystack scalar),
+  `like(col, lit("<pattern>"))` (with `bytes_to_like_literal` escape guard for
+  `%`/`_`/`\` LIKE wildcards), and `case_when(cond, then, else)` respectively.
+  Three schema-based dtype gates protect the always-SAFE-fallback contract:
+  `is_between` pairwise-PType (col / lo / hi same dtype), Ternary THEN/ELSE
+  pairwise-dtype, StringExpr Utf8 input on `input[0]`. `is_in` refuses
+  `nulls_equal=true + had_nulls` to avoid silently narrowing the predicate.
+  Also: `bytes_to_like_literal` helper resurrected verbatim from the deleted
+  legacy `polars_to_vortex_predicate` (PR-2.6 cutover removed it); now lives
+  inline in vortex_convertor.rs so polars-plan owns its own LIKE-pattern
+  escaping. README pushdown table refreshed (6 shapes moved from ❌ residual
+  to ✅) with gate notes. Module-level convertor doc-comment table bumped from
+  16 shapes to 22.
+
+- **Tests added (cycles 1-2)**: 25 new convertor unit tests covering positive
+  + negative (cross-PType, cross-dtype, no-schema, LIKE-wildcard-in-needle,
+  non-String column, nested-Ternary, unsupported-subtree) + 5 structural-
+  assertion tests (`shape_*_structural` discipline mirroring
+  `shape_plus_arithmetic_structural` from PR-2.2 cycle-1) for paste-swap
+  resistance. Plus 7 new e2e Python tests in
+  `py-polars/tests/unit/io/test_vortex.py` exercising each shape via the
+  full DSL → IR → streaming → polars-vortex pipeline. 88 total convertor
+  unit tests pass under `cargo test -p polars-plan --features
+  vortex,is_between,is_in,regex,strings,dtype-struct vortex_convertor`.
+
+- **Review (2-vote `pr-2`, 3 cycles)**:
+  - **Cycle 1 REJECT** (3 must-fix + 6 should-fix + 2 nit): all three must-fix
+    were schema-gate gaps in the same bug class as PR-2.3 cycle-1 CAST
+    cross-kind + PR-2.4 cycle-2 comparison pairwise-PType must-fixes —
+    (1) `is_between` arm lacks pairwise-PType gate between col and bounds;
+    (2) Ternary arm lacks THEN/ELSE pairwise-dtype gate;
+    (3) StringExpr arm lacks Utf8 input gate on `input[0]`. Each fix is a
+    ~5-line addition that calls `resolve_inner_dtype` on the relevant
+    children and refuses pushdown on mismatch. The cycle-1 fix-commits are
+    `90984521c` (is_between), `85ca56730` (Ternary), `b2b965967` (StringExpr).
+    Also addressed cycle-1 should-fix sweep in `947310699`: README pushdown
+    table refresh, module-doc shape table bump, 5 new structural assertion
+    tests for acceptance criterion (c).
+  - **Cycle 2 ACCEPT** (0 must-fix + 6 should-fix + 2 nit): all 3 gates
+    correctly implemented. Polish findings: (1) `resolve_inner_dtype` missing
+    a Ternary arm so nested-Ternary now silently refuses (coverage
+    regression); (2) 5 imports + `bytes_to_like_literal` fn unused under
+    `--no-default-features --features vortex`; (3/4/5) 3 structural tests
+    have loose assertions that don't catch specific paste-swaps; (6) README
+    cross-reference drift on gate notes; (7) `is_in` empty-haystack
+    missed optimization; (8) pre-existing-but-amplified NaN semantic
+    divergence. User picked apply-all-inline; 5 cycle-2 polish commits
+    landed: `fa89c9b395` resolve_inner_dtype Ternary arm; `d457a1300`
+    feature-gates; `a9918a201` strengthened 3 structural tests + helper
+    schemas; `aebb30250` README gate notes + is_in empty-haystack comment;
+    `5e68b4f2d` NaN Deferred entry.
+  - **Cycle 3 ACCEPT** (0 must-fix + 0 should-fix + 1 nit): polish verified
+    clean. Recursion termination + broadened-applicability across 8
+    `resolve_inner_dtype` caller sites verified safe. Feature gates clean
+    under all 4 verified feature combinations. Structural assertions
+    robust against vortex-array 0.70.0's actual Display format
+    (`Like::fmt_sql` emits `<col> like "<pattern>"`, `CaseWhen::fmt_sql`
+    emits `CASE WHEN ... THEN ... ELSE ... END`). Only finding: pre-existing
+    `CastOptions` unused-import (PR-2.3 era, not a PR-2.7 cycle-2 regression).
+
+- **Confidence**: high. Three review cycles consolidated around a tight
+  schema-gate discipline; no must-fix outstanding; 88 unit tests + 7 e2e
+  tests pass; umbrella `cargo check -p polars --features
+  vortex,cloud,parquet,dtype-full` clean.
+
+- **Deferred items**: 1 new entry — **Float NaN semantic divergence in
+  convertor float-comparison arms** (PR-2.7 cycle-2 nit #8): Polars's
+  `is_in` uses TotalOrd (`NaN == NaN`); Vortex's `eq` uses IEEE 754
+  (`NaN != NaN`). Pre-existing since PR-2.1 for the foundation
+  `eq`/`not_eq`/`lt`/`...` arms; PR-2.7's new `is_in`/`is_between` arms
+  extend the surface. Not blocking (residual reapply preserves
+  correctness); mitigation: refuse pushdown when any float literal is NaN
+  (~10 LoC + tests).
+
+- **Surprises during implementation**:
+  - **H4 self-reinforcement validated**: cycle-1's 3 must-fix gates were
+    exactly the same bug class as the prior CAST + comparison
+    pairwise-PType must-fixes (PR-2.3 cycle-1 + PR-2.4 cycle-2). The
+    pattern-match arms that DIRECTLY construct Vortex comparison builders
+    (rather than re-entering BinaryExpr) all need explicit pairwise-dtype
+    gates because the recursive `aexpr_to_vortex_expression` calls bypass
+    the BinaryExpr arm's gate. PR-2.7's gates close the gap for the new
+    arms; future arms touching numeric/string ops should adopt the same
+    discipline.
+  - **H2 new-prose internal edge case validated**: cycle-2's resolve_inner_dtype
+    Ternary-arm coverage regression (cycle-2 should-fix #1) was introduced
+    BY cycle-1's Ternary gate fix — the fix called
+    `resolve_inner_dtype(*truthy)?` for a Ternary subtree but
+    `resolve_inner_dtype` had no Ternary arm, so all nested Ternary refused
+    pushdown unconditionally. Cycle-2 polish added the recursive arm.
+    Process lesson: when adding a schema-based gate that consults a helper
+    function, verify the helper handles all subtree shapes the gate's input
+    can take.
+  - **`prior_fix_commit_sha` attention block worked as designed**: cycle 3
+    reviewers explicitly noted the polish commits' correctness without
+    spawning new must-fix items. The attention block calibrated the cycle-3
+    reviewers' frame correctly.
 
 ### PR-2.5: PR-13.5 Temporal extracts — SLIPPED to Deferred work (Vortex op unavailable at pinned SHA)
 
