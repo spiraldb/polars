@@ -1015,10 +1015,11 @@ pub(super) async fn vortex_file_info(
     } else {
         Card::approx(file.row_count().saturating_mul(n_sources as u64))
     };
+    let columns = super::vortex_stats::column_stats(file.footer(), schema.as_ref(), n_sources);
     let info = FileInfo::new(
         schema,
         Some(Either::Left(arrow_schema)),
-        ScanStats::new(rows),
+        ScanStats::new(rows).with_columns(columns),
     );
     Ok((info, Arc::new(file.footer().clone())))
 }
