@@ -19,6 +19,7 @@ use crate::nodes::io_sources::multi_scan::reader_interface::capabilities::Reader
 pub struct VortexReaderBuilder {
     pub options: Arc<VortexScanOptions>,
     pub first_metadata: Option<Arc<vortex::file::Footer>>,
+    pub aexpr_filter: Option<(vortex::expr::Expression, polars_core::schema::SchemaRef)>,
     pub io_metrics: OnceLock<Arc<IOMetrics>>,
     pub task_metrics: OnceLock<Arc<TaskMetricAggregator>>,
 }
@@ -69,6 +70,7 @@ impl FileReaderBuilder for VortexReaderBuilder {
             scan_source: source,
             cloud_options,
             options: self.options.clone(),
+            aexpr_filter: self.aexpr_filter.clone(),
             footer: if scan_source_idx == 0 {
                 self.first_metadata.clone()
             } else {

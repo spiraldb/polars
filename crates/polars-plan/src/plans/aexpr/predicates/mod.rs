@@ -1,5 +1,7 @@
 mod column_expr;
 mod skip_batches;
+#[cfg(feature = "vortex")]
+pub mod vortex_convertor;
 
 use std::borrow::Cow;
 

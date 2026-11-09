@@ -46,6 +46,7 @@ pub struct VortexFileReader {
     pub options: Arc<VortexScanOptions>,
     pub footer: Option<Arc<Footer>>,
     pub byte_source_builder: DynByteSourceBuilder,
+    pub aexpr_filter: Option<(polars_vortex::vortex::expr::Expression, SchemaRef)>,
     pub io_metrics: OptIOMetrics,
     pub task_metrics: Option<Arc<TaskMetricAggregator>>,
     pub init_data: Option<InitializedState>,
@@ -168,11 +169,26 @@ impl FileReader for VortexFileReader {
             .collect();
         let filter = if self.options.push_predicate {
             args.predicate.as_ref().and_then(|predicate| {
-                polars_to_vortex_predicate(
-                    &predicate.scan_io_predicate,
-                    requested_schema,
-                    &st.pl_schema,
-                )
+                self.aexpr_filter
+                    .as_ref()
+                    .filter(|(_, proof)| {
+                        proof
+                            .iter()
+                            .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                    })
+                    .filter(|_| {
+                        requested_schema
+                            .iter()
+                            .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                    })
+                    .map(|(expression, _)| expression.clone())
+                    .or_else(|| {
+                        polars_to_vortex_predicate(
+                            &predicate.scan_io_predicate,
+                            requested_schema,
+                            &st.pl_schema,
+                        )
+                    })
             })
         } else {
             None
@@ -220,6 +236,10 @@ impl FileReader for VortexFileReader {
                 // A failed candidate binding leaves the complete predicate in Polars.
                 if let Some(expression) = filter {
                     if let Ok(bound) = expression.bind(vxf.dtype()) {
+                        polars_vortex::read::read_at::record_filter();
+                        if vxf.can_prune(&expression).unwrap_or(false) {
+                            return Ok(());
+                        }
                         scan = scan.with_filter(bound);
                     }
                 }
@@ -240,7 +260,7 @@ impl FileReader for VortexFileReader {
                     let Some(df) = result? else {
                         continue;
                     };
-
+                    polars_vortex::read::read_at::record_batch(df.width() as u64);
                     let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
                     seq = seq.successor();
                     if tx.send_morsel(morsel).await.is_err() {

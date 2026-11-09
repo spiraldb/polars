@@ -1041,14 +1041,38 @@ fn lower_ir_inner(
                     FileScanIR::Vortex {
                         options,
                         metadata: first_metadata,
-                    } => Arc::new(
-                        crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
-                            options: Arc::new(options.clone()),
-                            first_metadata: first_metadata.clone(),
-                            io_metrics: std::sync::OnceLock::new(),
-                            task_metrics: std::sync::OnceLock::new(),
-                        },
-                    ) as _,
+                    } => {
+                        let mut schema = file_info.schema.as_ref().clone();
+                        if let Some(hive) = hive_parts.as_ref() {
+                            for name in hive.schema().iter_names() {
+                                schema.remove(name);
+                            }
+                        }
+                        if let Some(index) = unified_scan_args.row_index.as_ref() {
+                            schema.remove(&index.name);
+                        }
+                        if let Some(name) = unified_scan_args.include_file_paths.as_ref() {
+                            schema.remove(name);
+                        }
+                        let aexpr_filter = if options.push_predicate {
+                            predicate.as_ref().and_then(|predicate| {
+                                polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression(
+                                    predicate.node(), expr_arena, &schema,
+                                ).map(|expression| (expression, Arc::new(schema)))
+                            })
+                        } else {
+                            None
+                        };
+                        Arc::new(
+                            crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
+                                options: Arc::new(options.clone()),
+                                first_metadata: first_metadata.clone(),
+                                aexpr_filter,
+                                io_metrics: std::sync::OnceLock::new(),
+                                task_metrics: std::sync::OnceLock::new(),
+                            },
+                        ) as _
+                    },
 
                     #[cfg(feature = "csv")]
                     FileScanIR::Csv { options } => {
