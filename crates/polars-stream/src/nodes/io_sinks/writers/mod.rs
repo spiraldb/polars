@@ -102,7 +102,7 @@ pub fn create_file_writer_starter(
             feature = "parquet",
             feature = "ipc",
             feature = "csv",
-            feature = "json"
+            feature = "json",
         )))]
         _ => panic!("no enum variants on FileType (hint: missing feature flags?)"),
     })

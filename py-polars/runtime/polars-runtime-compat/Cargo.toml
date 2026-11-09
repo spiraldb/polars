@@ -20,6 +20,7 @@ either = { workspace = true }
 rustflags = { workspace = true }
 
 [features]
+vortex = ["polars-python/vortex"]
 # Features used in this crate
 ffi_plugin = ["polars-python/ffi_plugin"]
 csv = ["polars-python/csv"]

@@ -74,6 +74,13 @@ pub(super) async fn dsl_to_ir(
                     bytes_per_source = bytes.map(Buffer::from_owner).or(bytes_per_source);
                     sources
                 },
+                #[cfg(feature = "vortex")]
+                FileScanDsl::Vortex { .. } => {
+                    sources
+                        .expand_paths_with_hive_update(unified_scan_args)
+                        .await?
+                        .0
+                },
                 #[cfg(feature = "ipc")]
                 FileScanDsl::Ipc { .. } => {
                     sources
@@ -968,6 +975,54 @@ fn is_unsigned_int(primitive_type: &polars_parquet::parquet::schema::types::Prim
     )
 }
 
+#[cfg(feature = "vortex")]
+pub(super) async fn vortex_file_info(
+    source: ScanSourceRef<'_>,
+    n_sources: usize,
+    cloud_options: Option<&polars_io::cloud::CloudOptions>,
+) -> PolarsResult<(FileInfo, polars_vortex::read::VortexFooterRef)> {
+    use polars_io::cloud::concurrency_config::FetchConfig;
+    use polars_io::utils::byte_source::{DynByteSourceBuilder, FileReadContext};
+    use polars_vortex::read::read_at::PolarsVortexReadAt;
+    use polars_vortex::read::schema::vortex_dtype_to_schema;
+    use polars_vortex::vortex::file::OpenOptionsSessionExt;
+    let source = source.into_owned()?;
+    let cloud_options = cloud_options.cloned();
+    let task = polars_core::runtime::ASYNC.spawn(async move {
+        let reference = source.as_scan_source_ref();
+        let builder = if reference.is_cloud_url() {
+            DynByteSourceBuilder::ObjectStore(FetchConfig::random_access())
+        } else {
+            DynByteSourceBuilder::FilePread(FileReadContext::from_config("VORTEX"))
+        };
+        let bytes = reference
+            .to_dyn_byte_source(&builder, cloud_options.as_ref(), None)
+            .await?;
+        polars_vortex::session::session()
+            .open_options()
+            .open_read(PolarsVortexReadAt::new(Arc::new(bytes)))
+            .await
+            .map_err(|e| polars_err!(ComputeError: "Vortex metadata: {e}"))
+    });
+    let abort = task.abort_handle();
+    let _cancel = polars_utils::with_drop::WithDrop::new((), move |_| abort.abort());
+    let file = task
+        .await
+        .map_err(|e| polars_err!(ComputeError: "Vortex metadata task: {e}"))??;
+    let (schema, arrow_schema) = vortex_dtype_to_schema(file.dtype())?;
+    let rows = if n_sources == 1 {
+        Card::Exact(file.row_count())
+    } else {
+        Card::approx(file.row_count().saturating_mul(n_sources as u64))
+    };
+    let info = FileInfo::new(
+        schema,
+        Some(Either::Left(arrow_schema)),
+        ScanStats::new(rows),
+    );
+    Ok((info, Arc::new(file.footer().clone())))
+}
+
 pub fn max_metadata_scan_cached() -> usize {
     static MAX_SCANS_METADATA_CACHED: LazyLock<usize> = LazyLock::new(|| {
         let value = std::env::var("POLARS_MAX_CACHED_METADATA_SCANS").map_or(8, |v| {
@@ -1781,6 +1836,42 @@ impl SourcesToFileInfo {
                         ))
                     }
                     .context(failed_here!(parquet scan))?
+                }
+            },
+            #[cfg(feature = "vortex")]
+            FileScanDsl::Vortex { options } => {
+                if let Some(schema) = &options.schema {
+                    let info = FileInfo::new(
+                        schema.clone(),
+                        Some(Either::Left(Arc::new(
+                            schema.to_arrow(CompatLevel::newest()),
+                        ))),
+                        exact_row_count.map_or_else(ScanStats::unknown, ScanStats::exact_rows),
+                    );
+                    (
+                        info,
+                        FileScanIR::Vortex {
+                            options,
+                            metadata: None,
+                        },
+                    )
+                } else {
+                    let source = require_first_source(
+                        "failed to retrieve first file schema (vortex)",
+                        "pass a schema to scan an empty source list",
+                    )?;
+                    let (mut info, footer) =
+                        scans::vortex_file_info(source, sources.len(), cloud_options).await?;
+                    if let Some(rows) = exact_row_count {
+                        info.stats.rows = Card::Exact(rows);
+                    }
+                    (
+                        info,
+                        FileScanIR::Vortex {
+                            options,
+                            metadata: Some(footer),
+                        },
+                    )
                 }
             },
             #[cfg(feature = "ipc")]

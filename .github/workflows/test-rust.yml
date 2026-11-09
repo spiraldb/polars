@@ -72,6 +72,7 @@ jobs:
           -p polars-stream
           -p polars-time
           -p polars-utils
+          -p polars-vortex
 
       - name: Run tests
         if: github.event_name == 'pull_request'
@@ -92,6 +93,7 @@ jobs:
           -p polars-stream
           -p polars-time
           -p polars-utils
+          -p polars-vortex
 
   integration-test:
     runs-on: ${{ matrix.os }}
