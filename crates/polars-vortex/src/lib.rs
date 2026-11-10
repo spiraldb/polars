@@ -6,7 +6,7 @@ pub mod write;
 
 pub mod vortex {
     pub use ::vortex::{
-        array, arrow, buffer, dtype, error, expr, file, io, layout, scalar, session,
+        array, arrow, buffer, dtype, error, expr, file, io, layout, mask, scalar, session,
     };
 }
 pub use read::options::{VortexCacheMode, VortexScanOptions};

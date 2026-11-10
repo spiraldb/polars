@@ -85,6 +85,7 @@ def _check_join(
     attached: bool | None = True,
     accepted: bool | None = True,
     push_predicate: bool = True,
+    accepted_log: str = APPLIED_RANGE,
 ) -> tuple[pl.DataFrame, tuple[int, ...]]:
     from polars import _plr
 
@@ -110,9 +111,9 @@ def _check_join(
     err = capfd.readouterr().err
     metrics = _plr.get_vortex_io_metrics()
     if accepted is True:
-        assert APPLIED_RANGE in err, (plan, err)
+        assert accepted_log in err, (plan, err)
     elif accepted is False:
-        assert APPLIED_RANGE not in err, (plan, err)
+        assert accepted_log not in err, (plan, err)
     _assert_exact(actual, expected)
     return actual, metrics
 
@@ -433,3 +434,42 @@ def test_composite_runtime_join_does_not_hide_a_computed_key_error(
         with pytest.raises(pl.exceptions.InvalidOperationError, match="conversion"):
             query.collect(engine="streaming")
         assert APPLIED_RANGE not in capfd.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("dtype", "upper"),
+    [(pl.Int64, 1_000_000), (pl.Int64, 2**63 - 1), (pl.UInt64, 2**64 - 1)],
+)
+def test_near_full_runtime_range_prunes_without_losing_exact_join_or_static_filter(
+    dtype: PolarsDataType,
+    upper: int,
+    tmp_path: Path,
+    plmonkeypatch: PlMonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # The range covers almost the whole domain, but clustered zeros do not match.
+    keys = [0] * 8192 + [1, 1, 2, upper - 1, upper, upper, None]
+    fact = pl.DataFrame(
+        {
+            "k": pl.Series(keys, dtype=dtype),
+            "row_id": range(len(keys)),
+            "day": [date(1994, 1, 2)] * (len(keys) - 2)
+            + [date(1993, 1, 1), date(1994, 1, 2)],
+            "mode": ["SHIP"] * len(keys),
+        }
+    )
+    build = _build([1, upper, upper, None], dtype)
+    out, _ = _check_join(
+        lambda scan: scan.filter(
+            (pl.col("day") >= date(1994, 1, 1)) & pl.col("mode").is_in(["SHIP"])
+        ).join(build, on="k"),
+        fact,
+        _write_fact(fact, tmp_path),
+        plmonkeypatch,
+        capfd,
+        accepted_log="[vortex]: applied runtime range for pruning",
+    )
+    assert out["k"].null_count() == 0
+    assert out.filter(pl.col("k") == 1).height == 2
+    assert out.filter(pl.col("k") == upper).height == 2
+    assert out.height == 4
