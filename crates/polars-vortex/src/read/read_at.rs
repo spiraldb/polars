@@ -11,6 +11,8 @@ use vortex::buffer::{Alignment, ByteBuffer};
 use vortex::error::{VortexResult, vortex_err};
 use vortex::io::{CoalesceConfig, VortexReadAt};
 
+use crate::session::ExecutionContext;
+
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 static REQUESTED: AtomicU64 = AtomicU64::new(0);
 static RECEIVED: AtomicU64 = AtomicU64::new(0);
@@ -50,10 +52,15 @@ pub fn record_filter() {
 #[derive(Clone)]
 pub struct PolarsVortexReadAt {
     inner: Arc<DynByteSource>,
+    context: ExecutionContext,
 }
 impl PolarsVortexReadAt {
     pub fn new(inner: Arc<DynByteSource>) -> Self {
-        Self { inner }
+        Self::with_context(inner, ExecutionContext::default())
+    }
+
+    pub fn with_context(inner: Arc<DynByteSource>, context: ExecutionContext) -> Self {
+        Self { inner, context }
     }
 }
 impl VortexReadAt for PolarsVortexReadAt {
@@ -69,15 +76,22 @@ impl VortexReadAt for PolarsVortexReadAt {
     }
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
         let source = self.inner.clone();
-        crate::session::handle()
-            .spawn_io(async move {
-                source
-                    .get_size()
-                    .await
-                    .map(|n| n as u64)
-                    .map_err(|e| vortex_err!("Polars source size: {e}"))
-            })
-            .boxed()
+        let context = self.context.clone();
+        async move {
+            let output = context
+                .handle()
+                .spawn_io(async move {
+                    source
+                        .get_size()
+                        .await
+                        .map(|n| n as u64)
+                        .map_err(|e| vortex_err!("Polars source size: {e}"))
+                })
+                .await;
+            drop(context);
+            output
+        }
+        .boxed()
     }
     fn read_at(
         &self,
@@ -86,10 +100,12 @@ impl VortexReadAt for PolarsVortexReadAt {
         alignment: Alignment,
     ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
         let source = self.inner.clone();
+        let context = self.context.clone();
         async move {
             // Vortex can poll its segment driver on the Polars CPU scheduler.
             // Cloud byte sources require Tokio for their network and timer futures.
-            let buffer = crate::session::handle()
+            let buffer = context
+                .handle()
                 .spawn_io(async move {
                     let start = usize::try_from(offset)
                         .map_err(|_| vortex_err!("read offset exceeds usize"))?;
@@ -119,8 +135,42 @@ impl VortexReadAt for PolarsVortexReadAt {
             // Keep the owner without a copy when its address already aligns.
             let buffer =
                 ByteBuffer::from_bytes_aligned(bytes, Alignment::none()).aligned(alignment);
+            drop(context);
             Ok(BufferHandle::new_host(buffer))
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use polars_async::executor::TaskMetricAggregator;
+    use polars_buffer::Buffer;
+    use polars_core::runtime::ASYNC;
+    use polars_io::utils::byte_source::BufferByteSource;
+
+    use super::*;
+
+    #[test]
+    fn unpolled_reads_keep_the_query_executor_alive() {
+        let metrics = Arc::new(TaskMetricAggregator::default());
+        let weak = Arc::downgrade(&metrics);
+        let context = ExecutionContext::new(Some(metrics.clone()));
+        let source = Arc::new(DynByteSource::Buffer(BufferByteSource(Buffer::from_vec(
+            vec![1, 2, 3, 4],
+        ))));
+        let adapter = PolarsVortexReadAt::with_context(source, context.clone());
+        let size = adapter.size();
+        let read = adapter.read_at(1, 2, Alignment::none());
+        drop(adapter);
+        drop(context);
+        drop(metrics);
+        assert!(weak.upgrade().is_some());
+        ASYNC.block_on(async {
+            assert_eq!(size.await.unwrap(), 4);
+            let buffer = read.await.unwrap().unwrap_host();
+            assert_eq!(&buffer[..], &[2, 3]);
+        });
+        assert!(weak.upgrade().is_none());
     }
 }

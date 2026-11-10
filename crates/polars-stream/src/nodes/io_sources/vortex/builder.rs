@@ -1,6 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use polars_async::executor::TaskMetricAggregator;
+use polars_async::primitives::wait_group::WaitGroup;
 use polars_error::PolarsResult;
 use polars_io::cloud::CloudOptions;
 use polars_io::cloud::concurrency_config::FetchConfig;
@@ -8,13 +9,17 @@ use polars_io::metrics::IOMetrics;
 use polars_io::utils::byte_source::{DynByteSourceBuilder, FileReadContext};
 use polars_plan::dsl::ScanSource;
 use polars_utils::pl_str::PlSmallStr;
+use polars_vortex::session::ExecutionContext;
 use polars_vortex::{VortexScanOptions, vortex};
 
-use super::VortexFileReader;
+use super::{PrefetchSync, VortexFileReader};
 use crate::metrics::OptIOMetrics;
 use crate::nodes::io_sources::multi_scan::reader_interface::FileReader;
 use crate::nodes::io_sources::multi_scan::reader_interface::builder::FileReaderBuilder;
 use crate::nodes::io_sources::multi_scan::reader_interface::capabilities::ReaderCapabilities;
+use crate::nodes::io_sources::shared::pipeline_budget::{
+    ActiveScan, PipelineBudget, env_nonzero_usize,
+};
 
 pub struct VortexReaderBuilder {
     pub options: Arc<VortexScanOptions>,
@@ -22,6 +27,10 @@ pub struct VortexReaderBuilder {
     pub aexpr_filter: Option<(vortex::expr::Expression, polars_core::schema::SchemaRef)>,
     pub io_metrics: OnceLock<Arc<IOMetrics>>,
     pub task_metrics: OnceLock<Arc<TaskMetricAggregator>>,
+    pub execution_context: OnceLock<ExecutionContext>,
+    pub pipeline_budget: OnceLock<PipelineBudget>,
+    pub shared_prefetch_wait_group_slot: Arc<Mutex<Option<WaitGroup>>>,
+    pub file_read_context: OnceLock<FileReadContext>,
 }
 
 impl std::fmt::Debug for VortexReaderBuilder {
@@ -46,6 +55,20 @@ impl FileReaderBuilder for VortexReaderBuilder {
         if let Some(metrics) = execution_state.task_metrics.clone() {
             let _ = self.task_metrics.set(metrics);
         }
+        self.execution_context
+            .set(ExecutionContext::new(execution_state.task_metrics.clone()))
+            .unwrap();
+        self.pipeline_budget
+            .set(PipelineBudget::new(
+                env_nonzero_usize("POLARS_VORTEX_PREFETCH_SIZE"),
+                env_nonzero_usize("POLARS_VORTEX_PREFETCH_KBYTES_BUDGET"),
+                execution_state.num_pipelines,
+            ))
+            .unwrap();
+    }
+
+    fn active_scan(&self) -> Option<ActiveScan> {
+        self.pipeline_budget.get().map(PipelineBudget::active_scan)
     }
 
     fn set_io_metrics(&self, io_metrics: Arc<IOMetrics>) {
@@ -64,7 +87,11 @@ impl FileReaderBuilder for VortexReaderBuilder {
         } else if source.is_buffer() {
             DynByteSourceBuilder::Mmap
         } else {
-            DynByteSourceBuilder::FilePread(FileReadContext::from_config("VORTEX"))
+            DynByteSourceBuilder::FilePread(
+                self.file_read_context
+                    .get_or_init(|| FileReadContext::from_config("VORTEX"))
+                    .clone(),
+            )
         };
         Ok(Box::new(VortexFileReader {
             scan_source: source,
@@ -79,6 +106,13 @@ impl FileReaderBuilder for VortexReaderBuilder {
             byte_source_builder,
             io_metrics: OptIOMetrics(self.io_metrics.get().cloned()),
             task_metrics: self.task_metrics.get().cloned(),
+            execution_context: self.execution_context.get().unwrap().clone(),
+            prefetch_sync: PrefetchSync {
+                budget: self.pipeline_budget.get().unwrap().clone(),
+                shared_slot: Arc::clone(&self.shared_prefetch_wait_group_slot),
+                previous: None,
+                all_spawned: None,
+            },
             init_data: None,
         }))
     }

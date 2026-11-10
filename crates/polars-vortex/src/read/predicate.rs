@@ -44,19 +44,23 @@ pub fn polars_to_vortex_predicate(
     and_collect(expressions?)
 }
 fn safe_dtype(dtype: &DataType) -> bool {
-    matches!(
-        dtype,
+    match dtype {
         DataType::Boolean
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-            | DataType::String
-    )
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::String => true,
+        #[cfg(feature = "dtype-date")]
+        DataType::Date => true,
+        #[cfg(feature = "dtype-decimal")]
+        DataType::Decimal(_, _) => true,
+        _ => false,
+    }
 }
 fn convert_specialized(
     name: &PlSmallStr,
@@ -64,12 +68,7 @@ fn convert_specialized(
     dtype: &DataType,
 ) -> Option<Expression> {
     let col = get_item(name.as_str(), root());
-    let scalar = |s: &Scalar| {
-        if s.dtype() != dtype {
-            return None;
-        }
-        polars_scalar_to_vortex(s).map(lit)
-    };
+    let scalar = |s: &Scalar| polars_scalar_to_vortex_for_dtype(s, dtype).map(lit);
     Some(match p {
         SpecializedColumnPredicate::Equal(s) if s.dtype() == dtype && s.is_null() => is_null(col),
         SpecializedColumnPredicate::Equal(s) => eq(col, scalar(s)?),
@@ -77,6 +76,22 @@ fn convert_specialized(
             and(gt_eq(col.clone(), scalar(lo)?), lt_eq(col, scalar(hi)?))
         },
         SpecializedColumnPredicate::EqualOneOf(values) => {
+            if !matches!(
+                dtype,
+                DataType::Boolean
+                    | DataType::String
+                    | DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::UInt64
+            ) || values.len() > 64
+            {
+                return None;
+            }
             let terms: Option<Vec<_>> = values
                 .iter()
                 .map(|s| {
@@ -129,10 +144,58 @@ pub fn polars_scalar_to_vortex(scalar: &Scalar) -> Option<VortexScalar> {
         AnyValue::UInt16(v) => VortexScalar::primitive(*v, n),
         AnyValue::UInt32(v) => VortexScalar::primitive(*v, n),
         AnyValue::UInt64(v) => VortexScalar::primitive(*v, n),
+        #[cfg(feature = "dtype-date")]
+        AnyValue::Date(v) => VortexScalar::extension::<vortex::array::extension::datetime::Date>(
+            vortex::array::extension::datetime::TimeUnit::Days,
+            VortexScalar::primitive(*v, n),
+        ),
+        #[cfg(feature = "dtype-decimal")]
+        AnyValue::Decimal(value, precision, scale) => decimal_scalar(*value, *precision, *scale)?,
         AnyValue::String(v) => VortexScalar::utf8(v.to_string(), n),
         AnyValue::StringOwned(v) => VortexScalar::utf8(v.to_string(), n),
         _ => return None,
     })
+}
+
+/// Convert a resolved scalar only when its value is exact in the requested dtype.
+pub fn polars_scalar_to_vortex_for_dtype(
+    scalar: &Scalar,
+    dtype: &DataType,
+) -> Option<VortexScalar> {
+    #[cfg(feature = "dtype-decimal")]
+    if let DataType::Decimal(precision, scale) = dtype {
+        let AnyValue::Decimal(value, _, old_scale) = scalar.value() else {
+            return None;
+        };
+        let value = if scale >= old_scale {
+            value.checked_mul(10i128.checked_pow(u32::try_from(scale - old_scale).ok()?)?)?
+        } else {
+            let divisor = 10i128.checked_pow(u32::try_from(old_scale - scale).ok()?)?;
+            if value % divisor != 0 {
+                return None;
+            }
+            value / divisor
+        };
+        return decimal_scalar(value, *precision, *scale);
+    }
+    (scalar.dtype() == dtype)
+        .then(|| polars_scalar_to_vortex(scalar))
+        .flatten()
+}
+
+#[cfg(feature = "dtype-decimal")]
+fn decimal_scalar(value: i128, precision: usize, scale: usize) -> Option<VortexScalar> {
+    if !(1..=38).contains(&precision)
+        || value.checked_abs()? >= 10i128.checked_pow(u32::try_from(precision).ok()?)?
+    {
+        return None;
+    }
+    let dtype = vortex::dtype::DecimalDType::try_new(
+        u8::try_from(precision).ok()?,
+        i8::try_from(scale).ok()?,
+    )
+    .ok()?;
+    VortexScalar::try_decimal(value.into(), dtype, Nullability::NonNullable).ok()
 }
 
 #[cfg(test)]
@@ -262,5 +325,36 @@ mod tests {
             .collect(),
         );
         assert!(polars_to_vortex_predicate(&p, &physical, &physical).is_none());
+    }
+    #[cfg(feature = "dtype-decimal")]
+    #[test]
+    fn decimal_literal_rescale_requires_exact_value_and_precision() {
+        let scalar = |value, precision, scale| {
+            Scalar::new(
+                DataType::Decimal(precision, scale),
+                AnyValue::Decimal(value, precision, scale),
+            )
+        };
+        let target = DataType::Decimal(6, 2);
+        assert_eq!(
+            polars_scalar_to_vortex_for_dtype(&scalar(12300, 8, 4), &target),
+            polars_scalar_to_vortex(&scalar(123, 6, 2)),
+        );
+        assert_eq!(
+            polars_scalar_to_vortex_for_dtype(&scalar(-123, 6, 2), &DataType::Decimal(8, 4)),
+            polars_scalar_to_vortex(&scalar(-12300, 8, 4)),
+        );
+        assert!(polars_scalar_to_vortex_for_dtype(&scalar(12301, 8, 4), &target).is_none());
+        assert!(polars_scalar_to_vortex_for_dtype(&scalar(1_000_000, 7, 2), &target).is_none());
+        assert!(
+            polars_scalar_to_vortex_for_dtype(
+                &scalar(i128::MAX, 38, 0),
+                &DataType::Decimal(38, 38)
+            )
+            .is_none()
+        );
+        assert!(
+            polars_scalar_to_vortex_for_dtype(&Scalar::null(target.clone()), &target).is_none()
+        );
     }
 }

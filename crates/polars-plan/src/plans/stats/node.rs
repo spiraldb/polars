@@ -425,7 +425,14 @@ pub(crate) fn node_stats_with_cache(
                 filtered: idxs.filtered,
                 unfiltered: inner.unfiltered,
                 max_rows: idxs.max_rows,
-                columns: inner.columns,
+                columns: inner.columns.as_ref().map(|columns| {
+                    Arc::new(
+                        columns
+                            .iter()
+                            .map(|(name, stats)| (name.clone(), redistributed_column(stats)))
+                            .collect(),
+                    )
+                }),
             })
         },
         IR::Select { input, expr, .. } => {
@@ -525,28 +532,34 @@ impl NodeStats {
         self.columns.as_ref()?.get(name)
     }
 
-    /// Distinct values in `name`, when known well enough to steer a decision.
-    ///
-    /// Never more than the rows the node emits.
+    /// Rows that can hold a non-null value, before filters.
+    fn non_null_rows(&self, name: &str) -> f64 {
+        match self.column(name).map(|column| column.null_count) {
+            Some(Card::Exact(nulls)) => (self.unfiltered - nulls as f64).max(0.0),
+            _ => self.unfiltered,
+        }
+    }
+
+    /// Distinct non-null values, when known well enough to steer a decision.
     fn distinct_count_key(&self, name: &str) -> Option<f64> {
         let distinct = self.column(name)?.distinct.confident(MAX_NDV_REL_ERR)?;
-        Some((distinct as f64).clamp(MIN_CARDINALITY, self.unfiltered))
+        let rows = self.non_null_rows(name).max(MIN_CARDINALITY);
+        Some((distinct as f64).clamp(MIN_CARDINALITY, rows))
     }
 
-    /// Values `name` could hold, from its integer range. Estimates its distinct
-    /// count from above, for a column of a scan that carried min/max.
+    /// A cost estimate from the integer interval, capped by non-null rows.
     fn int_domain(&self, name: &str) -> Option<f64> {
         let domain = self.column(name)?.int_domain()?;
-        Some(domain.clamp(MIN_CARDINALITY, self.unfiltered))
+        Some(domain.clamp(
+            MIN_CARDINALITY,
+            self.non_null_rows(name).max(MIN_CARDINALITY),
+        ))
     }
 
-    /// Distinct values in `name`: the larger of its distinct count and its
-    /// integer domain.
+    /// Prefer a distinct count over an interval that contains absent values.
     pub fn key_distinct_estimate(&self, name: &str) -> Option<f64> {
-        match (self.distinct_count_key(name), self.int_domain(name)) {
-            (Some(ndv), Some(domain)) => Some(ndv.max(domain)),
-            (ndv, domain) => ndv.or(domain),
-        }
+        self.distinct_count_key(name)
+            .or_else(|| self.int_domain(name))
     }
 
     /// Distinct combinations of `keys`, or `None` unless every one is known.
@@ -591,18 +604,38 @@ fn join_max_rows(how: &JoinType, left: &NodeStats, right: &NodeStats) -> Option<
     }
 }
 
+/// Preserve value bounds after row redistribution, but invalidate absolute counts.
+fn redistributed_column(stats: &ScanColumnStats) -> ScanColumnStats {
+    ScanColumnStats {
+        distinct: stats.distinct.demote_default(),
+        null_count: Card::Unknown,
+        sampled_row_groups: None,
+        ..stats.clone()
+    }
+}
+
 /// Column statistics of a join output: those of both sides, minus any name they
 /// share. A shared name is either coalesced or suffixed, and which side the output
-/// column came from is no longer clear.
+/// column came from is no longer clear. Sparse statistics cannot prove name ownership.
 fn join_columns(left: &NodeStats, right: &NodeStats) -> Option<Arc<ScanColumnStatsMap>> {
+    let joined_column = |stats: &ScanColumnStats| ScanColumnStats {
+        // A name can exist in the other schema without statistics under that name.
+        int_range_bounds: None,
+        ..redistributed_column(stats)
+    };
     match (&left.columns, &right.columns) {
         (None, None) => None,
-        (Some(columns), None) | (None, Some(columns)) => Some(columns.clone()),
+        (Some(columns), None) | (None, Some(columns)) => Some(Arc::new(
+            columns
+                .iter()
+                .map(|(name, stats)| (name.clone(), joined_column(stats)))
+                .collect(),
+        )),
         (Some(left), Some(right)) => {
             let mut merged = ScanColumnStatsMap::default();
             let mut take_from = |from: &ScanColumnStatsMap, other: &ScanColumnStatsMap| {
                 for (name, stats) in from.iter().filter(|(name, _)| !other.contains_key(*name)) {
-                    merged.insert(name.clone(), stats.clone());
+                    merged.insert(name.clone(), joined_column(stats));
                 }
             };
             take_from(left, right);
@@ -896,6 +929,7 @@ fn single_key_column(keys: &[&PlSmallStr], rows: f64) -> Option<Arc<ScanColumnSt
             null_count: Card::Unknown,
             avg_byte_width: None,
             int_range: None,
+            int_range_bounds: None,
             int_range_partial: false,
             sampled_row_groups: None,
         },
@@ -1165,11 +1199,11 @@ pub fn composite_key_domain(parts: impl Iterator<Item = (f64, Option<f64>)>, max
     product.min(bound).max(MIN_CARDINALITY)
 }
 
-/// The rows of `side`, if the key joining it to `other` is unique on it.
+/// Cost estimate for the rows of the smaller side when its key appears unique.
 ///
-/// Only the smaller side counts. Its own distinct count, or else its range, must
-/// reach its rows. Without either, [`key_domain`] guessed the key unique on the
-/// smaller side, and the shared `domain` reaching its rows says so.
+/// A known distinct count takes precedence over an integer interval. Without either,
+/// the shared domain supplies the fallback estimate. This heuristic does not prove
+/// uniqueness and must not set `NodeStats::max_rows` or any semantic guarantee.
 pub fn unique_side_rows(
     side: &NodeStats,
     key: Option<&PlSmallStr>,
@@ -1178,10 +1212,7 @@ pub fn unique_side_rows(
 ) -> Option<f64> {
     let rows = side.unfiltered;
     let distinct = key
-        .and_then(|name| {
-            side.distinct_count_key(name)
-                .or_else(|| side.int_domain(name))
-        })
+        .and_then(|name| side.key_distinct_estimate(name))
         .unwrap_or(domain);
     (rows <= other.unfiltered && distinct >= rows).then_some(rows)
 }
@@ -1206,9 +1237,9 @@ pub fn key_domain(
     let domain = match (left_ndv, right_ndv) {
         (Some(l), Some(r)) => l.max(r),
         _ => {
-            // `int_domain` is already bounded by the side's own rows.
-            let left_range = left_key.and_then(|name| left.int_domain(name));
-            let right_range = right_key.and_then(|name| right.int_domain(name));
+            // Each estimate is already capped by its side's non-null rows.
+            let left_range = left_key.and_then(|name| left.key_distinct_estimate(name));
+            let right_range = right_key.and_then(|name| right.key_distinct_estimate(name));
             let estimate = match (left_range, right_range) {
                 // Distinct values per row, cross multiplied rather than divided.
                 (Some(l), Some(r)) => {
@@ -1584,7 +1615,6 @@ mod tests {
         assert!(domain >= 2_000.0);
         assert_eq!(unique_side_rows(&small, Some(&k), &large, domain), None);
 
-        // Without statistics the key is guessed unique on the smaller side.
         // A known distinct count wins over a wide range.
         let sparse = leaf(2_000.0, 2_000.0).with_column(
             "k",
@@ -1635,11 +1665,10 @@ mod tests {
         let fact = leaf_with_range(1_000_000.0, (0, 99));
         let dim = leaf_with_ndv(800.0, 800.0, "k", 500);
 
-        // The dimension sets the domain, and its 500 known distinct keys are a lower
-        // bound on it. The fact's narrow range does not drag it below either.
+        // The exact count replaces the dimension's unknown integer range.
         assert_eq!(
             key_domain(&fact, Some(&key("k")), &dim, Some(&key("k"))),
-            800.0
+            500.0
         );
         // The same holds with no distinct count anywhere: a relation whose key is
         // unknown still repeats it less than the fact does.
@@ -2096,5 +2125,175 @@ mod tests {
             let kept = apply_predicate(1000.0, 1000.0, both, &expr_arena, map, &schema);
             assert_eq!(kept, MIN_CARDINALITY);
         }
+    }
+
+    #[test]
+    fn exact_distinct_count_overrides_sparse_integer_bounds() {
+        let stats = leaf(1_000.0, 1_000.0).with_column(
+            "k",
+            ScanColumnStats {
+                distinct: Card::Exact(2),
+                null_count: Card::Exact(0),
+                int_range: Some((0, 1_000_000)),
+                int_range_bounds: Some((0, 1_000_000)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.key_distinct_estimate("k"), Some(2.0));
+        let other = leaf_with_ndv(1_000.0, 1_000.0, "k", 2);
+        assert_eq!(
+            key_domain(&stats, Some(&key("k")), &other, Some(&key("k"))),
+            2.0
+        );
+        assert_eq!(
+            unique_side_rows(&stats, Some(&key("k")), &other, 1_000.0),
+            None
+        );
+    }
+
+    #[test]
+    fn range_cost_estimates_are_capped_by_non_null_rows() {
+        let stats = leaf(1_000.0, 1_000.0).with_column(
+            "k",
+            ScanColumnStats {
+                null_count: Card::Exact(995),
+                int_range: Some((i128::MIN, i128::MAX)),
+                int_range_bounds: Some((i128::MIN, i128::MAX)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.key_distinct_estimate("k"), Some(5.0));
+        let all_null = leaf(1_000.0, 1_000.0).with_column(
+            "k",
+            ScanColumnStats {
+                distinct: Card::Exact(0),
+                null_count: Card::Exact(1_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(all_null.key_distinct_estimate("k"), Some(MIN_CARDINALITY));
+    }
+
+    #[test]
+    fn sparse_range_cost_hint_does_not_prove_a_join_bound() {
+        let sparse = leaf_with_range(100.0, (0, 1_000_000));
+        let other = leaf(1_000.0, 1_000.0);
+        assert_eq!(
+            unique_side_rows(&sparse, Some(&key("k")), &other, 100.0),
+            Some(100.0)
+        );
+        assert_eq!(join_max_rows(&JoinType::Inner, &sparse, &other), None);
+        let sparse_with_ndv = sparse.with_column(
+            "k",
+            ScanColumnStats {
+                distinct: Card::Exact(2),
+                int_range: Some((0, 1_000_000)),
+                int_range_bounds: Some((0, 1_000_000)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            unique_side_rows(&sparse_with_ndv, Some(&key("k")), &other, 100.0),
+            None
+        );
+        assert_eq!(
+            join_max_rows(&JoinType::Inner, &sparse_with_ndv, &other),
+            None
+        );
+    }
+
+    #[test]
+    fn joined_counts_do_not_cap_distinct_estimates_with_source_null_counts() {
+        let source = leaf(1_000.0, 1_000.0).with_column(
+            "k",
+            ScanColumnStats {
+                distinct: Card::Exact(2),
+                null_count: Card::Exact(995),
+                int_range: Some((7, 42)),
+                int_range_bounds: Some((7, 42)),
+                sampled_row_groups: Some(Arc::from([])),
+                ..Default::default()
+            },
+        );
+        let opaque = leaf(20.0, 20.0);
+        let other = leaf_with_ndv(20.0, 20.0, "other", 3);
+        for (left, right) in [(&source, &opaque), (&opaque, &source), (&source, &other)] {
+            let joined = NodeStats {
+                columns: join_columns(left, right),
+                ..leaf(20.0, 20.0)
+            };
+            assert_eq!(joined.key_distinct_estimate("k"), Some(2.0));
+            let column = joined.column("k").unwrap();
+            assert!(matches!(column.distinct, Card::Approx { value: 2, .. }));
+            assert_eq!(column.null_count, Card::Unknown);
+            assert_eq!(column.int_range, Some((7, 42)));
+            assert_eq!(column.int_range_bounds, None);
+            assert!(column.sampled_row_groups.is_none());
+        }
+        let column = source.column("k").unwrap();
+        assert_eq!(column.distinct, Card::Exact(2));
+        assert_eq!(column.null_count, Card::Exact(995));
+        assert!(column.sampled_row_groups.is_some());
+    }
+
+    #[test]
+    fn gather_does_not_retain_exact_source_counts() {
+        let source = leaf(100.0, 100.0).with_column(
+            "k",
+            ScanColumnStats {
+                distinct: Card::Exact(100),
+                null_count: Card::Exact(0),
+                int_range: Some((0, 99)),
+                int_range_bounds: Some((0, 99)),
+                sampled_row_groups: Some(Arc::from([])),
+                ..Default::default()
+            },
+        );
+        let mut ir_arena = Arena::new();
+        let input = ir_arena.add(IR::Invalid);
+        let idxs = ir_arena.add(IR::Invalid);
+        let gather = ir_arena.add(IR::Gather {
+            input,
+            idxs,
+            null_on_oob: false,
+        });
+        let mut cache = StatsCache::default();
+        cache.nodes.insert(input, Some(source.clone()));
+        // The 100 indices can all select the same input row.
+        cache.nodes.insert(idxs, Some(NodeStats::of_rows(100.0)));
+        let gathered = node_stats_with_cache(gather, &ir_arena, &Arena::new(), &mut cache).unwrap();
+        let column = gathered.column("k").unwrap();
+        assert!(matches!(column.distinct, Card::Approx { value: 100, .. }));
+        assert_eq!(column.null_count, Card::Unknown);
+        assert_eq!(column.int_range, Some((0, 99)));
+        assert_eq!(column.int_range_bounds, Some((0, 99)));
+        assert!(column.sampled_row_groups.is_none());
+        assert_eq!(source.column("k").unwrap().distinct, Card::Exact(100));
+        assert_eq!(source.column("k").unwrap().null_count, Card::Exact(0));
+    }
+
+    #[test]
+    fn sparse_join_statistics_do_not_prove_output_column_bounds() {
+        // Both schemas can contain x even when the left statistics omit it.
+        let left = leaf(20.0, 20.0);
+        let right = leaf(100.0, 100.0).with_column(
+            "x",
+            ScanColumnStats {
+                distinct: Card::Exact(2),
+                null_count: Card::Exact(0),
+                int_range: Some((7, 42)),
+                int_range_bounds: Some((7, 42)),
+                ..Default::default()
+            },
+        );
+        let joined = join_columns(&left, &right).unwrap();
+        let output = &joined["x"];
+        assert_eq!(output.int_range, Some((7, 42)));
+        assert_eq!(output.int_range_bounds, None);
+        assert_eq!(right.column("x").unwrap().int_range_bounds, Some((7, 42)));
+        // The same conservative rule applies when both sparse maps contain other keys.
+        let left = left.with_column("other", ScanColumnStats::default());
+        let joined = join_columns(&left, &right).unwrap();
+        assert_eq!(joined["x"].int_range_bounds, None);
     }
 }

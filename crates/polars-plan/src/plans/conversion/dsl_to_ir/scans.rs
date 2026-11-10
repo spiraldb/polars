@@ -797,6 +797,7 @@ fn parquet_column_stats(
                     a.int_range
                 },
                 int_range_partial: !complete || (sampled && !widen_range),
+                int_range_bounds: None,
                 sampled_row_groups: a.row_groups.map(Arc::from),
             };
             (name, stats)
@@ -976,19 +977,16 @@ fn is_unsigned_int(primitive_type: &polars_parquet::parquet::schema::types::Prim
 }
 
 #[cfg(feature = "vortex")]
-pub(super) async fn vortex_file_info(
-    source: ScanSourceRef<'_>,
-    n_sources: usize,
-    cloud_options: Option<&polars_io::cloud::CloudOptions>,
-) -> PolarsResult<(FileInfo, polars_vortex::read::VortexFooterRef)> {
-    use polars_io::cloud::concurrency_config::FetchConfig;
-    use polars_io::utils::byte_source::{DynByteSourceBuilder, FileReadContext};
+fn vortex_footer_future(
+    source: PolarsResult<ScanSource>,
+    cloud_options: Option<polars_io::cloud::CloudOptions>,
+) -> futures::future::BoxFuture<'static, PolarsResult<polars_vortex::read::VortexFooterRef>> {
+    use futures::FutureExt;
+    use polars_io::utils::byte_source::FileReadContext;
     use polars_vortex::read::read_at::PolarsVortexReadAt;
-    use polars_vortex::read::schema::vortex_dtype_to_schema;
     use polars_vortex::vortex::file::OpenOptionsSessionExt;
-    let source = source.into_owned()?;
-    let cloud_options = cloud_options.cloned();
-    let task = polars_core::runtime::ASYNC.spawn(async move {
+    async move {
+        let source = source?;
         let reference = source.as_scan_source_ref();
         let builder = if reference.is_cloud_url() {
             DynByteSourceBuilder::ObjectStore(FetchConfig::random_access())
@@ -998,30 +996,58 @@ pub(super) async fn vortex_file_info(
         let bytes = reference
             .to_dyn_byte_source(&builder, cloud_options.as_ref(), None)
             .await?;
-        polars_vortex::session::session()
+        let file = polars_vortex::session::session()
             .open_options()
             .open_read(PolarsVortexReadAt::new(Arc::new(bytes)))
             .await
-            .map_err(|e| polars_err!(ComputeError: "Vortex metadata: {e}"))
+            .map_err(|e| polars_err!(ComputeError: "Vortex metadata: {e}"))?;
+        // Retain metadata only. The temporary reader and byte source drop here.
+        Ok(Arc::new(file.footer().clone()))
+    }
+    .boxed()
+}
+
+#[cfg(feature = "vortex")]
+pub(super) async fn vortex_file_info(
+    sources: &ScanSources,
+    cloud_options: Option<&polars_io::cloud::CloudOptions>,
+) -> PolarsResult<(FileInfo, polars_vortex::read::VortexFooterRef)> {
+    use futures::{StreamExt, TryStreamExt};
+    use polars_vortex::read::schema::vortex_dtype_to_schema;
+    let indices = super::vortex_stats::footer_indices(sources.len());
+    polars_ensure!(!indices.is_empty(), ComputeError: "Vortex schema inference requires a source");
+    let selected = indices
+        .into_iter()
+        .map(|index| sources.get(index).unwrap().into_owned())
+        .collect::<Vec<_>>();
+    let cloud_options = cloud_options.cloned();
+    let concurrency = polars_config::config().max_threads().clamp(1, 8);
+    let futures = selected
+        .into_iter()
+        .map(|source| vortex_footer_future(source, cloud_options.clone()))
+        .collect::<Vec<_>>();
+    let task = polars_core::runtime::ASYNC.spawn(async move {
+        futures::stream::iter(futures)
+            .buffered(concurrency)
+            .enumerate()
+            .map(|(index, result)| match result {
+                Err(error) if index == 0 => Err(error),
+                result => Ok(result.ok()),
+            })
+            .try_collect::<Vec<_>>()
+            .await
     });
     let abort = task.abort_handle();
     let _cancel = polars_utils::with_drop::WithDrop::new((), move |_| abort.abort());
-    let file = task
+    let footers = task
         .await
         .map_err(|e| polars_err!(ComputeError: "Vortex metadata task: {e}"))??;
-    let (schema, arrow_schema) = vortex_dtype_to_schema(file.dtype())?;
-    let rows = if n_sources == 1 {
-        Card::Exact(file.row_count())
-    } else {
-        Card::approx(file.row_count().saturating_mul(n_sources as u64))
-    };
-    let columns = super::vortex_stats::column_stats(file.footer(), schema.as_ref(), n_sources);
-    let info = FileInfo::new(
-        schema,
-        Some(Either::Left(arrow_schema)),
-        ScanStats::new(rows).with_columns(columns),
-    );
-    Ok((info, Arc::new(file.footer().clone())))
+    // Only source zero determines the schema or produces an inference error.
+    let first = footers[0].as_ref().unwrap().clone();
+    let (schema, arrow_schema) = vortex_dtype_to_schema(first.dtype())?;
+    let stats = super::vortex_stats::aggregate_footers(&footers, schema.as_ref(), sources.len());
+    let info = FileInfo::new(schema, Some(Either::Left(arrow_schema)), stats);
+    Ok((info, first))
 }
 
 pub fn max_metadata_scan_cached() -> usize {
@@ -1857,12 +1883,12 @@ impl SourcesToFileInfo {
                         },
                     )
                 } else {
-                    let source = require_first_source(
+                    require_first_source(
                         "failed to retrieve first file schema (vortex)",
                         "pass a schema to scan an empty source list",
                     )?;
                     let (mut info, footer) =
-                        scans::vortex_file_info(source, sources.len(), cloud_options).await?;
+                        scans::vortex_file_info(sources, cloud_options).await?;
                     if let Some(rows) = exact_row_count {
                         info.stats.rows = Card::Exact(rows);
                     }

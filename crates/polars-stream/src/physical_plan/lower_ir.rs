@@ -1070,6 +1070,10 @@ fn lower_ir_inner(
                                 aexpr_filter,
                                 io_metrics: std::sync::OnceLock::new(),
                                 task_metrics: std::sync::OnceLock::new(),
+                                execution_context: std::sync::OnceLock::new(),
+                                pipeline_budget: std::sync::OnceLock::new(),
+                                shared_prefetch_wait_group_slot: Default::default(),
+                                file_read_context: std::sync::OnceLock::new(),
                             },
                         ) as _
                     },

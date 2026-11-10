@@ -92,16 +92,21 @@ impl Card {
         }
     }
 
-    /// Combine two counts with `f`, keeping the lower confidence.
-    fn combine(self, other: Self, f: impl FnOnce(u64, u64) -> u64) -> Self {
+    fn checked_add(self, other: Self) -> Self {
         match (self, other) {
-            (Card::Exact(l), Card::Exact(r)) => Card::Exact(f(l, r)),
-            (l, r) => match (l.value(), r.value()) {
-                (Some(lv), Some(rv)) => Card::Approx {
-                    value: f(lv, rv),
-                    rel_err: l.rel_err().max(r.rel_err()),
+            (Card::Exact(left), Card::Exact(right)) => {
+                left.checked_add(right).map_or(Card::Unknown, Card::Exact)
+            },
+            (left, right) => match left.value().zip(right.value()) {
+                Some((left_value, right_value)) => {
+                    left_value
+                        .checked_add(right_value)
+                        .map_or(Card::Unknown, |value| Card::Approx {
+                            value,
+                            rel_err: left.rel_err().max(right.rel_err()),
+                        })
                 },
-                _ => Card::Unknown,
+                None => Card::Unknown,
             },
         }
     }
@@ -125,7 +130,7 @@ impl Card {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "dsl-schema", derive(schemars::JsonSchema))]
 pub struct ScanColumnStats {
-    /// Number of distinct values.
+    /// Number of distinct non-null values.
     pub distinct: Card,
     pub null_count: Card,
     /// Average width of one value in the source, in bytes.
@@ -135,6 +140,11 @@ pub struct ScanColumnStats {
     /// them and is an estimate.
     #[cfg_attr(feature = "serde", serde(default))]
     pub int_range: Option<(i128, i128)>,
+    /// Guaranteed inclusive outer bounds for every non-null integer value.
+    /// Unlike `int_range`, these bounds never come from sampling or extrapolation.
+    /// A wide interval does not prove that its values occur or are distinct.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub int_range_bounds: Option<(i128, i128)>,
     /// `int_range` misses sources whose statistics were not read, or comes from a
     /// single sampled row group, so values far outside it may exist.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -259,12 +269,20 @@ impl ScanStats {
     /// Statistics of one scan that reads the sources of `parts` one after another. A column
     /// keeps statistics only if every part has them.
     pub(crate) fn concat(parts: &[&Self]) -> Self {
+        // Exact empty inputs contribute no values, even without column metadata.
+        let parts: Vec<_> = parts
+            .iter()
+            .copied()
+            .filter(|part| part.rows != Card::Exact(0))
+            .collect();
+        if parts.is_empty() {
+            return Self::exact_rows(0);
+        }
         let rows = parts
             .iter()
             .map(|s| s.rows)
-            .reduce(|l, r| l.combine(r, u64::saturating_add))
-            .unwrap_or_default();
-
+            .reduce(Card::checked_add)
+            .unwrap();
         let Some(maps) = parts
             .iter()
             .map(|s| s.columns.as_deref())
@@ -273,39 +291,113 @@ impl ScanStats {
             return Self::new(rows);
         };
 
-        let columns =
-            maps[0]
-                .iter()
-                .filter_map(|(name, first)| {
-                    let mut out = first.clone();
-                    let mut width_rows = parts[0].rows.value().unwrap_or(0) as f64;
-                    for (map, part) in maps.iter().zip(parts).skip(1) {
-                        let col = map.get(name)?;
-                        let part_rows = part.rows.value().unwrap_or(0) as f64;
-                        out.distinct = out.distinct.combine(col.distinct, u64::max);
-                        out.null_count =
-                            out.null_count.combine(col.null_count, u64::saturating_add);
-                        out.avg_byte_width =
-                            out.avg_byte_width.zip(col.avg_byte_width).map(|(l, r)| {
-                                let total = width_rows + part_rows;
-                                if total == 0.0 {
-                                    (l + r) / 2.0
-                                } else {
-                                    ((l as f64 * width_rows + r as f64 * part_rows) / total) as f32
-                                }
-                            });
-                        out.int_range = out.int_range.zip(col.int_range).map(
-                            |((l_min, l_max), (r_min, r_max))| (l_min.min(r_min), l_max.max(r_max)),
-                        );
-                        out.int_range_partial |= col.int_range_partial;
-                        width_rows += part_rows;
-                    }
-                    Some((name.clone(), out))
-                })
-                .collect();
-
+        let columns = maps[0]
+            .iter()
+            .filter_map(|(name, first)| {
+                let mut out = first.clone();
+                let mut accumulated_rows = parts[0].rows;
+                let mut width_rows = accumulated_rows.value().unwrap_or(0) as f64;
+                for (map, part) in maps.iter().zip(&parts).skip(1) {
+                    let col = map.get(name)?;
+                    let left_empty = non_null_empty(&out, accumulated_rows);
+                    let right_empty = non_null_empty(col, part.rows);
+                    let distinct = union_distinct(&out, col, left_empty, right_empty);
+                    let part_rows = part.rows.value().unwrap_or(0) as f64;
+                    out.null_count = out.null_count.checked_add(col.null_count);
+                    out.avg_byte_width =
+                        out.avg_byte_width.zip(col.avg_byte_width).map(|(l, r)| {
+                            let total = width_rows + part_rows;
+                            if total == 0.0 {
+                                (l + r) / 2.0
+                            } else {
+                                ((l as f64 * width_rows + r as f64 * part_rows) / total) as f32
+                            }
+                        });
+                    out.int_range =
+                        union_range(out.int_range, col.int_range, left_empty, right_empty);
+                    out.int_range_bounds = union_range(
+                        out.int_range_bounds,
+                        col.int_range_bounds,
+                        left_empty,
+                        right_empty,
+                    );
+                    out.int_range_partial = match (left_empty, right_empty) {
+                        (true, false) => col.int_range_partial,
+                        (false, true) => out.int_range_partial,
+                        (true, true) => false,
+                        (false, false) => out.int_range_partial || col.int_range_partial,
+                    };
+                    out.distinct = distinct;
+                    // The first input's sample does not describe the concatenation.
+                    out.sampled_row_groups = None;
+                    accumulated_rows = accumulated_rows.checked_add(part.rows);
+                    width_rows += part_rows;
+                }
+                Some((name.clone(), out))
+            })
+            .collect();
         Self::new(rows).with_columns(columns)
     }
+}
+
+fn non_null_empty(column: &ScanColumnStats, rows: Card) -> bool {
+    column.distinct == Card::Exact(0)
+        || matches!((rows, column.null_count), (Card::Exact(rows), Card::Exact(nulls)) if rows == nulls)
+}
+
+fn union_range(
+    left: Option<(i128, i128)>,
+    right: Option<(i128, i128)>,
+    left_empty: bool,
+    right_empty: bool,
+) -> Option<(i128, i128)> {
+    match (left_empty, right_empty) {
+        (true, true) => None,
+        (true, false) => right,
+        (false, true) => left,
+        (false, false) => left
+            .zip(right)
+            .map(|((l_min, l_max), (r_min, r_max))| (l_min.min(r_min), l_max.max(r_max))),
+    }
+}
+
+fn union_distinct(
+    left: &ScanColumnStats,
+    right: &ScanColumnStats,
+    left_empty: bool,
+    right_empty: bool,
+) -> Card {
+    match (left_empty, right_empty) {
+        (true, true) => return Card::Exact(0),
+        (true, false) => return right.distinct,
+        (false, true) => return left.distinct,
+        (false, false) => {},
+    }
+    let (Card::Exact(left_count), Card::Exact(right_count)) = (left.distinct, right.distinct)
+    else {
+        return Card::Unknown;
+    };
+    let Some(((left_min, left_max), (right_min, right_max))) = left
+        .int_range_bounds
+        .zip(right.int_range_bounds)
+        .filter(|((l_min, l_max), (r_min, r_max))| l_min <= l_max && r_min <= r_max)
+    else {
+        return Card::Unknown;
+    };
+    if left_max < right_min || right_max < left_min {
+        return left_count
+            .checked_add(right_count)
+            .map_or(Card::Unknown, Card::Exact);
+    }
+    if left_count == 1
+        && right_count == 1
+        && left_min == left_max
+        && left_min == right_min
+        && right_min == right_max
+    {
+        return Card::Exact(1);
+    }
+    Card::Unknown
 }
 
 /// Row count of a leaf node.
@@ -329,5 +421,88 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stats.int_domain(), Some(2e38));
+    }
+
+    fn scan(rows: u64, distinct: Card, bounds: Option<(i128, i128)>) -> ScanStats {
+        ScanStats::exact_rows(rows).with_columns(ScanColumnStatsMap::from_iter([(
+            PlSmallStr::from_static("key"),
+            ScanColumnStats {
+                distinct,
+                null_count: Card::Exact(0),
+                int_range: bounds,
+                int_range_bounds: bounds,
+                ..Default::default()
+            },
+        )]))
+    }
+
+    #[test]
+    fn concat_requires_disjoint_guaranteed_bounds_for_exact_union() {
+        let left = scan(100, Card::Exact(1), Some((7, 7)));
+        let right = scan(50, Card::Exact(1), Some((42, 42)));
+        let union = ScanStats::concat(&[&left, &right]);
+        let column = union.column("key").unwrap();
+        assert_eq!(column.distinct, Card::Exact(2));
+        assert_eq!(column.int_range_bounds, Some((7, 42)));
+
+        let same = ScanStats::concat(&[&left, &left]);
+        assert_eq!(same.column("key").unwrap().distinct, Card::Exact(1));
+
+        let overlapping = scan(100, Card::Exact(5), Some((0, 100)));
+        let union = ScanStats::concat(&[&overlapping, &overlapping]);
+        assert_eq!(union.column("key").unwrap().distinct, Card::Unknown);
+
+        let mut estimated = right.clone();
+        Arc::make_mut(estimated.columns.as_mut().unwrap())
+            .get_mut("key")
+            .unwrap()
+            .int_range_bounds = None;
+        let union = ScanStats::concat(&[&left, &estimated]);
+        assert_eq!(union.column("key").unwrap().distinct, Card::Unknown);
+        assert_eq!(union.column("key").unwrap().int_range, Some((7, 42)));
+        assert_eq!(union.column("key").unwrap().int_range_bounds, None);
+    }
+
+    #[test]
+    fn concat_empty_inputs_and_null_only_values_are_identity_elements() {
+        let empty = ScanStats::exact_rows(0);
+        assert_eq!(ScanStats::concat(&[]).rows, Card::Exact(0));
+        assert_eq!(ScanStats::concat(&[&empty]).rows, Card::Exact(0));
+        let values = scan(100, Card::Exact(1), Some((7, 7)));
+        let mut nulls = scan(3, Card::Exact(0), None);
+        Arc::make_mut(nulls.columns.as_mut().unwrap())
+            .get_mut("key")
+            .unwrap()
+            .null_count = Card::Exact(3);
+        let union = ScanStats::concat(&[&empty, &nulls, &values, &empty]);
+        assert_eq!(union.rows, Card::Exact(103));
+        let column = union.column("key").unwrap();
+        assert_eq!(column.distinct, Card::Exact(1));
+        assert_eq!(column.null_count, Card::Exact(3));
+        assert_eq!(column.int_range_bounds, Some((7, 7)));
+    }
+
+    #[test]
+    fn concat_count_overflow_does_not_saturate_to_an_exact_value() {
+        let left = scan(
+            u64::MAX,
+            Card::Exact(u64::MAX),
+            Some((0, i128::from(u64::MAX) - 1)),
+        );
+        let right = scan(
+            1,
+            Card::Exact(1),
+            Some((i128::from(u64::MAX), i128::from(u64::MAX))),
+        );
+        let union = ScanStats::concat(&[&left, &right]);
+        assert_eq!(union.rows, Card::Unknown);
+        let column = union.column("key").unwrap();
+        assert_eq!(column.distinct, Card::Unknown);
+        assert_eq!(column.null_count, Card::Exact(0));
+        assert_eq!(column.int_domain(), Some(2f64.powi(64)));
+        assert_eq!(
+            Card::Exact(u64::MAX).checked_add(Card::Exact(1)),
+            Card::Unknown
+        );
     }
 }
