@@ -116,7 +116,14 @@ fn early_filter_safe(node: Node, arena: &Arena<AExpr>, schema: &Schema, depth: u
             function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween { .. }),
             ..
         } if input.len() == 3 => {
-            input.iter().all(|expr| child(expr.node()))
+            let value = input[0].node();
+            let safe_value = if matches!(arena.get(value), AExpr::Cast { .. }) {
+                between_value(value, arena, schema, depth).is_some()
+            } else {
+                child(value)
+            };
+            safe_value
+                && input[1..].iter().all(|expr| child(expr.node()))
                 && convert(node, arena, schema, depth).is_some()
         },
         AExpr::Function {
@@ -182,6 +189,43 @@ fn literal_in_dtype(node: Node, arena: &Arena<AExpr>, dtype: &DataType) -> Optio
         return None;
     };
     polars_scalar_to_vortex_for_dtype(scalar, dtype).map(lit)
+}
+
+#[cfg(feature = "is_between")]
+fn between_value(
+    node: Node,
+    arena: &Arena<AExpr>,
+    schema: &Schema,
+    depth: usize,
+) -> Option<(Expression, DataType)> {
+    #[cfg(feature = "dtype-decimal")]
+    if let AExpr::Cast {
+        expr,
+        dtype: DataType::Decimal(target_precision, target_scale),
+        ..
+    } = arena.get(node)
+    {
+        let AExpr::Column(name) = arena.get(*expr) else {
+            return None;
+        };
+        let source_dtype = schema.get(name)?;
+        let DataType::Decimal(source_precision, source_scale) = source_dtype else {
+            return None;
+        };
+        // Every source value fits after this exact, order-preserving widening.
+        // This exception belongs only to IsBetween, not general residual casts.
+        if !(1..=38).contains(source_precision)
+            || !(1..=38).contains(target_precision)
+            || source_scale > source_precision
+            || target_scale > target_precision
+            || target_scale < source_scale
+            || source_precision.checked_add(target_scale - source_scale)? > *target_precision
+        {
+            return None;
+        }
+        return Some((get_item(name.as_str(), root()), source_dtype.clone()));
+    }
+    convert(node, arena, schema, depth)
 }
 
 /// Convert a complete subtree. Partial conversion occurs only in `file_minterms`.
@@ -266,7 +310,7 @@ fn convert(
             ..
         } if input.len() == 3 => {
             use polars_defs::expr::ClosedInterval;
-            let (value, dtype) = child(input[0].node())?;
+            let (value, dtype) = between_value(input[0].node(), arena, schema, depth - 1)?;
             if !comparable(&dtype) {
                 return None;
             }
@@ -831,5 +875,77 @@ mod tests {
         ]);
         assert!(aexpr_to_vortex_expression(gate, &arena, &schema).is_some());
         assert!(aexpr_to_vortex_expression(predicate, &arena, &schema).is_none());
+    }
+    #[cfg(all(feature = "is_between", feature = "dtype-decimal"))]
+    #[test]
+    fn between_unwraps_only_total_decimal_column_widening() {
+        use polars_core::chunked_array::cast::CastOptions;
+        use polars_defs::expr::ClosedInterval;
+        use polars_vortex::vortex::array::arrays::DecimalArray;
+        use polars_vortex::vortex::dtype::DecimalDType;
+
+        use crate::plans::ExprIR;
+
+        for (source_precision, target_precision, total) in [(6, 8, true), (38, 38, false)] {
+            let mut arena = Arena::default();
+            let column = arena.add(AExpr::Column("amount".into()));
+            let cast = arena.add(AExpr::Cast {
+                expr: column,
+                dtype: DataType::Decimal(target_precision, 4),
+                options: CastOptions::Strict,
+            });
+            let literal = |value| {
+                Scalar::new(
+                    DataType::Decimal(target_precision, 4),
+                    AnyValue::Decimal(value, target_precision, 4),
+                )
+            };
+            let lower = arena.add(AExpr::Literal(literal(-99_999_900).into()));
+            let upper = arena.add(AExpr::Literal(literal(99_999_900).into()));
+            let predicate = arena.add(AExpr::Function {
+                input: vec![
+                    ExprIR::from_node(cast, &arena),
+                    ExprIR::from_node(lower, &arena),
+                    ExprIR::from_node(upper, &arena),
+                ],
+                function: IRFunctionExpr::Boolean(IRBooleanFunction::IsBetween {
+                    closed: ClosedInterval::Both,
+                }),
+                options: crate::prelude::FunctionOptions::elementwise(),
+            });
+            let schema =
+                Schema::from_iter([("amount".into(), DataType::Decimal(source_precision, 2))]);
+            let expression = aexpr_to_vortex_expression(predicate, &arena, &schema);
+            assert_eq!(expression.is_some(), total);
+            if let Some(expression) = expression {
+                let input = StructArray::from_fields(&[(
+                    "amount",
+                    DecimalArray::from_option_iter(
+                        [Some(-999_999i32), Some(-1), Some(0), Some(999_999), None],
+                        DecimalDType::new(6, 2),
+                    )
+                    .into_array(),
+                )])
+                .unwrap()
+                .into_array();
+                let result = input.apply(&expression).unwrap();
+                let frame = vortex_array_to_dataframe(
+                    StructArray::from_fields(&[("result", result)])
+                        .unwrap()
+                        .into_array(),
+                )
+                .unwrap();
+                assert_eq!(
+                    frame
+                        .column("result")
+                        .unwrap()
+                        .bool()
+                        .unwrap()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    vec![Some(true), Some(true), Some(true), Some(true), None]
+                );
+            }
+        }
     }
 }

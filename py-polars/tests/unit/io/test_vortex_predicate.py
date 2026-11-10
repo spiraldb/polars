@@ -471,17 +471,21 @@ def test_native_vortex_preserves_input_dependent_residuals(
 @pytest.mark.parametrize("engine", ["streaming", "in-memory"])
 @pytest.mark.parametrize("push_predicate", [True, False])
 @pytest.mark.parametrize("closed", ["both", "left", "right", "none"])
+@pytest.mark.parametrize("typed_bounds", [False, True])
 def test_native_vortex_between_exact_decimal_bounds(
     typed_predicate_file: tuple[Path, pl.DataFrame],
     closed: Literal["both", "left", "right", "none"],
+    typed_bounds: bool,
     push_predicate: bool,
     engine: Literal["streaming", "in-memory"],
 ) -> None:
     from decimal import Decimal
 
-    predicate = pl.col("amount").is_between(
-        Decimal("0.0000"), Decimal("0.1000"), closed=closed
-    )
+    lower, upper = pl.lit(Decimal("0.0000")), pl.lit(Decimal("0.1000"))
+    if typed_bounds:
+        lower = pl.lit(Decimal("0.00"), dtype=pl.Decimal(12, 2))
+        upper = pl.lit(Decimal("0.10"), dtype=pl.Decimal(12, 2))
+    predicate = pl.col("amount").is_between(lower, upper, closed=closed)
     _assert_typed_predicate(
         typed_predicate_file, predicate, push_predicate, engine, expect_push=True
     )
@@ -506,3 +510,54 @@ def test_native_vortex_list_ordering_error_survives_empty_gate(
         pl.scan_vortex(path, push_predicate=push_predicate).filter(predicate).collect(
             engine=engine
         )
+
+
+@pytest.mark.parametrize("engine", ["streaming", "in-memory"])
+@pytest.mark.parametrize("push_predicate", [True, False])
+def test_native_vortex_between_preserves_decimal_cast_overflow(
+    tmp_path: Path,
+    push_predicate: bool,
+    engine: Literal["streaming", "in-memory"],
+) -> None:
+    from decimal import Decimal
+
+    vx = pytest.importorskip("vortex")
+    pa = pytest.importorskip("pyarrow")
+    boundary = Decimal("9" * 36 + ".99")
+    table = pa.table(
+        {
+            "amount": pa.array(
+                [boundary, boundary.copy_negate()], type=pa.decimal128(38, 2)
+            ),
+            "k": [1, 2],
+        }
+    )
+    path = tmp_path / "between_cast_overflow.vortex"
+    vx.io.write(table, str(path))
+    predicate = (
+        pl.col("amount")
+        .cast(pl.Decimal(38, 4), strict=True)
+        .is_between(
+            pl.lit(Decimal("-1.0000"), dtype=pl.Decimal(38, 4)),
+            pl.lit(Decimal("1.0000"), dtype=pl.Decimal(38, 4)),
+        )
+    )
+    frame = pl.from_arrow(table)
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        frame.lazy().filter(predicate).collect(engine=engine)
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        pl.scan_vortex(path, push_predicate=push_predicate).filter(predicate).collect(
+            engine=engine
+        )
+    gate = pl.col("k") < 0
+    for combined in [predicate & gate, predicate | gate]:
+        reference = frame.lazy().filter(combined)
+        query = pl.scan_vortex(path, push_predicate=push_predicate).filter(combined)
+        # Polars can short-circuit an empty AND gate before the cast.
+        try:
+            expected = reference.collect(engine=engine)
+        except pl.exceptions.PolarsError as error:
+            with pytest.raises(type(error)):
+                query.collect(engine=engine)
+        else:
+            assert_frame_equal(query.collect(engine=engine), expected)
