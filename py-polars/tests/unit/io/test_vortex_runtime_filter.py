@@ -374,3 +374,62 @@ def test_runtime_range_rejects_noninteger_or_indexed_probe_scans(
         attached=False,
         accepted=False,
     )
+
+
+def test_semi_join_runtime_range_preserves_probe_duplicates_and_null_rules(
+    tmp_path: Path, plmonkeypatch: PlMonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    fact = _fact()
+    build = _build([101, 101, 103, None])
+    out, _ = _check_join(
+        lambda scan: scan.join(build, on="k", how="semi"),
+        fact,
+        _write_fact(fact, tmp_path),
+        plmonkeypatch,
+        capfd,
+    )
+    assert out.height == 5
+    assert out["k"].null_count() == 0
+    assert out["row_id"].n_unique() == out.height
+
+
+def test_anti_join_runtime_range_filters_only_the_large_right_probe(
+    tmp_path: Path, plmonkeypatch: PlMonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    fact = _fact()
+    build = _build([101, 6000, None, 101])
+    out, _ = _check_join(
+        lambda scan: build.join(scan, on="k", how="anti"),
+        fact,
+        _write_fact(fact, tmp_path),
+        plmonkeypatch,
+        capfd,
+    )
+    assert out["k"].sort().to_list() == [None, 6000]
+
+
+def test_composite_runtime_join_does_not_hide_a_computed_key_error(
+    tmp_path: Path, plmonkeypatch: PlMonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    fact = _fact().with_columns(
+        pl.when(pl.col("k") == 2)
+        .then(pl.lit("bad"))
+        .otherwise(pl.lit("1"))
+        .alias("text")
+    )
+    paths = _write_fact(fact, tmp_path)
+    build = _build([1]).with_columns(pl.lit(1, dtype=pl.Int64).alias("cast_key"))
+    plmonkeypatch.setenv("POLARS_VERBOSE", "1")
+    for enabled in ["0", "1"]:
+        plmonkeypatch.setenv("POLARS_JOIN_RUNTIME_FILTERS", enabled)
+        query = pl.scan_vortex(paths, cache_mode="off").join(
+            build,
+            left_on=[pl.col("text").cast(pl.Int64, strict=True), pl.col("k")],
+            right_on=["cast_key", "k"],
+        )
+        plan = query.explain(engine="streaming")
+        assert "dynamic_predicate" not in plan, plan
+        capfd.readouterr()
+        with pytest.raises(pl.exceptions.InvalidOperationError, match="conversion"):
+            query.collect(engine="streaming")
+        assert APPLIED_RANGE not in capfd.readouterr().err
