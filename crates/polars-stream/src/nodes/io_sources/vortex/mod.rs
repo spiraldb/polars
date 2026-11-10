@@ -20,13 +20,15 @@ use polars_utils::IdxSize;
 use polars_utils::slice_enum::Slice;
 use polars_vortex::VortexScanOptions;
 use polars_vortex::read::array_bridge::vortex_array_to_dataframe;
-use polars_vortex::read::predicate::polars_to_vortex_predicate;
+use polars_vortex::read::predicate::{
+    polars_to_vortex_predicate, runtime_ranges_to_vortex_predicate,
+};
 use polars_vortex::read::read_at::PolarsVortexReadAt;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
 use polars_vortex::session::ExecutionContext;
 use polars_vortex::vortex::array::ArrayRef;
 use polars_vortex::vortex::error::vortex_ensure;
-use polars_vortex::vortex::expr::{root, select};
+use polars_vortex::vortex::expr::{and, root, select};
 use polars_vortex::vortex::file::{Footer, OpenOptionsSessionExt, VortexFile};
 use polars_vortex::vortex::io::CoalesceConfig;
 use polars_vortex::vortex::io::runtime::Handle;
@@ -59,6 +61,7 @@ pub struct VortexFileReader {
     pub footer: Option<Arc<Footer>>,
     pub byte_source_builder: DynByteSourceBuilder,
     pub aexpr_filter: Option<(polars_vortex::vortex::expr::Expression, SchemaRef)>,
+    pub runtime_filter_schema: Option<SchemaRef>,
     pub io_metrics: OptIOMetrics,
     pub task_metrics: Option<Arc<TaskMetricAggregator>>,
     pub execution_context: ExecutionContext,
@@ -237,6 +240,37 @@ impl FileReader for VortexFileReader {
         } else {
             None
         };
+        let runtime_filter = if self.options.push_predicate
+            && args
+                .predicate
+                .as_ref()
+                .is_some_and(|predicate| !predicate.scan_io_predicate.runtime_ranges.is_empty())
+        {
+            self.runtime_filter_schema
+                .as_ref()
+                .filter(|proof| {
+                    proof
+                        .iter()
+                        .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                        && requested_schema
+                            .iter()
+                            .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                })
+                .and_then(|proof| {
+                    runtime_ranges_to_vortex_predicate(
+                        &args.predicate.as_ref()?.scan_io_predicate.runtime_ranges,
+                        proof,
+                        &st.pl_schema,
+                    )
+                })
+        } else {
+            None
+        };
+        let has_runtime_filter = runtime_filter.is_some();
+        let filter = match (filter, runtime_filter) {
+            (Some(static_filter), Some(runtime_filter)) => Some(and(static_filter, runtime_filter)),
+            (static_filter, runtime_filter) => static_filter.or(runtime_filter),
+        };
         let vxf = st.vxf.clone();
         let height = normalized_slice
             .as_ref()
@@ -323,6 +357,9 @@ impl FileReader for VortexFileReader {
                             );
                         }
                         polars_vortex::read::read_at::record_filter();
+                        if has_runtime_filter && polars_config::config().verbose() {
+                            eprintln!("[vortex]: applied runtime join range");
+                        }
                         if vxf.can_prune(&expression).unwrap_or(false) {
                             return Ok(());
                         }
@@ -358,9 +395,15 @@ impl FileReader for VortexFileReader {
                     let inflight = byte_source.window_inflight_budget();
                     let window = WindowGrowth::for_source(&byte_source, inflight.as_deref());
                     // Reserve in file and split order before any work starts.
-                    for (range, cost) in ranges.into_iter().zip(costs) {
+                    let n_ranges = ranges.len();
+                    for (index, (range, cost)) in ranges.into_iter().zip(costs).enumerate() {
+                        let last_physical = index + 1 == n_ranges;
                         let permit = budget.acquire(cost, window, 1).await;
-                        if prefetch_tx.send((range, permit)).await.is_err() {
+                        if prefetch_tx
+                            .send((range, last_physical, permit))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -370,40 +413,20 @@ impl FileReader for VortexFileReader {
                 let stream = futures::stream::unfold(prefetch_rx, |mut receiver| async move {
                     receiver.recv().await.map(|item| (item, receiver))
                 })
-                .map(move |(range, permit)| {
-                    export_budgeted_split(prepared.clone(), range, runtime.clone(), permit)
+                .map(move |(range, last_physical, permit)| {
+                    export_budgeted_split(
+                        prepared.clone(),
+                        range,
+                        last_physical,
+                        runtime.clone(),
+                        permit,
+                    )
                 })
                 .buffered(concurrency)
                 .filter_map(nonempty_dataframe)
-                .boxed()
-                .peekable();
-                futures::pin_mut!(stream);
-                let mut seq = MorselSeq::default();
-                let source_token = SourceToken::new();
-                while let Some(result) = stream.next().await {
-                    let df = result?;
-                    polars_vortex::read::read_at::record_batch(df.width() as u64);
-                    if disable_morsel_split {
-                        let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
-                        seq = seq.successor();
-                        if tx.send_morsel(morsel).await.is_err() {
-                            return Ok(());
-                        }
-                    } else {
-                        let last = stream.as_mut().peek().await.is_none();
-                        for df in split_to_morsels(
-                            &df,
-                            get_ideal_morsel_size(),
-                            last,
-                            last_morsel_pipelines,
-                        ) {
-                            let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
-                            seq = seq.successor();
-                            if tx.send_morsel(morsel).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
+                .boxed();
+                if !send_morsels(stream, tx, disable_morsel_split, last_morsel_pipelines).await? {
+                    return Ok(());
                 }
                 prefetch
                     .await
@@ -416,22 +439,67 @@ impl FileReader for VortexFileReader {
     }
 }
 
+/// Emit each completed batch without a lookahead through filtered-empty ranges.
+async fn send_morsels(
+    mut stream: futures::stream::BoxStream<'static, PolarsResult<(DataFrame, bool)>>,
+    mut tx: FileReaderOutputSend,
+    disable_morsel_split: bool,
+    last_morsel_pipelines: usize,
+) -> PolarsResult<bool> {
+    let mut seq = MorselSeq::default();
+    let source_token = SourceToken::new();
+    while let Some(result) = stream.next().await {
+        let (df, last_physical) = result?;
+        polars_vortex::read::read_at::record_batch(df.width() as u64);
+        if disable_morsel_split {
+            let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
+            seq = seq.successor();
+            if tx.send_morsel(morsel).await.is_err() {
+                return Ok(false);
+            }
+        } else {
+            // Empty final ranges can leave the preceding batch with ordinary fanout.
+            for df in split_to_morsels(
+                &df,
+                get_ideal_morsel_size(),
+                last_physical,
+                last_morsel_pipelines,
+            ) {
+                let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
+                seq = seq.successor();
+                if tx.send_morsel(morsel).await.is_err() {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn export_budgeted_split(
     prepared: Arc<RepeatedScan<ArrayRef>>,
     range: Range<u64>,
+    last_physical: bool,
     runtime: Handle,
     permit: PipelinePermit,
-) -> BoxFuture<'static, (PolarsResult<Option<DataFrame>>, PipelinePermit)> {
-    async move { (export_split(prepared, range, runtime).await, permit) }.boxed()
+) -> BoxFuture<'static, (PolarsResult<Option<DataFrame>>, bool, PipelinePermit)> {
+    async move {
+        (
+            export_split(prepared, range, runtime).await,
+            last_physical,
+            permit,
+        )
+    }
+    .boxed()
 }
 
 fn nonempty_dataframe(
-    (result, permit): (PolarsResult<Option<DataFrame>>, PipelinePermit),
-) -> futures::future::Ready<Option<PolarsResult<DataFrame>>> {
-    // Release before a lookahead or a blocked output consumer.
+    (result, last_physical, permit): (PolarsResult<Option<DataFrame>>, bool, PipelinePermit),
+) -> futures::future::Ready<Option<PolarsResult<(DataFrame, bool)>>> {
+    // Release before a blocked output consumer.
     drop(permit);
     futures::future::ready(match result {
-        Ok(Some(df)) if df.height() > 0 => Some(Ok(df)),
+        Ok(Some(df)) if df.height() > 0 => Some(Ok((df, last_physical))),
         Ok(_) => None,
         Err(error) => Some(Err(error)),
     })

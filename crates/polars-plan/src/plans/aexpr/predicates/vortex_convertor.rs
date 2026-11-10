@@ -29,19 +29,41 @@ pub fn aexpr_to_vortex_expression(
 /// Select complete Boolean conjuncts that reference physical columns.
 /// Unsupported children of OR and NOT remain together in the residual filter.
 pub fn file_minterms(node: Node, arena: &Arena<AExpr>, schema: &Schema) -> Vec<Expression> {
+    safe_vortex_filter_parts(node, arena, schema).unwrap_or_default()
+}
+
+/// Prove the complete residual safe and return its converted physical conjuncts.
+/// `None` rejects early filtering. An empty vector retains a dynamic-only proof.
+pub fn safe_vortex_filter_parts(
+    node: Node,
+    arena: &Arena<AExpr>,
+    schema: &Schema,
+) -> Option<Vec<Expression>> {
     // Early filtering can hide a data-dependent error in an unsupported residual.
-    if !early_filter_safe(node, arena, schema, 128) {
-        return Vec::new();
+    if !aexpr_is_safe_for_vortex_prefilter(node, arena, schema) {
+        return None;
     }
-    MintermIter::new(node, arena)
-        .filter(|term| {
-            aexpr_to_leaf_names_iter(*term, arena).all(|name| schema.contains(name.as_str()))
-        })
-        .filter_map(|term| {
-            let (expr, dtype) = convert(term, arena, schema, 128)?;
-            (dtype == DataType::Boolean).then_some(expr)
-        })
-        .collect()
+    Some(
+        MintermIter::new(node, arena)
+            .filter(|term| {
+                aexpr_to_leaf_names_iter(*term, arena).all(|name| schema.contains(name.as_str()))
+            })
+            .filter_map(|term| {
+                let (expr, dtype) = convert(term, arena, schema, 128)?;
+                (dtype == DataType::Boolean).then_some(expr)
+            })
+            .collect(),
+    )
+}
+
+/// Prove that early row removal preserves the complete residual predicate.
+/// This proof is separate from static conversion for dynamic-only predicates.
+pub fn aexpr_is_safe_for_vortex_prefilter(
+    node: Node,
+    arena: &Arena<AExpr>,
+    schema: &Schema,
+) -> bool {
+    early_filter_safe(node, arena, schema, 128)
 }
 
 // A residual must remain rowwise and total after early row removal. Shape-changing
@@ -53,6 +75,31 @@ fn early_filter_safe(node: Node, arena: &Arena<AExpr>, schema: &Schema, depth: u
     let child = |node| early_filter_safe(node, arena, schema, depth - 1);
     match arena.get(node) {
         AExpr::Column(_) | AExpr::Literal(LiteralValue::Scalar(_)) => true,
+        AExpr::Function {
+            input,
+            function: IRFunctionExpr::DynamicPred { pred },
+            ..
+        } if input.len() == 1 => {
+            let AExpr::Column(name) = arena.get(input[0].node()) else {
+                return false;
+            };
+            pred.is_immutable_join_filter()
+                && polars_io::predicates::DynamicPredicateSource::read_order(pred).is_none()
+                && schema.get(name).is_some_and(|dtype| {
+                    matches!(
+                        dtype,
+                        DataType::Int8
+                            | DataType::Int16
+                            | DataType::Int32
+                            | DataType::Int64
+                            | DataType::UInt8
+                            | DataType::UInt16
+                            | DataType::UInt32
+                            | DataType::UInt64
+                    )
+                })
+        },
+
         AExpr::BinaryExpr { left, op, right } => {
             if !child(*left) || !child(*right) {
                 return false;
@@ -947,5 +994,189 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn trusted_pending_join_preserves_static_conjuncts_only() {
+        use crate::plans::new_dynamic_pred;
+        use crate::plans::optimizer::new_immutable_join_pred;
+        let mut arena = Arena::default();
+        let key = arena.add(AExpr::Column("key".into()));
+        let column = arena.add(AExpr::Column("x".into()));
+        let zero = arena.add(AExpr::Literal(Scalar::from(0i64).into()));
+        let positive = arena.add(AExpr::BinaryExpr {
+            left: column,
+            op: Operator::Gt,
+            right: zero,
+        });
+        let (trusted, _producer) = new_immutable_join_pred(key, &mut arena);
+        let predicate = arena.add(AExpr::BinaryExpr {
+            left: trusted,
+            op: Operator::LogicalAnd,
+            right: positive,
+        });
+        let schema = Schema::from_iter([
+            ("key".into(), DataType::Int64),
+            ("x".into(), DataType::Int64),
+        ]);
+        assert!(aexpr_is_safe_for_vortex_prefilter(trusted, &arena, &schema));
+        assert!(aexpr_to_vortex_expression(trusted, &arena, &schema).is_none());
+        assert!(
+            safe_vortex_filter_parts(trusted, &arena, &schema)
+                .unwrap()
+                .is_empty()
+        );
+        let negated = AExprBuilder::new_from_node(trusted).not(&mut arena).node();
+        let disjunction = arena.add(AExpr::BinaryExpr {
+            left: trusted,
+            op: Operator::LogicalOr,
+            right: positive,
+        });
+        assert!(aexpr_to_vortex_expression(negated, &arena, &schema).is_none());
+        assert!(aexpr_to_vortex_expression(disjunction, &arena, &schema).is_none());
+        let expression = aexpr_to_vortex_expression(predicate, &arena, &schema).unwrap();
+        let input =
+            StructArray::from_fields(&[("x", PrimitiveArray::from_iter([-1i64, 1]).into_array())])
+                .unwrap()
+                .into_array();
+        let result = input.apply(&expression).unwrap();
+        let frame = vortex_array_to_dataframe(
+            StructArray::from_fields(&[("result", result)])
+                .unwrap()
+                .into_array(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame
+                .column("result")
+                .unwrap()
+                .bool()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some(false), Some(true)]
+        );
+        for order in [None, Some(polars_io::predicates::ReadOrder::LowFirst)] {
+            let (unknown, _producer) = new_dynamic_pred(key, &mut arena, order);
+            let predicate = arena.add(AExpr::BinaryExpr {
+                left: unknown,
+                op: Operator::LogicalAnd,
+                right: positive,
+            });
+            assert!(!aexpr_is_safe_for_vortex_prefilter(
+                predicate, &arena, &schema
+            ));
+            assert!(aexpr_to_vortex_expression(predicate, &arena, &schema).is_none());
+            assert!(safe_vortex_filter_parts(predicate, &arena, &schema).is_none());
+        }
+        let bad_cast = arena.add(AExpr::Cast {
+            expr: column,
+            dtype: DataType::UInt64,
+            options: polars_core::chunked_array::cast::CastOptions::Strict,
+        });
+        let residual = arena.add(AExpr::BinaryExpr {
+            left: bad_cast,
+            op: Operator::Gt,
+            right: zero,
+        });
+        let predicate = arena.add(AExpr::BinaryExpr {
+            left: trusted,
+            op: Operator::LogicalAnd,
+            right: residual,
+        });
+        assert!(!aexpr_is_safe_for_vortex_prefilter(
+            predicate, &arena, &schema
+        ));
+        assert!(aexpr_to_vortex_expression(predicate, &arena, &schema).is_none());
+    }
+    #[cfg(all(feature = "dtype-date", feature = "is_in"))]
+    #[test]
+    fn pending_join_keeps_date_and_literal_membership_pushdown() {
+        use polars_core::prelude::{NamedFrom, Series};
+        use polars_vortex::vortex::array::arrays::{TemporalArray, VarBinViewArray};
+        use polars_vortex::vortex::array::extension::datetime::TimeUnit;
+
+        use crate::plans::ExprIR;
+        use crate::plans::optimizer::new_immutable_join_pred;
+        let mut arena = Arena::default();
+        let key = arena.add(AExpr::Column("key".into()));
+        let (dynamic, _producer) = new_immutable_join_pred(key, &mut arena);
+        let day = arena.add(AExpr::Column("day".into()));
+        let epoch = arena.add(AExpr::Literal(
+            Scalar::new(DataType::Date, AnyValue::Date(0)).into(),
+        ));
+        let date = arena.add(AExpr::BinaryExpr {
+            left: day,
+            op: Operator::Lt,
+            right: epoch,
+        });
+        let text = arena.add(AExpr::Column("text".into()));
+        let values = Series::new("".into(), ["alpha"]);
+        let values = arena.add(AExpr::Literal(
+            Scalar::new(
+                DataType::List(Box::new(DataType::String)),
+                AnyValue::List(values),
+            )
+            .into(),
+        ));
+        let membership = arena.add(AExpr::Function {
+            input: vec![
+                ExprIR::from_node(text, &arena),
+                ExprIR::from_node(values, &arena),
+            ],
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsIn {
+                nulls_equal: false,
+                needle_cast: None,
+            }),
+            options: crate::prelude::FunctionOptions::elementwise(),
+        });
+        let statics = arena.add(AExpr::BinaryExpr {
+            left: date,
+            op: Operator::LogicalAnd,
+            right: membership,
+        });
+        let predicate = arena.add(AExpr::BinaryExpr {
+            left: dynamic,
+            op: Operator::LogicalAnd,
+            right: statics,
+        });
+        let schema = Schema::from_iter([
+            ("key".into(), DataType::Int64),
+            ("day".into(), DataType::Date),
+            ("text".into(), DataType::String),
+        ]);
+        let expression = aexpr_to_vortex_expression(predicate, &arena, &schema).unwrap();
+        let input = StructArray::from_fields(&[
+            (
+                "day",
+                TemporalArray::new_date(
+                    PrimitiveArray::from_option_iter([Some(-1i32), Some(1), None]).into_array(),
+                    TimeUnit::Days,
+                )
+                .into_array(),
+            ),
+            (
+                "text",
+                VarBinViewArray::from_iter_str(["alpha", "beta", "alpha"]).into_array(),
+            ),
+        ])
+        .unwrap()
+        .into_array();
+        let result = input.apply(&expression).unwrap();
+        let frame = vortex_array_to_dataframe(
+            StructArray::from_fields(&[("result", result)])
+                .unwrap()
+                .into_array(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame
+                .column("result")
+                .unwrap()
+                .bool()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some(true), Some(false), None]
+        );
     }
 }

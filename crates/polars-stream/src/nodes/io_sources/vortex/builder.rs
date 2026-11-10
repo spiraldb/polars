@@ -25,6 +25,7 @@ pub struct VortexReaderBuilder {
     pub options: Arc<VortexScanOptions>,
     pub first_metadata: Option<Arc<vortex::file::Footer>>,
     pub aexpr_filter: Option<(vortex::expr::Expression, polars_core::schema::SchemaRef)>,
+    pub runtime_filter_schema: Option<polars_core::schema::SchemaRef>,
     pub io_metrics: OnceLock<Arc<IOMetrics>>,
     pub task_metrics: OnceLock<Arc<TaskMetricAggregator>>,
     pub execution_context: OnceLock<ExecutionContext>,
@@ -98,6 +99,7 @@ impl FileReaderBuilder for VortexReaderBuilder {
             cloud_options,
             options: self.options.clone(),
             aexpr_filter: self.aexpr_filter.clone(),
+            runtime_filter_schema: self.runtime_filter_schema.clone(),
             footer: if scan_source_idx == 0 {
                 self.first_metadata.clone()
             } else {

@@ -37,6 +37,7 @@ mod filter_constraint;
 mod ir_traversal;
 mod parquet_metadata_prune;
 mod predicate_pushdown;
+pub(crate) use predicate_pushdown::new_immutable_join_pred;
 mod projection_pushdown;
 mod recursive_caches;
 mod repeated_keys;

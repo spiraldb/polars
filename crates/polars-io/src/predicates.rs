@@ -536,6 +536,11 @@ pub enum ReadOrder {
 pub trait DynamicPredicateSource: Send + Sync {
     fn runtime_range(&self) -> RuntimeRange;
 
+    /// A total key predicate that a join publishes once and checks again itself.
+    fn is_immutable_join_filter(&self) -> bool {
+        false
+    }
+
     fn read_order(&self) -> Option<ReadOrder> {
         None
     }

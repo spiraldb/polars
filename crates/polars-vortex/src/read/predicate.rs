@@ -1,11 +1,14 @@
 //! Semantics-preserving static predicates for the native reader.
 use polars_core::prelude::{AnyValue, DataType, Schema};
 use polars_core::scalar::Scalar;
-use polars_io::predicates::{ScanIOPredicate, SpecializedColumnPredicate};
+use polars_io::predicates::{
+    RuntimeRange, RuntimeRangeHint, ScanIOPredicate, SpecializedColumnPredicate,
+};
 use polars_utils::pl_str::PlSmallStr;
 use vortex::dtype::Nullability;
 use vortex::expr::{
-    Expression, and, and_collect, eq, get_item, gt_eq, is_null, like, lit, lt_eq, or_collect, root,
+    Expression, and, and_collect, eq, get_item, gt_eq, is_null, like, lit, lt_eq, not, or,
+    or_collect, root,
 };
 use vortex::scalar::Scalar as VortexScalar;
 
@@ -43,6 +46,100 @@ pub fn polars_to_vortex_predicate(
         .collect();
     and_collect(expressions?)
 }
+/// Translate conjunctive range hints after the planner proves the whole residual safe.
+/// The caller must keep the complete Polars predicate and its producer-side recheck.
+/// A snapshot is valid only for a trusted, immutable join producer.
+pub fn runtime_ranges_to_vortex_predicate(
+    hints: &[RuntimeRangeHint],
+    logical: &Schema,
+    physical: &Schema,
+) -> Option<Expression> {
+    // Early filtering must not hide a projection cast failure on another column.
+    if logical
+        .iter()
+        .any(|(name, dtype)| physical.get(name) != Some(dtype))
+    {
+        return None;
+    }
+    and_collect(
+        hints
+            .iter()
+            .filter_map(|hint| runtime_range_expression(hint, logical, physical)),
+    )
+}
+
+fn runtime_range_expression(
+    hint: &RuntimeRangeHint,
+    logical: &Schema,
+    physical: &Schema,
+) -> Option<Expression> {
+    if hint.constant.is_some()
+        || hint.order_keeping_expr.is_some()
+        || !hint.source.is_immutable_join_filter()
+        || hint.source.read_order().is_some()
+    {
+        return None;
+    }
+    let dtype = logical.get(&hint.column)?;
+    if physical.get(&hint.column) != Some(dtype)
+        || !matches!(
+            dtype,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+        )
+    {
+        return None;
+    }
+    let range = hint.source.runtime_range();
+    if !hint.source.can_bypass() {
+        return None;
+    }
+    match range {
+        RuntimeRange::Pending | RuntimeRange::Disabled => None,
+        RuntimeRange::Empty => Some(lit(false)),
+        RuntimeRange::Range {
+            lo,
+            hi,
+            nulls_match,
+        } => {
+            // Bounds must already be in the physical column's exact dtype.
+            let bound = |value: &Scalar| {
+                if value.dtype() != dtype || value.value().dtype() != *dtype || value.is_null() {
+                    return None;
+                }
+                polars_scalar_to_vortex_for_dtype(value, dtype).map(lit)
+            };
+            if let (Some(lo), Some(hi)) = (&lo, &hi) {
+                let lower = lo.value().extract::<i128>()?;
+                let upper = hi.value().extract::<i128>()?;
+                if lower > upper {
+                    return None;
+                }
+            }
+            let column = get_item(hint.column.as_str(), root());
+            let mut expressions = Vec::with_capacity(2);
+            if let Some(lo) = lo {
+                expressions.push(gt_eq(column.clone(), bound(&lo)?));
+            }
+            if let Some(hi) = hi {
+                expressions.push(lt_eq(column.clone(), bound(&hi)?));
+            }
+            match and_collect(expressions) {
+                Some(expression) if nulls_match => Some(or(is_null(column), expression)),
+                Some(expression) => Some(expression),
+                None if nulls_match => None,
+                None => Some(not(is_null(column))),
+            }
+        },
+    }
+}
+
 fn safe_dtype(dtype: &DataType) -> bool {
     match dtype {
         DataType::Boolean
@@ -355,6 +452,232 @@ mod tests {
         );
         assert!(
             polars_scalar_to_vortex_for_dtype(&Scalar::null(target.clone()), &target).is_none()
+        );
+    }
+    struct RangeSource {
+        range: RuntimeRange,
+        trusted: bool,
+        bypass: bool,
+        ordered: bool,
+    }
+    impl polars_io::predicates::DynamicPredicateSource for RangeSource {
+        fn runtime_range(&self) -> RuntimeRange {
+            self.range.clone()
+        }
+        fn filters_rows(&self) -> bool {
+            false
+        }
+        fn can_bypass(&self) -> bool {
+            self.bypass
+        }
+        fn is_immutable_join_filter(&self) -> bool {
+            self.trusted
+        }
+        fn read_order(&self) -> Option<polars_io::predicates::ReadOrder> {
+            self.ordered
+                .then_some(polars_io::predicates::ReadOrder::LowFirst)
+        }
+    }
+    fn range_hint(range: RuntimeRange) -> RuntimeRangeHint {
+        RuntimeRangeHint {
+            column: "x".into(),
+            order_keeping_expr: None,
+            constant: None,
+            source: Arc::new(RangeSource {
+                range,
+                trusted: true,
+                bypass: true,
+                ordered: false,
+            }),
+        }
+    }
+    fn range_mask(expression: Expression) -> Vec<Option<bool>> {
+        use vortex::array::IntoArray;
+        use vortex::array::arrays::{PrimitiveArray, StructArray};
+        let input = StructArray::from_fields(&[(
+            "x",
+            PrimitiveArray::from_option_iter([
+                None,
+                Some(-1i64),
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+            ])
+            .into_array(),
+        )])
+        .unwrap()
+        .into_array();
+        let result = input.apply(&expression).unwrap();
+        let frame = crate::read::array_bridge::vortex_array_to_dataframe(
+            StructArray::from_fields(&[("result", result)])
+                .unwrap()
+                .into_array(),
+        )
+        .unwrap();
+        frame
+            .column("result")
+            .unwrap()
+            .bool()
+            .unwrap()
+            .iter()
+            .collect()
+    }
+    #[test]
+    fn immutable_runtime_range_execution_preserves_bounds_and_nulls() {
+        let schema = Schema::from_iter([("x".into(), DataType::Int64)]);
+        for nulls_match in [false, true] {
+            let hint = range_hint(RuntimeRange::Range {
+                lo: Some(Scalar::from(0i64)),
+                hi: Some(Scalar::from(2i64)),
+                nulls_match,
+            });
+            let expression = runtime_ranges_to_vortex_predicate(&[hint], &schema, &schema).unwrap();
+            let null_value = if nulls_match { Some(true) } else { None };
+            assert_eq!(
+                range_mask(expression),
+                vec![
+                    null_value,
+                    Some(false),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(false)
+                ]
+            );
+        }
+        let empty = range_hint(RuntimeRange::Empty);
+        assert_eq!(
+            range_mask(runtime_ranges_to_vortex_predicate(&[empty], &schema, &schema).unwrap()),
+            vec![Some(false); 6]
+        );
+        for state in [RuntimeRange::Pending, RuntimeRange::Disabled] {
+            assert!(
+                runtime_ranges_to_vortex_predicate(&[range_hint(state)], &schema, &schema)
+                    .is_none()
+            );
+        }
+        let unbounded = range_hint(RuntimeRange::Range {
+            lo: None,
+            hi: None,
+            nulls_match: false,
+        });
+        assert_eq!(
+            range_mask(runtime_ranges_to_vortex_predicate(&[unbounded], &schema, &schema).unwrap()),
+            vec![
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true)
+            ]
+        );
+        assert!(
+            runtime_ranges_to_vortex_predicate(
+                &[range_hint(RuntimeRange::Range {
+                    lo: None,
+                    hi: None,
+                    nulls_match: true
+                })],
+                &schema,
+                &schema
+            )
+            .is_none()
+        );
+    }
+    #[test]
+    fn runtime_range_rejects_unproven_producers_and_bounds() {
+        let schema = Schema::from_iter([("x".into(), DataType::Int64)]);
+        for (trusted, bypass, ordered) in [
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let mut hint = range_hint(RuntimeRange::Empty);
+            hint.source = Arc::new(RangeSource {
+                range: RuntimeRange::Empty,
+                trusted,
+                bypass,
+                ordered,
+            });
+            assert!(runtime_ranges_to_vortex_predicate(&[hint], &schema, &schema).is_none());
+        }
+        for (lo, hi) in [
+            (Scalar::from(0u64), Scalar::from(2u64)),
+            (Scalar::null(DataType::Int64), Scalar::from(2i64)),
+            (Scalar::from(3i64), Scalar::from(2i64)),
+        ] {
+            let hint = range_hint(RuntimeRange::Range {
+                lo: Some(lo),
+                hi: Some(hi),
+                nulls_match: false,
+            });
+            assert!(runtime_ranges_to_vortex_predicate(&[hint], &schema, &schema).is_none());
+        }
+        let malformed = range_hint(RuntimeRange::Range {
+            lo: Some(Scalar::new(DataType::Int64, AnyValue::UInt64(0))),
+            hi: None,
+            nulls_match: false,
+        });
+        assert!(runtime_ranges_to_vortex_predicate(&[malformed], &schema, &schema).is_none());
+        let other = Schema::from_iter([("x".into(), DataType::UInt64)]);
+        assert!(
+            runtime_ranges_to_vortex_predicate(&[range_hint(RuntimeRange::Empty)], &schema, &other)
+                .is_none()
+        );
+        let mut constant = range_hint(RuntimeRange::Empty);
+        constant.constant = Some(Scalar::from(0i64));
+        assert!(runtime_ranges_to_vortex_predicate(&[constant], &schema, &schema).is_none());
+        struct Identity;
+        impl polars_io::predicates::ColumnIoExpr for Identity {
+            fn evaluate_io(&self, df: &DataFrame) -> PolarsResult<Column> {
+                df.column("x").cloned()
+            }
+        }
+        let mut computed = range_hint(RuntimeRange::Empty);
+        computed.order_keeping_expr = Some(Arc::new(Identity));
+        assert!(runtime_ranges_to_vortex_predicate(&[computed], &schema, &schema).is_none());
+    }
+    #[test]
+    fn unsigned_runtime_range_keeps_u64_extremes() {
+        use vortex::array::IntoArray;
+        use vortex::array::arrays::{PrimitiveArray, StructArray};
+        let schema = Schema::from_iter([("x".into(), DataType::UInt64)]);
+        let hint = range_hint(RuntimeRange::Range {
+            lo: Some(Scalar::from(u64::MAX - 1)),
+            hi: Some(Scalar::from(u64::MAX)),
+            nulls_match: false,
+        });
+        let expression = runtime_ranges_to_vortex_predicate(&[hint], &schema, &schema).unwrap();
+        let input = StructArray::from_fields(&[(
+            "x",
+            PrimitiveArray::from_option_iter([
+                Some(0u64),
+                Some(u64::MAX - 1),
+                Some(u64::MAX),
+                None,
+            ])
+            .into_array(),
+        )])
+        .unwrap()
+        .into_array();
+        let result = input.apply(&expression).unwrap();
+        let frame = crate::read::array_bridge::vortex_array_to_dataframe(
+            StructArray::from_fields(&[("result", result)])
+                .unwrap()
+                .into_array(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame
+                .column("result")
+                .unwrap()
+                .bool()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some(false), Some(true), Some(true), None]
         );
     }
 }

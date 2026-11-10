@@ -68,6 +68,8 @@ struct Inner {
     id: UniqueId,
     #[cfg_attr(feature = "ir_serde", serde(skip))]
     read_order: Option<ReadOrder>,
+    #[cfg_attr(feature = "ir_serde", serde(skip))]
+    immutable_join_filter: bool,
 }
 
 #[derive(Clone)]
@@ -118,12 +120,17 @@ impl Hash for DynamicPred {
 
 impl DynamicPred {
     fn new(read_order: Option<ReadOrder>) -> Self {
+        Self::with_join_origin(read_order, false)
+    }
+
+    fn with_join_origin(read_order: Option<ReadOrder>, immutable_join_filter: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
                 pred: Default::default(),
                 is_set: Default::default(),
                 id: UniqueId::new(),
                 read_order,
+                immutable_join_filter,
             }),
         }
     }
@@ -154,6 +161,12 @@ impl DynamicPred {
 }
 
 impl DynamicPredWeakRef {
+    pub fn is_immutable_join_filter(&self) -> bool {
+        self.inner
+            .upgrade()
+            .is_some_and(|inner| inner.immutable_join_filter)
+    }
+
     pub fn id(&self) -> Option<UniqueId> {
         Some(self.inner.upgrade()?.id)
     }
@@ -193,6 +206,10 @@ impl DynamicPredWeakRef {
 }
 
 impl DynamicPredicateSource for DynamicPredWeakRef {
+    fn is_immutable_join_filter(&self) -> bool {
+        DynamicPredWeakRef::is_immutable_join_filter(self)
+    }
+
     fn runtime_range(&self) -> RuntimeRange {
         let Some(inner) = self.inner.upgrade() else {
             return RuntimeRange::Disabled;
@@ -243,6 +260,19 @@ pub fn new_dynamic_pred(
     read_order: Option<ReadOrder>,
 ) -> (Node, DynamicPred) {
     let pred = DynamicPred::new(read_order);
+    dynamic_pred_node(node, arena, pred)
+}
+
+/// Only join producers use this origin. They publish a fixed key filter or a trivial predicate.
+pub(crate) fn new_immutable_join_pred(node: Node, arena: &mut Arena<AExpr>) -> (Node, DynamicPred) {
+    dynamic_pred_node(node, arena, DynamicPred::with_join_origin(None, true))
+}
+
+fn dynamic_pred_node(
+    node: Node,
+    arena: &mut Arena<AExpr>,
+    pred: DynamicPred,
+) -> (Node, DynamicPred) {
     let function = IRFunctionExpr::DynamicPred {
         pred: pred.downgrade(),
     };

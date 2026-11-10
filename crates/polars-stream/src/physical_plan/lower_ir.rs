@@ -1054,20 +1054,27 @@ fn lower_ir_inner(
                         if let Some(name) = unified_scan_args.include_file_paths.as_ref() {
                             schema.remove(name);
                         }
-                        let aexpr_filter = if options.push_predicate {
+                        let schema = Arc::new(schema);
+                        let filter_parts = if options.push_predicate {
                             predicate.as_ref().and_then(|predicate| {
-                                polars_plan::plans::predicates::vortex_convertor::aexpr_to_vortex_expression(
+                                polars_plan::plans::predicates::vortex_convertor::safe_vortex_filter_parts(
                                     predicate.node(), expr_arena, &schema,
-                                ).map(|expression| (expression, Arc::new(schema)))
+                                )
                             })
                         } else {
                             None
                         };
+                        let runtime_filter_schema =
+                            filter_parts.as_ref().map(|_| Arc::clone(&schema));
+                        let aexpr_filter = filter_parts
+                            .and_then(polars_vortex::vortex::expr::and_collect)
+                            .map(|expression| (expression, Arc::clone(&schema)));
                         Arc::new(
                             crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
                                 options: Arc::new(options.clone()),
                                 first_metadata: first_metadata.clone(),
                                 aexpr_filter,
+                                runtime_filter_schema,
                                 io_metrics: std::sync::OnceLock::new(),
                                 task_metrics: std::sync::OnceLock::new(),
                                 execution_context: std::sync::OnceLock::new(),
