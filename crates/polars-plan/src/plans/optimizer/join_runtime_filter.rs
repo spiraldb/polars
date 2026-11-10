@@ -48,7 +48,7 @@ use super::pushdown_maintain_errors;
 use crate::dsl::{FileScanIR, ScanFlags};
 use crate::plans::aexpr::deep_clone_ae;
 use crate::plans::aexpr::predicates::supports_runtime_range;
-use crate::plans::optimizer::predicate_pushdown::{DynamicPred, new_dynamic_pred};
+use crate::plans::optimizer::{DynamicPred, new_immutable_join_pred};
 use crate::plans::options::{MAX_BUILD_PROBE_DISTINCT_RATIO, RuntimeFilter};
 use crate::plans::schema::join_right_output_names;
 use crate::plans::stats::StatsCache;
@@ -305,6 +305,7 @@ fn trace_probe_keys(
     scratch: &mut UnitVec<Node>,
 ) -> Vec<TracedKey> {
     let probe_schema = ir_arena.get(probe_input).schema(ir_arena).into_owned();
+    let direct_probe_keys = probe_keys.iter().all(Option::is_some);
     let mut traced = Vec::new();
     for (key_idx, name) in probe_keys.into_iter().enumerate() {
         let Some(name) = name else { continue };
@@ -312,9 +313,16 @@ fn trace_probe_keys(
             continue;
         }
         let column = expr_arena.add(AExpr::Column(name));
-        let (dyn_node, pred) = new_dynamic_pred(column, expr_arena, None);
+        let (dyn_node, pred) = new_immutable_join_pred(column, expr_arena);
         let predicate = ExprIR::from_node(dyn_node, expr_arena);
-        let origins = scan_origins(probe_input, predicate, ir_arena, expr_arena, scratch);
+        let origins = scan_origins(
+            probe_input,
+            predicate,
+            direct_probe_keys,
+            ir_arena,
+            expr_arena,
+            scratch,
+        );
         if !origins.is_empty() {
             traced.push(TracedKey {
                 key_idx,
@@ -358,6 +366,7 @@ fn is_eligible_join(options: &JoinOptionsIR, expr_arena: &Arena<AExpr>) -> bool 
 fn scan_origins(
     node: Node,
     predicate: ExprIR,
+    vortex_route_safe: bool,
     ir_arena: &Arena<IR>,
     expr_arena: &mut Arena<AExpr>,
     scratch: &mut UnitVec<Node>,
@@ -369,11 +378,50 @@ fn scan_origins(
     };
     let maintain_errors = pushdown_maintain_errors();
     let mut origins = PlIndexMap::default();
-    let mut paths = vec![(node, predicate)];
-    'paths: while let Some((mut node, mut predicate)) = paths.pop() {
+    let mut paths = vec![(node, predicate, vortex_route_safe)];
+    'paths: while let Some((mut node, mut predicate, mut vortex_route_safe)) = paths.pop() {
         loop {
             match ir_arena.get(node) {
-                IR::Scan { scan_type, .. } => {
+                IR::Scan {
+                    scan_type,
+                    file_info: _file_info,
+                    hive_parts: _hive_parts,
+                    unified_scan_args: _scan_args,
+                    predicate: _scan_predicate,
+                    ..
+                } => {
+                    #[cfg(feature = "vortex")]
+                    if matches!(scan_type.as_ref(), FileScanIR::Vortex { .. }) {
+                        use polars_core::prelude::DataType;
+                        let name = column_name(&predicate, expr_arena);
+                        if !vortex_route_safe
+                            || _scan_args.row_index.is_some()
+                            || _scan_args.include_file_paths.as_ref() == Some(name)
+                            || _hive_parts
+                                .as_ref()
+                                .is_some_and(|hive| hive.schema().contains(name))
+                            || !_file_info.schema.get(name).is_some_and(|dtype| {
+                                matches!(
+                                    dtype,
+                                    DataType::Int8
+                                        | DataType::Int16
+                                        | DataType::Int32
+                                        | DataType::Int64
+                                        | DataType::UInt8
+                                        | DataType::UInt16
+                                        | DataType::UInt32
+                                        | DataType::UInt64
+                                )
+                            })
+                            || _scan_predicate.as_ref().is_some_and(|predicate| {
+                                !crate::plans::predicates::vortex_convertor::aexpr_is_safe_for_vortex_prefilter(
+                                    predicate.node(), expr_arena, &_file_info.schema,
+                                )
+                            })
+                        {
+                            continue 'paths;
+                        }
+                    }
                     if skips_batches(scan_type) {
                         origins.entry(node).or_insert(predicate);
                     }
@@ -391,6 +439,10 @@ fn scan_origins(
                 | IR::Filter { .. }
                 | IR::Select { .. }
                 | IR::HStack { .. } => {
+                    #[cfg(feature = "vortex")]
+                    {
+                        vortex_route_safe &= vortex_route_node_safe(node, ir_arena, expr_arena);
+                    }
                     match push_past(
                         node,
                         &mut predicate,
@@ -409,7 +461,11 @@ fn scan_origins(
                     // refer to stays the one the join publishes.
                     for &input in inputs.iter().rev() {
                         let copy = deep_clone_ae(predicate.node(), expr_arena);
-                        paths.push((input, ExprIR::from_node(copy, expr_arena)));
+                        paths.push((
+                            input,
+                            ExprIR::from_node(copy, expr_arena),
+                            vortex_route_safe,
+                        ));
                     }
                     continue 'paths;
                 },
@@ -419,6 +475,16 @@ fn scan_origins(
                     options,
                     ..
                 } => {
+                    #[cfg(feature = "vortex")]
+                    {
+                        vortex_route_safe &= match &options.options {
+                            JoinTypeOptionsIR::Equi { on, .. } => on.iter().all(|(left, right)| {
+                                into_column(left.node(), expr_arena).is_some()
+                                    && into_column(right.node(), expr_arena).is_some()
+                            }),
+                            _ => false,
+                        };
+                    }
                     // A preferred side is only read first when the join carries runtime
                     // filters; an ordinary preference samples both sides at once.
                     let sequential = !options.runtime_filters.is_empty();
@@ -470,6 +536,27 @@ fn scan_origins(
         }
     }
     origins
+}
+
+#[cfg(feature = "vortex")]
+fn vortex_route_node_safe(node: Node, ir_arena: &Arena<IR>, expr_arena: &Arena<AExpr>) -> bool {
+    let (input, expressions) = match ir_arena.get(node) {
+        IR::SimpleProjection { .. } => return true,
+        IR::Filter { input, predicate } => (*input, std::slice::from_ref(predicate)),
+        IR::Select { input, expr, .. }
+        | IR::HStack {
+            input, exprs: expr, ..
+        } => (*input, expr.as_slice()),
+        _ => return false,
+    };
+    let schema = ir_arena.get(input).schema(ir_arena);
+    expressions.iter().all(|expression| {
+        crate::plans::predicates::vortex_convertor::aexpr_is_safe_for_vortex_prefilter(
+            expression.node(),
+            expr_arena,
+            &schema,
+        )
+    })
 }
 
 fn skips_batches(scan_type: &FileScanIR) -> bool {

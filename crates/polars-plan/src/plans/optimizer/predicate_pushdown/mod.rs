@@ -1,4 +1,5 @@
 mod dynamic;
+pub(crate) use dynamic::new_immutable_join_pred;
 mod group_by;
 mod hive;
 mod join;

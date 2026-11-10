@@ -12,13 +12,14 @@ use polars_core::schema::SchemaRef;
 use polars_error::{PolarsResult, polars_err};
 use polars_utils::index::NonZeroIdxSize;
 use polars_vortex::VortexWriteOptions;
+use polars_vortex::session::ExecutionContext;
 use polars_vortex::vortex::array::stream::ArrayStreamAdapter;
 use polars_vortex::vortex::error::vortex_err;
 use polars_vortex::vortex::io::{IoBuf, VortexWrite};
 use polars_vortex::write::df_to_stream::{
     dataframe_to_vortex_chunks, polars_schema_to_vortex_dtype,
 };
-use polars_vortex::write::strategy::build_write_options;
+use polars_vortex::write::strategy::build_write_options_with_session;
 
 use crate::nodes::io_sinks::components::sink_morsel::SinkMorsel;
 use crate::nodes::io_sinks::components::size::{SplitMode, TargetSinkMorselSize};
@@ -57,6 +58,7 @@ impl FileWriterStarter for VortexWriterStarter {
     ) -> PolarsResult<executor::JoinHandle<PolarsResult<()>>> {
         let dtype = polars_schema_to_vortex_dtype(&self.schema)?;
         let options = Arc::clone(&self.options);
+        let context = ExecutionContext::new(task_metrics.clone());
         Ok(executor::spawn(
             TaskPriority::Low,
             task_metrics.as_deref(),
@@ -66,17 +68,27 @@ impl FileWriterStarter for VortexWriterStarter {
                     // End-of-input waits for successful query completion. A dropped
                     // completion sender becomes a stream error before Vortex writes its footer.
                     let stream = futures::stream::try_unfold(
-                        (morsel_rx, VecDeque::new(), None, Some(finish)),
-                        |(mut receiver, mut chunks, mut permit, mut finish)| async move {
+                        (
+                            morsel_rx,
+                            VecDeque::new(),
+                            None,
+                            Some(finish),
+                            context.clone(),
+                        ),
+                        |(mut receiver, mut chunks, mut permit, mut finish, context)| async move {
                             loop {
                                 if let Some(chunk) = chunks.pop_front() {
-                                    return Ok(Some((chunk, (receiver, chunks, permit, finish))));
+                                    return Ok(Some((
+                                        chunk,
+                                        (receiver, chunks, permit, finish, context),
+                                    )));
                                 }
                                 drop(permit.take());
                                 match receiver.recv().await {
                                     Ok(morsel) => {
                                         let (df, next_permit) = morsel.into_inner();
-                                        let (_, arrays) = polars_vortex::session::handle()
+                                        let (_, arrays) = context
+                                            .handle()
                                             .spawn_cpu(move || dataframe_to_vortex_chunks(&df))
                                             .await
                                             .map_err(|e| vortex_err!("Vortex batch export: {e}"))?;
@@ -94,11 +106,12 @@ impl FileWriterStarter for VortexWriterStarter {
                         },
                     );
                     let sink = VortexTarget(target.as_writable());
-                    build_write_options(&options)?
+                    build_write_options_with_session(&options, context.session())?
                         .write(sink, ArrayStreamAdapter::new(dtype, stream))
                         .await
                         .map_err(|e| polars_err!(ComputeError: "Vortex write: {e}"))?;
                     target.close(sync).await?;
+                    drop(context);
                     Ok(())
                 }));
                 write

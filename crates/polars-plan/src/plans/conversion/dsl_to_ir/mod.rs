@@ -39,6 +39,8 @@ mod scans;
 mod sinks;
 mod sql;
 mod utils;
+#[cfg(feature = "vortex")]
+mod vortex_stats;
 pub(crate) use expr_expansion::needs_expansion;
 pub use expr_expansion::{expand_expression, is_regex_projection, prepare_projection};
 pub use expr_to_ir::{ExprToIRContext, to_expr_ir};

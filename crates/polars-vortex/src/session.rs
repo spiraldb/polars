@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use futures::future::BoxFuture;
-use polars_async::executor::{self, CancelHandle, TaskPriority};
+use polars_async::executor::{self, CancelHandle, TaskMetricAggregator, TaskPriority};
 use polars_core::runtime::ASYNC;
 use vortex::VortexSessionDefault;
 use vortex::io::runtime::{AbortHandle, AbortHandleRef, Executor, Handle};
@@ -11,18 +11,80 @@ use vortex::io::session::RuntimeSessionExt;
 use vortex::layout::segments::{MokaSegmentCache, NoOpSegmentCache, SegmentCache, SegmentEviction};
 use vortex::session::VortexSession;
 
-struct PolarsExecutor;
+/// A query owns its session and the executor behind its weak Vortex handles.
+#[derive(Clone)]
+pub struct ExecutionContext {
+    inner: Arc<ExecutionContextInner>,
+}
+
+struct ExecutionContextInner {
+    session: VortexSession,
+    executor: Arc<dyn Executor>,
+    task_metrics: Option<Arc<TaskMetricAggregator>>,
+}
+
+impl ExecutionContext {
+    pub fn new(task_metrics: Option<Arc<TaskMetricAggregator>>) -> Self {
+        let executor: Arc<dyn Executor> = Arc::new(PolarsExecutor {
+            task_metrics: task_metrics.clone(),
+        });
+        let handle = Handle::new(Arc::downgrade(&executor));
+        // Session clones share state. A query needs an independent registry.
+        let session = VortexSession::default().with_handle(handle);
+        Self {
+            inner: Arc::new(ExecutionContextInner {
+                session,
+                executor,
+                task_metrics,
+            }),
+        }
+    }
+
+    pub fn session(&self) -> &VortexSession {
+        &self.inner.session
+    }
+
+    pub fn handle(&self) -> Handle {
+        Handle::new(Arc::downgrade(&self.inner.executor))
+    }
+
+    pub fn task_metrics(&self) -> Option<&TaskMetricAggregator> {
+        self.inner.task_metrics.as_deref()
+    }
+}
+
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        (*DEFAULT_CONTEXT).clone()
+    }
+}
+
+impl std::fmt::Debug for ExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionContext")
+            .field("task_metrics", &self.inner.task_metrics.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+struct PolarsExecutor {
+    task_metrics: Option<Arc<TaskMetricAggregator>>,
+}
 impl Executor for PolarsExecutor {
     fn spawn(&self, future: BoxFuture<'static, ()>) -> AbortHandleRef {
         // General Vortex futures also perform inline filter and decode work.
-        let task = executor::spawn(TaskPriority::Low, None, future);
+        let task = executor::spawn(TaskPriority::Low, self.task_metrics.as_deref(), future);
         Box::new(PolarsAbort(task.cancel_handle()))
     }
     fn spawn_io(&self, future: BoxFuture<'static, ()>) -> AbortHandleRef {
         Box::new(ASYNC.spawn(future).abort_handle())
     }
     fn spawn_cpu(&self, task: Box<dyn FnOnce() + Send + 'static>) -> AbortHandleRef {
-        let task = executor::spawn(TaskPriority::Low, None, async move { task() });
+        let task = executor::spawn(
+            TaskPriority::Low,
+            self.task_metrics.as_deref(),
+            async move { task() },
+        );
         Box::new(PolarsAbort(task.cancel_handle()))
     }
     fn spawn_blocking_io(&self, task: Box<dyn FnOnce() + Send + 'static>) -> AbortHandleRef {
@@ -35,15 +97,16 @@ impl AbortHandle for PolarsAbort {
         self.0.cancel();
     }
 }
-static EXECUTOR: LazyLock<Arc<dyn Executor>> = LazyLock::new(|| Arc::new(PolarsExecutor));
-static SESSION: LazyLock<VortexSession> =
-    LazyLock::new(|| VortexSession::default().with_handle(handle()));
+static DEFAULT_CONTEXT: LazyLock<ExecutionContext> = LazyLock::new(|| ExecutionContext::new(None));
+
 pub fn session() -> &'static VortexSession {
-    &SESSION
+    DEFAULT_CONTEXT.session()
 }
+
 pub fn handle() -> Handle {
-    Handle::new(Arc::downgrade(&EXECUTOR))
+    DEFAULT_CONTEXT.handle()
 }
+
 static DEFAULT_CACHE_BYTES: LazyLock<AtomicU64> = LazyLock::new(|| {
     AtomicU64::new(
         std::env::var("POLARS_VORTEX_CACHE_BYTES")
@@ -85,6 +148,88 @@ mod tests {
             is_scheduling_polars_executor_thread(),
             ALLOW_RAYON_THREADS.get(),
         )
+    }
+
+    async fn settled_polls(metrics: &TaskMetricAggregator, minimum: u64) -> u64 {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = metrics.snapshot();
+                if snapshot.total_polls >= minimum && snapshot.num_running_tasks == 0 {
+                    break snapshot.total_polls;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn query_sessions_keep_task_metrics_isolated() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ExecutionContext>();
+        ASYNC.block_on(async {
+            let first_metrics = Arc::new(TaskMetricAggregator::default());
+            let second_metrics = Arc::new(TaskMetricAggregator::default());
+            let first = ExecutionContext::new(Some(first_metrics.clone()));
+            let second = ExecutionContext::new(Some(second_metrics.clone()));
+            // A shared session registry would redirect this task to the second context.
+            assert_eq!(
+                first
+                    .session()
+                    .handle()
+                    .spawn(async { cpu_affinity() })
+                    .await,
+                (true, false)
+            );
+            assert_eq!(
+                first.session().handle().spawn_cpu(cpu_affinity).await,
+                (true, false)
+            );
+            let first_polls = settled_polls(&first_metrics, 2).await;
+            assert_eq!(second_metrics.snapshot().total_polls, 0);
+            assert_eq!(second.session().handle().spawn_cpu(|| 42).await, 42);
+            settled_polls(&second_metrics, 1).await;
+            assert_eq!(first_metrics.snapshot().total_polls, first_polls);
+            assert_eq!(handle().spawn_cpu(|| 7).await, 7);
+            assert_eq!(first_metrics.snapshot().total_polls, first_polls);
+            assert!(std::ptr::eq(
+                first.task_metrics().unwrap(),
+                first_metrics.as_ref()
+            ));
+        });
+    }
+
+    #[test]
+    fn context_owner_survives_nested_io_and_cpu_tasks() {
+        ASYNC.block_on(async {
+            let context = ExecutionContext::new(None);
+            let weak = Arc::downgrade(&context.inner);
+            let owner = context.clone();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let task = context.handle().spawn(async move {
+                release_rx.await.unwrap();
+                let output = owner
+                    .handle()
+                    .spawn_io(async move {
+                        assert!(tokio::runtime::Handle::try_current().is_ok());
+                        owner.handle().spawn_cpu(cpu_affinity).await
+                    })
+                    .await;
+                output
+            });
+            drop(context);
+            assert!(weak.upgrade().is_some());
+            release_tx.send(()).unwrap();
+            assert_eq!(task.await, (true, false));
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while weak.upgrade().is_some() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        });
     }
 
     #[test]

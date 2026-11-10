@@ -1,35 +1,44 @@
 //! Streaming reader for one Vortex file.
 
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
 use polars_arrow::datatypes::ArrowSchemaRef;
 use polars_async::executor::{self, JoinHandle, TaskMetricAggregator};
+use polars_async::primitives::wait_group::{WaitGroup, WaitToken};
 use polars_core::prelude::DataFrame;
 use polars_core::runtime::ASYNC;
 use polars_core::schema::SchemaRef;
 use polars_error::{PolarsResult, polars_ensure, polars_err};
 use polars_io::cloud::CloudOptions;
-use polars_io::utils::byte_source::DynByteSourceBuilder;
+use polars_io::utils::byte_source::{DynByteSource, DynByteSourceBuilder};
 use polars_plan::dsl::ScanSource;
 use polars_utils::IdxSize;
 use polars_utils::slice_enum::Slice;
 use polars_vortex::VortexScanOptions;
 use polars_vortex::read::array_bridge::vortex_array_to_dataframe;
-use polars_vortex::read::predicate::polars_to_vortex_predicate;
+use polars_vortex::read::predicate::{
+    RuntimeVortexFilters, polars_to_vortex_predicate, runtime_ranges_to_vortex_filters,
+};
 use polars_vortex::read::read_at::PolarsVortexReadAt;
 use polars_vortex::read::schema::vortex_dtype_to_schema;
-use polars_vortex::session::session;
+use polars_vortex::session::ExecutionContext;
 use polars_vortex::vortex::array::ArrayRef;
-use polars_vortex::vortex::error::VortexResult;
-use polars_vortex::vortex::expr::{root, select};
+use polars_vortex::vortex::error::vortex_ensure;
+use polars_vortex::vortex::expr::{BoundExpression, and, root, select};
 use polars_vortex::vortex::file::{Footer, OpenOptionsSessionExt, VortexFile};
+use polars_vortex::vortex::io::CoalesceConfig;
 use polars_vortex::vortex::io::runtime::Handle;
+use polars_vortex::vortex::layout::LayoutReader;
+use polars_vortex::vortex::layout::scan::repeated_scan::RepeatedScan;
+use polars_vortex::vortex::layout::scan::scan_builder::ScanBuilder;
+use polars_vortex::vortex::mask::Mask;
 
 use crate::metrics::OptIOMetrics;
-use crate::morsel::{Morsel, MorselSeq, SourceToken};
+use crate::morsel::{Morsel, MorselSeq, SourceToken, get_ideal_morsel_size};
 use crate::nodes::TaskPriority;
 use crate::nodes::io_sources::multi_scan::reader_interface::output::{
     FileReaderOutputRecv, FileReaderOutputSend,
@@ -37,8 +46,16 @@ use crate::nodes::io_sources::multi_scan::reader_interface::output::{
 use crate::nodes::io_sources::multi_scan::reader_interface::{
     BeginReadArgs, FileReader, calc_row_position_after_slice,
 };
+use crate::nodes::io_sources::shared::morsels::split_to_morsels;
+use crate::nodes::io_sources::shared::pipeline_budget::{
+    PipelineBudget, PipelinePermit, WindowGrowth,
+};
+use crate::utils::tokio_handle_ext::AbortOnDropHandle;
 
+mod budget;
 pub mod builder;
+#[cfg(test)]
+mod tests;
 
 pub struct VortexFileReader {
     pub scan_source: ScanSource,
@@ -46,8 +63,12 @@ pub struct VortexFileReader {
     pub options: Arc<VortexScanOptions>,
     pub footer: Option<Arc<Footer>>,
     pub byte_source_builder: DynByteSourceBuilder,
+    pub aexpr_filter: Option<(polars_vortex::vortex::expr::Expression, SchemaRef)>,
+    pub runtime_filter_schema: Option<SchemaRef>,
     pub io_metrics: OptIOMetrics,
     pub task_metrics: Option<Arc<TaskMetricAggregator>>,
+    pub execution_context: ExecutionContext,
+    prefetch_sync: PrefetchSync,
     pub init_data: Option<InitializedState>,
 }
 
@@ -56,6 +77,14 @@ pub struct InitializedState {
     arrow_schema: ArrowSchemaRef,
     pl_schema: SchemaRef,
     row_count: IdxSize,
+    byte_source: Arc<DynByteSource>,
+}
+
+struct PrefetchSync {
+    budget: PipelineBudget,
+    shared_slot: Arc<Mutex<Option<WaitGroup>>>,
+    previous: Option<WaitGroup>,
+    all_spawned: Option<WaitToken>,
 }
 
 #[async_trait]
@@ -70,13 +99,20 @@ impl FileReader for VortexFileReader {
         let io_metrics = self.io_metrics.0.clone();
         let footer = self.footer.clone();
         let options = self.options.clone();
-        let vxf = crate::utils::tokio_handle_ext::AbortOnDropHandle(ASYNC.spawn(async move {
-            let byte_source = source
-                .as_scan_source_ref()
-                .to_dyn_byte_source(&builder, cloud_options.as_deref(), io_metrics)
-                .await?;
-            let read_at = Arc::new(PolarsVortexReadAt::new(Arc::new(byte_source)));
-            let mut open = session()
+        let context = self.execution_context.clone();
+        let (vxf, byte_source) = AbortOnDropHandle(ASYNC.spawn(async move {
+            let byte_source = Arc::new(
+                source
+                    .as_scan_source_ref()
+                    .to_dyn_byte_source(&builder, cloud_options.as_deref(), io_metrics)
+                    .await?,
+            );
+            let read_at = Arc::new(PolarsVortexReadAt::with_context(
+                byte_source.clone(),
+                context.clone(),
+            ));
+            let mut open = context
+                .session()
                 .open_options()
                 .with_segment_cache(options.segment_cache.resolve());
             if let Some(footer) = footer {
@@ -85,9 +121,11 @@ impl FileReader for VortexFileReader {
             if let Some(size) = options.initial_read_size {
                 open = open.with_initial_read_size(size);
             }
-            open.open(read_at)
+            let file = open
+                .open(read_at)
                 .await
-                .map_err(|e| polars_err!(ComputeError: "vortex open: {e}"))
+                .map_err(|e| polars_err!(ComputeError: "vortex open: {e}"))?;
+            PolarsResult::Ok((file, byte_source))
         }))
         .await
         .map_err(|e| polars_err!(ComputeError: "vortex open task: {e}"))??;
@@ -100,6 +138,7 @@ impl FileReader for VortexFileReader {
             arrow_schema,
             pl_schema,
             row_count,
+            byte_source,
         });
         Ok(())
     }
@@ -131,6 +170,18 @@ impl FileReader for VortexFileReader {
             self.n_rows_in_file().await?,
             pre_slice,
         ))
+    }
+
+    fn prepare_read(&mut self) -> PolarsResult<()> {
+        let group = WaitGroup::default();
+        self.prefetch_sync.all_spawned = Some(group.token());
+        self.prefetch_sync.previous = self
+            .prefetch_sync
+            .shared_slot
+            .try_lock()
+            .unwrap()
+            .replace(group);
+        Ok(())
     }
 
     fn begin_read(
@@ -168,14 +219,65 @@ impl FileReader for VortexFileReader {
             .collect();
         let filter = if self.options.push_predicate {
             args.predicate.as_ref().and_then(|predicate| {
-                polars_to_vortex_predicate(
-                    &predicate.scan_io_predicate,
-                    requested_schema,
-                    &st.pl_schema,
-                )
+                self.aexpr_filter
+                    .as_ref()
+                    .filter(|(_, proof)| {
+                        proof
+                            .iter()
+                            .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                    })
+                    .filter(|_| {
+                        requested_schema
+                            .iter()
+                            .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                    })
+                    .map(|(expression, _)| expression.clone())
+                    .or_else(|| {
+                        polars_to_vortex_predicate(
+                            &predicate.scan_io_predicate,
+                            requested_schema,
+                            &st.pl_schema,
+                        )
+                    })
             })
         } else {
             None
+        };
+        let runtime_filters = if self.options.push_predicate
+            && args
+                .predicate
+                .as_ref()
+                .is_some_and(|predicate| !predicate.scan_io_predicate.runtime_ranges.is_empty())
+        {
+            self.runtime_filter_schema
+                .as_ref()
+                .filter(|proof| {
+                    proof
+                        .iter()
+                        .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                        && requested_schema
+                            .iter()
+                            .all(|(name, dtype)| st.pl_schema.get(name) == Some(dtype))
+                })
+                .and_then(|proof| {
+                    Some(runtime_ranges_to_vortex_filters(
+                        &args.predicate.as_ref()?.scan_io_predicate.runtime_ranges,
+                        proof,
+                        &st.pl_schema,
+                        st.vxf.footer(),
+                    ))
+                })
+        } else {
+            None
+        };
+        let RuntimeVortexFilters {
+            row_filter: runtime_filter,
+            prune_filter,
+        } = runtime_filters.unwrap_or_default();
+        let has_runtime_filter = runtime_filter.is_some();
+        let filter = match (filter, runtime_filter) {
+            (Some(static_filter), Some(runtime_filter)) => Some(and(static_filter, runtime_filter)),
+            (static_filter, runtime_filter) => static_filter.or(runtime_filter),
         };
         let vxf = st.vxf.clone();
         let height = normalized_slice
@@ -186,15 +288,30 @@ impl FileReader for VortexFileReader {
             .scan_concurrency
             .map(|value| value.get())
             .unwrap_or(args.num_pipelines.max(1));
+        let context = self.execution_context.clone();
+        let byte_source = st.byte_source.clone();
+        let budget = self.prefetch_sync.budget.clone();
+        budget.begin_file(
+            byte_source.window_inflight_budget().is_some(),
+            args.maintain_order,
+        );
+        let previous = self.prefetch_sync.previous.take();
+        let all_spawned = self.prefetch_sync.all_spawned.take();
+        let disable_morsel_split = args.disable_morsel_split;
+        let last_morsel_pipelines = args.last_morsel_pipelines;
         let (mut tx, rx) = FileReaderOutputSend::new_serial();
         let handle = executor::spawn(
             TaskPriority::Low,
             self.task_metrics.as_deref(),
             async move {
+                if let Some(previous) = previous {
+                    previous.wait().await;
+                }
                 if height == 0 {
                     return Ok(());
                 }
-                if columns.is_empty() && filter.is_none() {
+                if columns.is_empty() && filter.is_none() && prune_filter.is_none() {
+                    drop(all_spawned);
                     let _ = tx
                         .send_morsel(Morsel::new_unregistered(
                             DataFrame::empty_with_height(height),
@@ -210,43 +327,112 @@ impl FileReader for VortexFileReader {
                 )
                 .bind(vxf.dtype())
                 .map_err(|e| polars_err!(ComputeError: "vortex projection: {e}"))?;
-                let mut scan = vxf
-                    .scan()
-                    .map_err(|e| polars_err!(ComputeError: "vortex scan: {e}"))?
-                    .with_projection(projection);
+                let reader = vxf
+                    .layout_reader()
+                    .map_err(|e| polars_err!(ComputeError: "vortex layout reader: {e}"))?;
+                let mut scan: ScanBuilder<ArrayRef> =
+                    ScanBuilder::new(vxf.session().clone(), reader.clone());
+                scan = scan.with_projection(projection);
+                let selected_range = row_range.clone().unwrap_or(0..vxf.row_count());
+                let mut budget_columns = columns.clone();
                 if let Some(range) = row_range {
                     scan = scan.with_row_range(range);
                 }
+                let mut row_bound = false;
                 // A failed candidate binding leaves the complete predicate in Polars.
                 if let Some(expression) = filter {
                     if let Ok(bound) = expression.bind(vxf.dtype()) {
+                        add_filter_budget_columns(&bound, vxf.dtype(), &mut budget_columns);
+                        polars_vortex::read::read_at::record_filter();
+                        row_bound = true;
+                        if has_runtime_filter && polars_config::config().verbose() {
+                            eprintln!("[vortex]: applied runtime join range for row evaluation");
+                        }
+                        if vxf.can_prune(&expression).unwrap_or(false) {
+                            return Ok(());
+                        }
                         scan = scan.with_filter(bound);
                     }
                 }
-                let splits = scan
-                    .build()
-                    .map_err(|e| polars_err!(ComputeError: "vortex scan preparation: {e}"))?;
-                let runtime = polars_vortex::session::handle();
-                // One slot covers both split IO and Arrow export. Vortex's stream
-                // concurrency is per OS thread, so the reader owns this global bound.
-                let stream = futures::stream::iter(splits)
-                    .map(move |split| export_split(split, runtime.clone()))
-                    .buffered(concurrency)
-                    .boxed();
-                futures::pin_mut!(stream);
-                let mut seq = MorselSeq::default();
-                let source_token = SourceToken::new();
-                while let Some(result) = stream.next().await {
-                    let Some(df) = result? else {
-                        continue;
-                    };
-
-                    let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
-                    seq = seq.successor();
-                    if tx.send_morsel(morsel).await.is_err() {
-                        break;
+                let pruning = prune_filter
+                    .and_then(|expression| expression.bind(vxf.dtype()).ok())
+                    .map(|expression| {
+                        if !row_bound {
+                            polars_vortex::read::read_at::record_filter();
+                        }
+                        add_filter_budget_columns(&expression, vxf.dtype(), &mut budget_columns);
+                        if polars_config::config().verbose() {
+                            eprintln!("[vortex]: applied runtime range for pruning");
+                        }
+                        SplitPruning { reader, expression }
+                    });
+                let boundaries = scan
+                    .full_file_splits()
+                    .map_err(|e| polars_err!(ComputeError: "Vortex split boundaries: {e}"))?;
+                let ranges = boundaries
+                    .windows(2)
+                    .filter_map(|pair| {
+                        let start = pair[0].max(selected_range.start);
+                        let end = pair[1].min(selected_range.end);
+                        (start < end).then_some(start..end)
+                    })
+                    .collect::<Vec<_>>();
+                let coalesce = if byte_source.is_cloud() {
+                    CoalesceConfig::object_storage()
+                } else {
+                    CoalesceConfig::file()
+                };
+                budget_columns.sort_unstable();
+                budget_columns.dedup();
+                let costs = budget::split_costs(vxf.footer(), &budget_columns, &ranges, coalesce)?;
+                let prepared = Arc::new(
+                    scan.with_natural_splits(boundaries.into())
+                        .prepare()
+                        .map_err(|e| polars_err!(ComputeError: "vortex scan preparation: {e}"))?,
+                );
+                let (prefetch_tx, prefetch_rx) = tokio::sync::mpsc::channel(1);
+                let prefetch = AbortOnDropHandle(ASYNC.spawn(async move {
+                    let inflight = byte_source.window_inflight_budget();
+                    let window = WindowGrowth::for_source(&byte_source, inflight.as_deref());
+                    // Reserve in file and split order before any work starts.
+                    let n_ranges = ranges.len();
+                    for (index, (range, cost)) in ranges.into_iter().zip(costs).enumerate() {
+                        let last_physical = index + 1 == n_ranges;
+                        let permit = budget.acquire(cost, window, 1).await;
+                        if prefetch_tx
+                            .send((range, last_physical, permit))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
+                    drop(all_spawned);
+                }));
+                let runtime = context.handle();
+                let stream = futures::stream::unfold(prefetch_rx, |mut receiver| async move {
+                    receiver.recv().await.map(|item| (item, receiver))
+                })
+                .map(move |(range, last_physical, permit)| {
+                    export_budgeted_split(
+                        prepared.clone(),
+                        range,
+                        last_physical,
+                        runtime.clone(),
+                        permit,
+                        pruning.clone(),
+                    )
+                })
+                .buffered(concurrency)
+                .filter_map(nonempty_dataframe)
+                .boxed();
+                if !send_morsels(stream, tx, disable_morsel_split, last_morsel_pipelines).await? {
+                    return Ok(());
                 }
+                prefetch
+                    .await
+                    .map_err(|e| polars_err!(ComputeError: "Vortex prefetch task: {e}"))?;
+                drop(context);
                 Ok(())
             },
         );
@@ -254,15 +440,156 @@ impl FileReader for VortexFileReader {
     }
 }
 
-/// Keep the scheduled future type independent of the stream adapter closure.
-fn export_split(
-    split: BoxFuture<'static, VortexResult<Option<ArrayRef>>>,
+/// Emit each completed batch without a lookahead through filtered-empty ranges.
+async fn send_morsels(
+    mut stream: futures::stream::BoxStream<'static, PolarsResult<(DataFrame, bool)>>,
+    mut tx: FileReaderOutputSend,
+    disable_morsel_split: bool,
+    last_morsel_pipelines: usize,
+) -> PolarsResult<bool> {
+    let mut seq = MorselSeq::default();
+    let source_token = SourceToken::new();
+    while let Some(result) = stream.next().await {
+        let (df, last_physical) = result?;
+        polars_vortex::read::read_at::record_batch(df.width() as u64);
+        if disable_morsel_split {
+            let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
+            seq = seq.successor();
+            if tx.send_morsel(morsel).await.is_err() {
+                return Ok(false);
+            }
+        } else {
+            // Empty final ranges can leave the preceding batch with ordinary fanout.
+            for df in split_to_morsels(
+                &df,
+                get_ideal_morsel_size(),
+                last_physical,
+                last_morsel_pipelines,
+            ) {
+                let morsel = Morsel::new_unregistered(df, seq, source_token.clone());
+                seq = seq.successor();
+                if tx.send_morsel(morsel).await.is_err() {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn add_filter_budget_columns(
+    expression: &BoundExpression,
+    dtype: &polars_vortex::vortex::dtype::DType,
+    columns: &mut Vec<String>,
+) {
+    let paths = polars_vortex::vortex::expr::analysis::referenced_field_paths(expression);
+    let mut all_fields = false;
+    if let Ok(paths) = paths {
+        for path in paths {
+            match path.parts().first() {
+                Some(polars_vortex::vortex::dtype::Field::Name(name)) => {
+                    columns.push(name.to_string())
+                },
+                _ => all_fields = true,
+            }
+        }
+    } else {
+        all_fields = true;
+    }
+    if all_fields {
+        columns.extend(
+            dtype
+                .as_struct_fields_opt()
+                .unwrap()
+                .names()
+                .iter()
+                .map(ToString::to_string),
+        );
+    }
+}
+
+#[derive(Clone)]
+struct SplitPruning {
+    reader: Arc<dyn LayoutReader>,
+    expression: BoundExpression,
+}
+
+fn export_budgeted_split(
+    prepared: Arc<RepeatedScan<ArrayRef>>,
+    range: Range<u64>,
+    last_physical: bool,
     runtime: Handle,
+    permit: PipelinePermit,
+    pruning: Option<SplitPruning>,
+) -> BoxFuture<'static, (PolarsResult<Option<DataFrame>>, bool, PipelinePermit)> {
+    async move {
+        (
+            export_split_with_pruning(prepared, range, runtime, pruning).await,
+            last_physical,
+            permit,
+        )
+    }
+    .boxed()
+}
+
+fn nonempty_dataframe(
+    (result, last_physical, permit): (PolarsResult<Option<DataFrame>>, bool, PipelinePermit),
+) -> futures::future::Ready<Option<PolarsResult<(DataFrame, bool)>>> {
+    // Release before a blocked output consumer.
+    drop(permit);
+    futures::future::ready(match result {
+        Ok(Some(df)) if df.height() > 0 => Some(Ok((df, last_physical))),
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    })
+}
+
+#[cfg(test)]
+fn export_split(
+    prepared: Arc<RepeatedScan<ArrayRef>>,
+    range: Range<u64>,
+    runtime: Handle,
+) -> BoxFuture<'static, PolarsResult<Option<DataFrame>>> {
+    export_split_with_pruning(prepared, range, runtime, None)
+}
+
+/// Keep the scheduled future type independent of the stream adapter closure.
+fn export_split_with_pruning(
+    prepared: Arc<RepeatedScan<ArrayRef>>,
+    range: Range<u64>,
+    runtime: Handle,
+    pruning: Option<SplitPruning>,
 ) -> BoxFuture<'static, PolarsResult<Option<DataFrame>>> {
     async move {
         // Task handles cancel on drop. Spawns remain inside this lazy future.
         let Some(array) = runtime
-            .spawn(split)
+            .spawn(async move {
+                // Construct requests only after the shared budget admits this range.
+                if let Some(pruning) = pruning {
+                    let len =
+                        usize::try_from(range.end.checked_sub(range.start).ok_or_else(|| {
+                            polars_vortex::vortex::error::vortex_err!("invalid pruning range")
+                        })?)
+                        .map_err(|_| {
+                            polars_vortex::vortex::error::vortex_err!("pruning range exceeds usize")
+                        })?;
+                    let mask = pruning
+                        .reader
+                        .pruning_evaluation(&range, &pruning.expression, Mask::new_true(len))?
+                        .await?;
+                    vortex_ensure!(mask.len() == len, "Vortex pruning mask length mismatch");
+                    if mask.all_false() {
+                        return Ok(None);
+                    }
+                    // Partial masks are conservative proofs, not row filters.
+                }
+                let mut splits = prepared.execute(Some(range))?;
+                vortex_ensure!(
+                    splits.len() == 1,
+                    "Vortex admitted range must contain one split"
+                );
+                splits.pop().unwrap().await
+            })
             .await
             .map_err(|e| polars_err!(ComputeError: "vortex split: {e}"))?
         else {

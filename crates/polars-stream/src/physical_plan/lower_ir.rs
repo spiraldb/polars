@@ -1041,14 +1041,49 @@ fn lower_ir_inner(
                     FileScanIR::Vortex {
                         options,
                         metadata: first_metadata,
-                    } => Arc::new(
-                        crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
-                            options: Arc::new(options.clone()),
-                            first_metadata: first_metadata.clone(),
-                            io_metrics: std::sync::OnceLock::new(),
-                            task_metrics: std::sync::OnceLock::new(),
-                        },
-                    ) as _,
+                    } => {
+                        let mut schema = file_info.schema.as_ref().clone();
+                        if let Some(hive) = hive_parts.as_ref() {
+                            for name in hive.schema().iter_names() {
+                                schema.remove(name);
+                            }
+                        }
+                        if let Some(index) = unified_scan_args.row_index.as_ref() {
+                            schema.remove(&index.name);
+                        }
+                        if let Some(name) = unified_scan_args.include_file_paths.as_ref() {
+                            schema.remove(name);
+                        }
+                        let schema = Arc::new(schema);
+                        let filter_parts = if options.push_predicate {
+                            predicate.as_ref().and_then(|predicate| {
+                                polars_plan::plans::predicates::vortex_convertor::safe_vortex_filter_parts(
+                                    predicate.node(), expr_arena, &schema,
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        let runtime_filter_schema =
+                            filter_parts.as_ref().map(|_| Arc::clone(&schema));
+                        let aexpr_filter = filter_parts
+                            .and_then(polars_vortex::vortex::expr::and_collect)
+                            .map(|expression| (expression, Arc::clone(&schema)));
+                        Arc::new(
+                            crate::nodes::io_sources::vortex::builder::VortexReaderBuilder {
+                                options: Arc::new(options.clone()),
+                                first_metadata: first_metadata.clone(),
+                                aexpr_filter,
+                                runtime_filter_schema,
+                                io_metrics: std::sync::OnceLock::new(),
+                                task_metrics: std::sync::OnceLock::new(),
+                                execution_context: std::sync::OnceLock::new(),
+                                pipeline_budget: std::sync::OnceLock::new(),
+                                shared_prefetch_wait_group_slot: Default::default(),
+                                file_read_context: std::sync::OnceLock::new(),
+                            },
+                        ) as _
+                    },
 
                     #[cfg(feature = "csv")]
                     FileScanIR::Csv { options } => {

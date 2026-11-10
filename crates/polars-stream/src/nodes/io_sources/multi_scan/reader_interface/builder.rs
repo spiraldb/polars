@@ -47,7 +47,7 @@ pub trait FileReaderBuilder: Debug + Send + Sync + 'static {
 
     /// For readers with a pipeline budget: a guard that returns the scan's pool kilobytes when
     /// dropped. Call after `set_execution_state`.
-    #[cfg(any(feature = "parquet", feature = "ipc"))]
+    #[cfg(any(feature = "parquet", feature = "ipc", feature = "vortex"))]
     fn active_scan(&self) -> Option<crate::nodes::io_sources::shared::pipeline_budget::ActiveScan> {
         None
     }
