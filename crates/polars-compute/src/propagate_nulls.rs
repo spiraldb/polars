@@ -230,14 +230,13 @@ pub fn propagate_nulls_struct(arr: &StructArray) -> Option<StructArray> {
     for (i, field_array) in arr.values().iter().enumerate() {
         let new_field_array = match field_array.validity() {
             None => Some(field_array.with_validity(Some(validity.clone()))),
+            // Already null wherever the struct is null.
+            Some(v) if v.num_intersections_with(validity) == v.set_bits() => None,
             Some(v) => Some(field_array.with_validity(Some(v & validity))),
         };
 
-        let Some(new_field_array) = new_field_array
-            .as_ref()
-            .and_then(|v| propagate_nulls(v.as_ref()))
-            .or(new_field_array)
-        else {
+        let field = new_field_array.as_deref().unwrap_or(field_array.as_ref());
+        let Some(new_field_array) = propagate_nulls(field).or(new_field_array) else {
             // Nothing was changed. Return the original array.
             continue;
         };
@@ -277,9 +276,44 @@ pub fn propagate_nulls_struct(arr: &StructArray) -> Option<StructArray> {
 #[cfg(test)]
 mod tests {
     use polars_arrow::array::proptest::array;
+    use polars_arrow::array::{Array, PrimitiveArray, StructArray};
+    use polars_arrow::bitmap::Bitmap;
+    use polars_arrow::datatypes::{ArrowDataType, Field};
     use proptest::proptest;
 
     use crate::propagate_nulls::propagate_nulls;
+
+    fn nullable_struct(child: Box<dyn Array>, validity: Bitmap) -> StructArray {
+        let dtype = ArrowDataType::Struct(vec![Field::new(
+            "child".into(),
+            child.dtype().clone(),
+            true,
+        )]);
+        StructArray::new(dtype, 3, vec![child], Some(validity))
+    }
+
+    #[test]
+    fn already_propagated_first_child_retains_its_validity() {
+        let validity = Bitmap::from([true, false, true]);
+        let child = PrimitiveArray::<i32>::from([Some(1), None, Some(3)]);
+        let array = nullable_struct(Box::new(child), validity);
+        assert!(propagate_nulls(&array).is_none());
+    }
+
+    #[test]
+    fn unchanged_first_child_still_propagates_nested_nulls() {
+        let validity = Bitmap::from([true, false, true]);
+        let values = PrimitiveArray::<i32>::from_slice([1, 2, 3]);
+        let inner = nullable_struct(Box::new(values), validity.clone());
+        let outer = nullable_struct(Box::new(inner), validity.clone());
+        let result = propagate_nulls(&outer).unwrap();
+        let outer = result.as_any().downcast_ref::<StructArray>().unwrap();
+        let inner = outer.values()[0]
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(inner.values()[0].validity(), Some(&validity));
+    }
 
     proptest! {
         #[test]
