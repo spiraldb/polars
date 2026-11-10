@@ -107,6 +107,10 @@ parquet = [
   "polars-sql?/parquet",
   "streaming",
 ]
+vortex = [
+  "polars-lazy?/vortex",
+  "streaming",
+]
 async = ["polars-lazy?/async"]
 cloud = ["polars-lazy?/cloud", "polars-io/cloud"]
 aws = ["async", "cloud", "polars-io/aws"]

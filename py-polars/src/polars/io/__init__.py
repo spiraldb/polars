@@ -29,6 +29,7 @@ from polars.io.plugins import _defer as defer
 from polars.io.pyarrow_dataset import scan_pyarrow_dataset
 from polars.io.scan_options import ScanCastOptions
 from polars.io.spreadsheet import read_excel, read_ods
+from polars.io.vortex import read_vortex, scan_vortex, set_vortex_cache_bytes
 
 __all__ = [
     "defer",
@@ -65,5 +66,8 @@ __all__ = [
     "scan_ndjson",
     "scan_parquet",
     "scan_pyarrow_dataset",
+    "read_vortex",
+    "scan_vortex",
+    "set_vortex_cache_bytes",
     "ScanCastOptions",
 ]
