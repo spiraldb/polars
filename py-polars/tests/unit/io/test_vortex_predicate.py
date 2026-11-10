@@ -278,26 +278,22 @@ def _assert_typed_predicate(
     engine: Literal["streaming", "in-memory"],
     *,
     expect_push: bool | None = None,
+    apply_slice: bool = True,
 ) -> None:
     from polars import _plr
 
     path, frame = source
-    for offset, length in [(0, 8), (1, 5)]:
-        expected = (
-            frame.lazy()
-            .slice(offset, length)
-            .filter(predicate)
-            .select("row")
-            .collect(engine=engine)
-        )
+    regions = [(0, 8), (1, 5)] if apply_slice else [None]
+    for region in regions:
+        reference = frame.lazy()
+        query = pl.scan_vortex(path, push_predicate=push_predicate)
+        if region is not None:
+            offset, length = region
+            reference = reference.slice(offset, length)
+            query = query.slice(offset, length)
+        expected = reference.filter(predicate).select("row").collect(engine=engine)
         _plr.reset_vortex_io_metrics()
-        actual = (
-            pl.scan_vortex(path, push_predicate=push_predicate)
-            .slice(offset, length)
-            .filter(predicate)
-            .select("row")
-            .collect(engine=engine)
-        )
+        actual = query.filter(predicate).select("row").collect(engine=engine)
         assert_frame_equal(actual, expected)
         filters = _plr.get_vortex_io_metrics()[5]
         if not push_predicate or expect_push is False:
@@ -486,8 +482,21 @@ def test_native_vortex_between_exact_decimal_bounds(
         lower = pl.lit(Decimal("0.00"), dtype=pl.Decimal(12, 2))
         upper = pl.lit(Decimal("0.10"), dtype=pl.Decimal(12, 2))
     predicate = pl.col("amount").is_between(lower, upper, closed=closed)
+    # A strict implicit cast stays above a pre-filter Slice in the generic optimizer.
     _assert_typed_predicate(
-        typed_predicate_file, predicate, push_predicate, engine, expect_push=True
+        typed_predicate_file,
+        predicate,
+        push_predicate,
+        engine,
+        expect_push=typed_bounds,
+    )
+    _assert_typed_predicate(
+        typed_predicate_file,
+        predicate,
+        push_predicate,
+        engine,
+        expect_push=True,
+        apply_slice=False,
     )
 
 
