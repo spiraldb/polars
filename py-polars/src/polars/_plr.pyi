@@ -1020,6 +1020,14 @@ class PyLazyFrame:
         arrow_schema: ArrowSchemaExportable | None = None,
         encryption: PyParquetEncryption | None = None,
     ) -> PyLazyFrame: ...
+    def sink_vortex(
+        self,
+        target: SinkTarget,
+        sink_options: Any,
+        compression: str,
+        row_block_size: int | None,
+        include_dtype: bool,
+    ) -> PyLazyFrame: ...
     def sink_ipc(
         self,
         target: SinkTarget,

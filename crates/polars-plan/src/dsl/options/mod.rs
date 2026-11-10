@@ -248,6 +248,8 @@ pub enum FileWriteFormat {
     Csv(CsvWriterOptions),
     #[cfg(feature = "json")]
     NDJson(NDJsonWriterOptions),
+    #[cfg(feature = "vortex")]
+    Vortex(Arc<polars_vortex::VortexWriteOptions>),
 }
 
 impl FileWriteFormat {
@@ -261,6 +263,8 @@ impl FileWriteFormat {
             Self::Csv(_) => "csv",
             #[cfg(feature = "json")]
             Self::NDJson(_) => "jsonl",
+            #[cfg(feature = "vortex")]
+            Self::Vortex(_) => "vortex",
 
             #[allow(unreachable_patterns)]
             _ => unreachable!("enable file type features"),

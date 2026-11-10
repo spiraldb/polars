@@ -896,6 +896,52 @@ impl PyLazyFrame {
         .map_err(Into::into)
     }
 
+    #[cfg(feature = "vortex")]
+    #[pyo3(signature = (target, sink_options, compression, row_block_size, include_dtype))]
+    fn sink_vortex(
+        &self,
+        py: Python<'_>,
+        target: PyFileSinkDestination,
+        sink_options: PySinkOptions,
+        compression: &str,
+        row_block_size: Option<u64>,
+        include_dtype: bool,
+    ) -> PyResult<PyLazyFrame> {
+        use polars_vortex::{VortexCompression, VortexWriteOptions};
+
+        let compression = match compression {
+            "btrblocks" => VortexCompression::BtrBlocks,
+            "uncompressed" => VortexCompression::Uncompressed,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid vortex compression: {other:?} (expected 'btrblocks' or 'uncompressed')",
+                )));
+            },
+        };
+
+        let options = VortexWriteOptions {
+            compression,
+            row_block_size,
+            include_dtype,
+        };
+        let target = target.extract_file_sink_destination()?;
+        let unified_sink_args = sink_options.extract_unified_sink_args(target.cloud_scheme())?;
+
+        py.enter_polars(|| {
+            self.ldf
+                .read()
+                .clone()
+                .sink(
+                    target,
+                    FileWriteFormat::Vortex(Arc::new(options)),
+                    unified_sink_args,
+                )
+                .into()
+        })
+        .map(Into::into)
+        .map_err(Into::into)
+    }
+
     #[cfg(feature = "ipc")]
     #[pyo3(signature = (
         target, sink_options, compression, compat_level, record_batch_size, record_batch_statistics
