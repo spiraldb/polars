@@ -790,6 +790,7 @@ fn parquet_column_stats(
                     a.int_range
                 },
                 int_range_partial: !complete || (sampled && !widen_range),
+                int_range_bounds: None,
                 sampled_row_groups: a.row_groups.map(Arc::from),
             };
             (name, stats)
