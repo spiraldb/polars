@@ -719,6 +719,12 @@ fn rebuild_scan_from_expanded(
             metadata: None,
         },
 
+        #[cfg(feature = "vortex")]
+        FileScanDsl::Vortex { options } => FileScanIR::Vortex {
+            options,
+            metadata: None,
+        },
+
         #[cfg(feature = "parquet")]
         FileScanDsl::Parquet { options } => FileScanIR::Parquet {
             options,

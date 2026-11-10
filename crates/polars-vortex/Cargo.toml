@@ -1,0 +1,56 @@
+[package]
+name = "polars-vortex"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Vortex file format I/O for Polars"
+
+[dependencies]
+polars-async = { workspace = true }
+polars-buffer = { workspace = true }
+polars-config = { workspace = true }
+polars-core = { workspace = true, features = ["algorithm_group_by"] }
+polars-error = { workspace = true }
+polars-io = { workspace = true, features = ["async"] }
+polars-utils = { workspace = true }
+
+polars-arrow = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+
+vortex = { workspace = true, default-features = false, features = ["files", "tokio"] }
+
+# Match the upstream Arrow version that Vortex uses.
+arrow-array = { version = "59.2", features = ["ffi"] }
+arrow-schema = "59.2"
+
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+cloud = ["polars-io/cloud"]
+serde = ["dep:serde", "polars-io/serde", "polars-utils/serde"]
+dsl-schema = ["dep:schemars", "polars-core/dsl-schema", "polars-utils/dsl-schema"]
+object = ["polars-core/object"]
+dtype-extension = ["polars-core/dtype-extension"]
+dtype-f16 = ["polars-core/dtype-f16"]
+dtype-struct = ["polars-core/dtype-struct"]
+dtype-array = ["polars-core/dtype-array"]
+dtype-map = ["polars-core/dtype-map"]
+dtype-categorical = ["polars-core/dtype-categorical"]
+dtype-date = ["polars-core/dtype-date"]
+dtype-datetime = ["polars-core/dtype-datetime"]
+dtype-duration = ["polars-core/dtype-duration"]
+dtype-time = ["polars-core/dtype-time"]
+dtype-decimal = ["polars-core/dtype-decimal"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

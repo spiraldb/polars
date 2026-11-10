@@ -350,6 +350,62 @@ impl PyLazyFrame {
         Ok(lf.into())
     }
 
+    #[cfg(feature = "vortex")]
+    #[staticmethod]
+    #[pyo3(signature = (
+        sources, schema, scan_options, push_predicate, initial_read_size, scan_concurrency,
+        cache_mode_kind, cache_dedicated_bytes
+    ))]
+    fn new_from_vortex(
+        sources: Wrap<ScanSources>,
+        schema: Option<Wrap<Schema>>,
+        scan_options: PyScanOptions,
+        push_predicate: bool,
+        initial_read_size: Option<usize>,
+        scan_concurrency: Option<usize>,
+        cache_mode_kind: &str,
+        cache_dedicated_bytes: Option<u64>,
+    ) -> PyResult<Self> {
+        use polars_vortex::{VortexCacheMode, VortexScanOptions};
+
+        use crate::utils::to_py_err;
+
+        let segment_cache = match (cache_mode_kind, cache_dedicated_bytes) {
+            ("global", _) => VortexCacheMode::Global,
+            ("off", _) => VortexCacheMode::Off,
+            ("dedicated", Some(bytes)) => VortexCacheMode::Dedicated(bytes),
+            ("dedicated", None) => {
+                return Err(PyValueError::new_err(
+                    "cache_mode='dedicated' requires cache_dedicated_bytes",
+                ));
+            },
+            (other, _) => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown cache_mode_kind {other:?}; expected 'global', 'off', or 'dedicated'",
+                )));
+            },
+        };
+
+        let options = VortexScanOptions {
+            schema: schema.map(|x| Arc::new(x.0)),
+            push_predicate,
+            initial_read_size,
+            scan_concurrency: scan_concurrency.and_then(NonZeroUsize::new),
+            segment_cache,
+        };
+
+        let sources = sources.0;
+        let first_path = sources.first_path();
+        let unified_scan_args =
+            scan_options.extract_unified_scan_args(first_path.and_then(|x| x.scheme()))?;
+
+        let lf: LazyFrame = DslBuilder::scan_vortex(sources, options, unified_scan_args)
+            .map_err(to_py_err)?
+            .build()
+            .into();
+        Ok(lf.into())
+    }
+
     #[cfg(feature = "ipc")]
     #[staticmethod]
     #[pyo3(signature = (sources, record_batch_statistics, scan_options))]

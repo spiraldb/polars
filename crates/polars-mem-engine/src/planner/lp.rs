@@ -529,7 +529,8 @@ fn create_physical_plan_impl(
                         feature = "ipc",
                         feature = "csv",
                         feature = "json",
-                        feature = "scan_lines"
+                        feature = "scan_lines",
+                        feature = "vortex"
                     )),
                     expect(unreachable_patterns)
                 )]

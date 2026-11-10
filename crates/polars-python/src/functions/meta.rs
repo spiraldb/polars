@@ -95,3 +95,14 @@ pub fn get_trim_decimal_zeros() -> PyResult<Option<bool>> {
     use polars_core::fmt::get_trim_decimal_zeros;
     Ok(Some(get_trim_decimal_zeros()))
 }
+
+/// Set the default cache budget for subsequent Vortex file opens.
+///
+/// This budget applies to a fresh cache for each subsequent file open.
+/// The default budget is zero.
+#[cfg(feature = "vortex")]
+#[pyfunction]
+pub fn set_vortex_cache_bytes(bytes: u64) -> PyResult<()> {
+    polars_vortex::session::set_global_cache_bytes(bytes);
+    Ok(())
+}

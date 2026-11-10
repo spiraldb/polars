@@ -34,6 +34,7 @@ polars-stream = { workspace = true, optional = true }
 polars-testing = { workspace = true }
 polars-time = { workspace = true }
 polars-utils = { workspace = true, features = ["python"] }
+polars-vortex = { workspace = true, optional = true }
 
 arboard = { workspace = true, optional = true }
 bincode = { workspace = true }
@@ -155,6 +156,7 @@ parquet = [
   "polars-mem-engine/parquet",
   "dep:parquet-key-management",
 ]
+vortex = ["polars/vortex", "polars-mem-engine/vortex", "polars-lazy/vortex", "dep:polars-vortex", "polars-vortex/serde"]
 ipc = ["polars/ipc", "polars-mem-engine/ipc"]
 ipc_streaming = ["polars/ipc_streaming"]
 is_in = ["polars/is_in"]
