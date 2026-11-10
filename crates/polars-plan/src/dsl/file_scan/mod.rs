@@ -394,7 +394,13 @@ impl FileScanIR {
             #[cfg(feature = "ipc")]
             Self::Ipc { .. } => ScanFlags::empty(),
             #[cfg(feature = "vortex")]
-            Self::Vortex { .. } => ScanFlags::SPECIALIZED_PREDICATE_FILTER,
+            Self::Vortex { options, .. } => {
+                let mut flags = ScanFlags::SPECIALIZED_PREDICATE_FILTER;
+                if options.push_predicate {
+                    flags |= ScanFlags::SKIPS_BATCHES_BY_STATISTICS;
+                }
+                flags
+            },
             #[cfg(feature = "parquet")]
             Self::Parquet { options, .. } => {
                 let mut flags = ScanFlags::SPECIALIZED_PREDICATE_FILTER;

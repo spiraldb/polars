@@ -106,3 +106,15 @@ pub fn set_vortex_cache_bytes(bytes: u64) -> PyResult<()> {
     polars_vortex::session::set_global_cache_bytes(bytes);
     Ok(())
 }
+
+#[cfg(feature = "vortex")]
+#[pyfunction]
+pub fn get_vortex_io_metrics() -> (u64, u64, u64, u64, u64, u64) {
+    polars_vortex::read::read_at::io_metrics()
+}
+
+#[cfg(feature = "vortex")]
+#[pyfunction]
+pub fn reset_vortex_io_metrics() {
+    polars_vortex::read::read_at::reset_io_metrics();
+}
