@@ -14,5 +14,8 @@ The reader disables byte view compaction and requests 64-bit list offsets. These
 
 Map offsets still require a conversion to the Polars 64-bit representation. Nullable structs can require a new validity bitmap because Polars propagates parent nulls into children. These conversions preserve the shared value payloads.
 
+The writer rejects unsupported logical types rather than silently changing their values. Categorical and Enum values require an explicit cast to String. Vortex 0.93.0 does not support Duration or integer values wider than 64 bits through its Arrow importer.
 
+The writer requires a schema inside each file. `include_dtype=False` returns an error because the native reader does not accept an external file schema.
 
+The writer also rejects Object columns and custom extension types, including these types inside nested columns.

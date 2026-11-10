@@ -4124,6 +4124,61 @@ class DataFrame:
             )
         return target if return_bytes else None  # type: ignore[return-value]
 
+    def write_vortex(
+        self,
+        file: str | Path,
+        *,
+        compression: Literal["btrblocks", "uncompressed"] = "btrblocks",
+        row_block_size: int | None = None,
+        include_dtype: bool = True,
+        storage_options: StorageOptionsDict | None = None,
+        credential_provider: (
+            CredentialProviderFunction | Literal["auto"] | None
+        ) = "auto",
+    ) -> None:
+        """
+        Write to a Vortex file.
+
+        This method evaluates ``self.lazy().sink_vortex(file)`` with the
+        streaming engine.
+
+        Parameters
+        ----------
+        file
+            The destination accepts a local path or a cloud URL.
+        compression
+            Column encoding policy: ``"btrblocks"`` (default, adaptive per-column)
+            or ``"uncompressed"`` (no schemes selected).
+        row_block_size
+            Granularity of zone-level pruning. ``None`` (default) uses Vortex's
+            writer default. See ``LazyFrame.sink_vortex`` for details.
+        include_dtype
+            Include the schema in the file. Only True is supported.
+        storage_options
+            Cloud storage authentication and configuration.
+        credential_provider
+            Cloud credential provider.
+
+        See Also
+        --------
+        pl.scan_vortex : Lazily read a Vortex file.
+        pl.read_vortex : Eagerly read a Vortex file.
+        LazyFrame.sink_vortex : Write to a Vortex file in streaming mode.
+        """
+        from polars.lazyframe.opt_flags import QueryOptFlags
+
+        with contextlib.suppress(UnstableWarning):
+            self.lazy().sink_vortex(
+                file,
+                compression=compression,
+                row_block_size=row_block_size,
+                include_dtype=include_dtype,
+                storage_options=storage_options,
+                credential_provider=credential_provider,
+                optimizations=QueryOptFlags._eager(),
+                engine="streaming",
+            )
+
     @overload
     def write_ipc_stream(
         self,

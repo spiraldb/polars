@@ -2712,6 +2712,112 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         )
         return None
 
+    def sink_vortex(
+        self,
+        path: str | Path | IO[bytes] | PartitionBy,
+        *,
+        compression: Literal["btrblocks", "uncompressed"] = "btrblocks",
+        row_block_size: int | None = None,
+        include_dtype: bool = True,
+        maintain_order: bool = True,
+        storage_options: StorageOptionsDict | None = None,
+        credential_provider: CredentialProviderFunction
+        | Literal["auto"]
+        | None = "auto",
+        sync_on_close: SyncOnCloseMethod | None = None,
+        mkdir: bool = False,
+        lazy: bool = False,
+        engine: EngineType = "auto",
+        optimizations: QueryOptFlags = DEFAULT_QUERY_OPT_FLAGS,
+        _sinked_paths_callback: SinkedPathsCallback | None = None,
+    ) -> LazyFrame | None:
+        """
+        Evaluate the query in streaming mode and write to a Vortex file.
+
+        The sink uses the Polars target lifecycle. See ``pl.scan_vortex`` for reads.
+
+        Parameters
+        ----------
+        path
+            Local path, cloud URL, file object, or partition target.
+        compression
+            ``"btrblocks"`` selects adaptive encodings.
+            ``"uncompressed"`` disables adaptive compression.
+        row_block_size
+            Maximum rows per block. ``None`` selects the writer default.
+        include_dtype
+            Include the schema in the file. Only True is supported.
+        maintain_order
+            Preserve the input order.
+        storage_options
+            Cloud storage configuration.
+        credential_provider
+            Cloud credential provider.
+        sync_on_close
+            Synchronization policy for the completed target.
+        mkdir
+            Create parent directories if they do not exist.
+        lazy
+            Return a lazy sink plan if True. Otherwise, execute the sink.
+        engine
+            Engine that executes the sink.
+        optimizations
+            Query optimization flags.
+        _sinked_paths_callback
+            Internal callback for completed paths.
+
+        Returns
+        -------
+        LazyFrame | None
+            A lazy plan if ``lazy=True``. Otherwise, None.
+
+        See Also
+        --------
+        pl.scan_vortex : Read a Vortex file lazily.
+        pl.read_vortex : Read a Vortex file eagerly.
+        """
+        from polars.io.cloud.credential_provider._builder import (
+            _init_credential_provider_builder,
+        )
+
+        credential_provider_builder = _init_credential_provider_builder(
+            credential_provider, path, storage_options, "sink_vortex"
+        )
+        del credential_provider
+
+        from polars.lazyframe.sink_plan import _to_sink_target
+
+        _validate_engine(engine)
+        if row_block_size is not None and row_block_size <= 0:
+            msg = "row_block_size must be positive"
+            raise ValueError(msg)
+        target = _to_sink_target(path)
+
+        from polars.io.partition import _SinkOptions
+
+        sink_options = _SinkOptions(
+            mkdir=mkdir,
+            maintain_order=maintain_order,
+            sync_on_close=sync_on_close,
+            storage_options=storage_options,
+            credential_provider=credential_provider_builder,
+            sinked_paths_callback=_sinked_paths_callback,
+        )
+
+        ldf_py = self._ldf.sink_vortex(
+            target=target,
+            sink_options=sink_options,
+            compression=compression,
+            row_block_size=row_block_size,
+            include_dtype=include_dtype,
+        )
+
+        ldf = LazyFrame._from_pyldf(ldf_py)
+        if lazy:
+            return ldf
+        ldf.collect(engine=engine, optimizations=optimizations)
+        return None
+
     @overload
     def sink_delta(
         self,
